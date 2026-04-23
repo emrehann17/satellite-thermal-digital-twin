@@ -1,15 +1,49 @@
-# Uydu LST Tabanlı Termal Çevre Temsili Prototipi
+# Uydu Tabanlı 2B Termal Çevre Temsili Prototipi
 
-Bu proje, Google Earth Engine (GEE) üzerinden alınan MODIS uydu verilerini kullanarak Doğu Akdeniz (Adana/Mersin/Hatay) bölgesi için Yüzey Sıcaklığı (LST) boru hattı oluşturan ve sıcaklık anomalilerini görselleştiren bir veri mühendisliği prototipidir.
+Bu proje, Google Earth Engine (GEE) üzerinden alınan **MODIS LST** verilerini kullanarak Doğu Akdeniz bölgesi için **2B termal çevre temsili** oluşturan ve **sıcaklık anomalilerini görselleştiren** bir prototip sistemdir.
 
-## 🚀 Proje Kapsamı (Mevcut Durum)
-Sistem şu an temel bir veri işleme boru hattı (pipeline) olarak çalışmaktadır:
-1. **Veri Kaynağı:** MODIS/061/MOD11A1 (1km çözünürlük).
-2. **Sorgu ve Filtreleme:** Doğu Akdeniz bölgesi için son 5 yılın (2019-2023) sadece yaz ayları (Haziran-Eylül) filtrelenmektedir.
-3. **Dönüşüm ve İndirgeme:** GEE sunucularında DN -> °C dönüşümü yapılmakta ve 5 yıllık ortalama alınarak GeoTIFF formatında Google Drive'a aktarılmaktadır (Batch Export).
-4. **Yerel Ön İşleme:** İndirilen GeoTIFF dosyaları `rasterio` ile okunup, `matplotlib` ile 2B termal harita olarak görselleştirilmektedir.
+## Amaç
 
-## 🛠️ Kurulum ve Kullanım
-**1. Kütüphaneleri Yükleyin:**
+Uydu tabanlı yüzey sıcaklığı verilerini işleyerek belirli bir bölgedeki sıcaklık dağılımını incelemek ve ileride geliştirilebilecek dijital ikiz / risk analizi çalışmaları için temel bir yapı kurmak.
+
+## Kapsam
+
+Projede şu adımlar yer alır:
+
+- bölge seçimi
+- MODIS LST verisinin çekilmesi
+- sıcaklık dönüşümü
+- GeoTIFF üretimi
+- 2B görselleştirme
+- anomali haritası oluşturma
+
+## Mevcut Durum
+
+Tamamlanan kısımlar:
+
+- GEE bağlantısı
+- bölge tanımlama
+- veri çekme
+- sıcaklık rasteri oluşturma
+- GeoTIFF indirme / üretme
+- temel görselleştirme
+
+## Planlanan Çalışmalar
+
+Henüz tamamlanmamış kısımlar:
+
+- 3B görselleştirme katmanı
+- gelişmiş risk / anomali analizi
+- karar destek yapısı
+- Jetson / YOLO entegrasyonu
+
+## Veri Kaynağı
+
+- **MODIS/061/MOD11A1**
+- günlük kara yüzey sıcaklığı verisi
+- yaklaşık 1 km çözünürlük
+
+## Kurulum
+
 ```bash
 pip install -r requirements.txt

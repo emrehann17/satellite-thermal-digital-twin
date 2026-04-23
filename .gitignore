@@ -7,6 +7,8 @@ __pycache__/
 # Veriler ve Loglar (Bunlar senin yerelinde kalmalı)
 data/
 logs/
+outputs/
+
 
 # IDE ayarları
 .vscode/
