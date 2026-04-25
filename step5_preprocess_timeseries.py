@@ -61,3 +61,9 @@ def dn_to_celsius(dn_array: np.ndarray) -> np.ndarray:
     celcius = kelvin - 273.15
     return celcius
 
+#yapilacaklar
+#bulut maskeleme
+#tek bant raster
+#tek bant geotiff kayit etme
+#landsat geotiff iccin data array
+#main
