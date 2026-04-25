@@ -1,4 +1,6 @@
 earthengine-api
 rasterio
-matplotlib
 numpy
+matplotlib
+xarray
+requests

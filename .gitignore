@@ -6,7 +6,6 @@ __pycache__/
 *.pyc
 
 # Veriler ve Loglar (Bunlar senin yerelinde kalmalı)
-data/
 logs/
 outputs/
 old_codes/

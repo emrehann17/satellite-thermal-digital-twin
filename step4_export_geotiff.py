@@ -25,7 +25,7 @@ from core.regions import build_regions
 from core.io_utils import setup_logger
 
 
-from step2_export_5year_mean import process_summer_mean
+from step2_modis_5year_mean import process_summer_mean
 from step3_landsat_lst import process_landsat_lst
 
 
