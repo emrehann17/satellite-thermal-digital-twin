@@ -20,7 +20,7 @@ from pathlib import Path
 
 import ee
 
-from core.config import GEE_PROJECT, LANDSAT_COLLECTION, START_DATE, END_DATE
+from core.config import *
 from core.gee_utils import init_gee
 from core.regions import build_regions
 from core.io_utils import setup_logger
@@ -51,22 +51,30 @@ def process_landsat_lst(
     log.info(f"Landsat LST işleme başlatıldı. Bölge: {region_name}")
     log.info(f"Tarih aralığı: {start} -> {end}")
 
-    collection = (
+    base_collection = (
         ee.ImageCollection(LANDSAT_COLLECTION)
         .filterBounds(region)
         .filterDate(start, end)
+    )
+
+    base_count = base_collection.size().getInfo()
+    log.info(f"{start} - {end} aralığındaki Landsat görüntü sayısı: {base_count}")
+    
+    filtered_collection = (
+        base_collection
+        .filter(ee.Filter.calendarRange(6,9, "month"))
         .select("ST_B10")
     )
 
-    image_count = collection.size().getInfo()
-    log.info(f"Filtre sonrası Landsat görüntü sayısı: {image_count}")
+    image_count = filtered_collection.size().getInfo()
+    log.info(f"{start} - {end} aralığındaki Yaz aylarındaki Landsat görüntü sayısı: {image_count}")
 
     if image_count == 0:
         raise ValueError(
-            f"{region_name} bölgesi için {start} - {end} aralığında Landsat görüntüsü bulunamadı."
+            f"{region_name} bölgesi için {start} - {end} aralığında yaz aylarında Landsat görüntüsü bulunamadı."
         )
 
-    first_image = collection.first()
+    first_image = filtered_collection.first()
     first_image_date = (
         ee.Date(first_image.get("system:time_start"))
         .format("YYYY-MM-dd")
@@ -77,7 +85,7 @@ def process_landsat_lst(
     # Kelvin = DN * 0.00341802 + 149.0
     # Celsius = Kelvin - 273.15
     landsat_lst = (
-        collection
+        filtered_collection
         .mean()
         .multiply(0.00341802)
         .add(149.0)
@@ -86,7 +94,7 @@ def process_landsat_lst(
         .clip(region)
     )
 
-    metadata = {
+    metadata = { #buraya filtre atılmaz. burası veri değil veri hakkında bilgi içerir
         "gee_project": GEE_PROJECT,
         "region_name": region_name,
         "collection": LANDSAT_COLLECTION,
@@ -94,8 +102,8 @@ def process_landsat_lst(
         "unit": "Celsius",
         "date_start": start,
         "date_end": end,
-        "months": "6-9",
-        "image_count": image_count,
+        "all_image_count": base_count,
+        "filtered_image_count": image_count,
         "first_image_date": first_image_date,
         "resolution": "30m",
         "created_at": datetime.now().isoformat(),

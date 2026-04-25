@@ -16,7 +16,7 @@ from pathlib import Path
 
 import ee
 
-from core.config import GEE_PROJECT, MODIS_COLLECTION, START_DATE, END_DATE
+from core.config import *
 from core.gee_utils import init_gee
 from core.regions import build_regions
 from core.io_utils import setup_logger
@@ -32,7 +32,12 @@ log, log_file = setup_logger("step2")
 # =============================================================================
 # 1. 5 YILLIK YAZ LST GÖRÜNTÜSÜNÜ HAZIRLAMA
 # =============================================================================
-def process_summer_mean(region: ee.Geometry, region_name: str) -> tuple[ee.Image, dict]:
+def process_summer_mean(
+        region: ee.Geometry,
+        region_name: str,
+        start: str = START_DATE,
+        end: str = END_DATE
+    ) -> tuple[ee.Image, dict]:
     """
     2019-2023 arası yaz aylarının (Haziran-Eylül) MODIS LST ortalamasını hesaplar.
     Export yapmaz. Sadece işlenmiş ee.Image üretir.
@@ -113,7 +118,9 @@ def main():
 
     mean_image, metadata = process_summer_mean(
         region=regions["dogu_akdeniz"],
-        region_name="dogu_akdeniz"
+        region_name="dogu_akdeniz",
+        start=START_DATE,
+        end=END_DATE
     )
 
     metadata_path = save_metadata(metadata)

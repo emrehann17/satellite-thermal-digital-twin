@@ -1,6 +1,7 @@
 <<<<<<< HEAD
 # Python kütüphaneleri
 venv/
+env/
 __pycache__/
 *.pyc
 
@@ -8,6 +9,7 @@ __pycache__/
 data/
 logs/
 outputs/
+old_codes/
 
 
 # IDE ayarları

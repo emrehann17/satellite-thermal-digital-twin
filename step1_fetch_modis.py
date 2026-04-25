@@ -15,7 +15,7 @@ from pathlib import Path
 
 import ee
 
-from core.config import MODIS_COLLECTION, START_DATE, END_DATE, GEE_PROJECT
+from core.config import *
 from core.gee_utils import init_gee
 from core.regions import build_regions
 from core.io_utils import setup_logger
@@ -31,18 +31,10 @@ log, log_file = setup_logger("step1")
 # =============================================================================
 # 1. MODIS LST KOLEKSİYONU SORGULAMA
 # =============================================================================
-def fetch_modis_lst(region: ee.Geometry, start: str = START_DATE, end: str = END_DATE) -> tuple[ee.Image, dict]:
+def fetch_modis_lst(region: ee.Geometry, region_name: str, start: str = START_DATE, end: str = END_DATE) -> tuple[ee.Image, dict]:
     """
     MODIS MOD11A1 koleksiyonunu verilen bölge ve tarih aralığına göre filtreler.
     LST_Day_1km bandını seçer, zaman ortalaması alır ve Celsius'a çevirir.
-
-    Parametreler:
-        region : ee.Geometry
-        start  : str
-        end    : str
-
-    Dönüş:
-        (lst_celsius_image, metadata_dict)
     """
     log.info(f"MODIS sorgusu başlatıldı. Tarih aralığı: {start} -> {end}")
 
@@ -125,12 +117,10 @@ def main() -> None:
     # 3) Doğu Akdeniz için LST görüntüsünü hazırla
     lst_image, metadata = fetch_modis_lst(
         region=regions["dogu_akdeniz"],
+        region_name="dogu_akdeniz",
         start=START_DATE,
         end=END_DATE
     )
-
-    # Bölge adı metadata içine sonradan ekleniyor
-    metadata["region_name"] = "dogu_akdeniz"
 
     # 4) Metadata kaydet
     metadata_path = save_metadata(metadata)

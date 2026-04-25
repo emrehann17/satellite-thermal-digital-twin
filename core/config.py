@@ -5,3 +5,11 @@ LANDSAT_COLLECTION = "LANDSAT/LC08/C02/T1_L2"
 
 START_DATE = "2019-01-01"
 END_DATE = "2023-12-31"
+
+EXPORT_FOLDER = "B7_Thermal_Digital_Twin"
+
+MODIS_EXPORT_DESCRIPTION = "export_modis_lst_5y_summer_mean"
+LANDSAT_EXPORT_DESCRIPTION = "export_landsat_lst_5y_summer_mean"
+
+MODIS_FILE_PREFIX = "modis_lst_dogu_akdeniz_5y_summer_mean"
+LANDSAT_FILE_PREFIX = "landsat_lst_dogu_akdeniz_5y_summer_mean"
