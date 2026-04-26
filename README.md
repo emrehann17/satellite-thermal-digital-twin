@@ -34,12 +34,14 @@ Projede şu adımlar yer almaktadır:
 - MODIS GeoTIFF export akışı
 - Landsat LST ve QA GeoTIFF export akışı
 - modüler proje yapısı (`core/` + step dosyaları)
-- Step5 için raster okuma, QA tabanlı maskeleme, zaman serisi oluşturma ve temel anomali üretimi üzerinde çalışma
+- Step5 için raster okuma, QA tabanlı maskeleme, zaman serisi ve anomali üretimi mantığı kodlanmış olup doğrulama ve test süreci devam etmektedir
 
 ## Geliştirme Aşamasında Olan Kısımlar
 
 Henüz test / iyileştirme aşamasında olan bölümler:
 
+- Step4 export sonrası GeoTIFF dosyalarının şu an manuel olarak indirilip uygun klasörlere yerleştirilmesi
+- aynı tarihte birden fazla Landsat sahnesi geldiğinde bunların birleştirilmesi / yönetimi
 - Step5 zaman serisi ön işleme akışının kararlı hale getirilmesi
 - çoklu Landsat sahnelerinde aynı tarihli görüntülerin yönetimi
 - QA dosyası eşleştirme ve maskeleme akışının güçlendirilmesi
@@ -80,7 +82,7 @@ Projede genel iş akışı şu şekildedir:
 2. MODIS verisi ile Doğu Akdeniz bölgesi için 5 yıllık yaz dönemi ortalama sıcaklık görüntüsü üretilir.
 3. Landsat verisi ile aynı bölge için yüksek çözünürlüklü yüzey sıcaklığı görüntüleri hazırlanır.
 4. MODIS referans çıktıları ve Landsat zaman serisi LST / QA rasterları GeoTIFF olarak export edilir.
-5. Python tarafında raster veriler okunur, sıcaklık dönüşümü uygulanır, QA tabanlı bulut maskeleme yapılır ve zaman serisi oluşturulur.
+5. Python tarafında raster veriler okunur, sıcaklık dönüşümü ve QA tabanlı maskeleme uygulanacak şekilde yapı kurulmuştur. Zaman serisi ve anomali üretimi aşaması geliştirilmekte ve test edilmektedir.
 6. Ortalama LST ve anomali rasterları üretilir.
 7. Sonraki aşamalarda 3B görselleştirme, yangın riski analizi ve karar destek katmanları eklenecektir.
 
@@ -124,7 +126,8 @@ MODIS referans çıktılarının ve Landsat zaman serisi LST / QA rasterlarını
 
 ### Step 5
 
-Python tarafında raster okuma, sıcaklık dönüşümü, QA tabanlı bulut maskeleme, zaman serisi oluşturma, interpolasyon ve anomali üretimi için ayrılmış adımdır. Bu kısım hâlen geliştirme ve test aşamasındadır.
+Python tarafında raster okuma, sıcaklık dönüşümü, QA tabanlı bulut maskeleme, zaman serisi oluşturma, interpolasyon ve anomali üretimi için ayrılmış adımdır.
+Bu adım kod seviyesinde oluşturulmuş olup, GEE export süresi ve veri hazırlama süreçleri nedeniyle hâlen test ve doğrulama aşamasındadır.
 
 ## Kurulum
 
@@ -165,6 +168,10 @@ Google Earth Engine erişimi için kimlik doğrulaması yapın:
 earthengine authenticate
 ```
 
+```bash
+Step4 sonrasında export edilen GeoTIFF dosyaları şu an Google Drive üzerinden manuel olarak indirilmekte ve Step5 için ilgili veri klasörlerine yerleştirilmektedir.
+```
+
 ## Çalıştırma Sırası
 
 ```bash
@@ -177,7 +184,7 @@ python step5_preprocess_timeseries.py
 
 ## Örnek Çıktılar
 
-Bu bölüm henüz geliştirme aşamasındadır. İlerleyen güncellemelerde MODIS ortalama sıcaklık çıktısı, Landsat zaman serisi örnekleri ve Step5 ön işleme çıktıları görsel olarak eklenecektir.
+Bu bölüm henüz geliştirme aşamasındadır. İlerleyen güncellemelerde MODIS ortalama sıcaklık çıktısı, Landsat zaman serisi örnekleri ve Step5 ön işleme çıktıları testler tamamlandıktan sonra görsel olarak eklenecektir.
 
 ## Not
 
