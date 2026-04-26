@@ -26,7 +26,7 @@ from core.io_utils import setup_logger
 
 
 from step2_modis_5year_mean import process_summer_mean
-from step3_landsat_lst import process_landsat_lst
+from step3_landsat_lst import get_landsat_timeseries_collection, process_landsat_lst
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -40,12 +40,12 @@ log, log_file = setup_logger("step4")
 # =============================================================================
 
 def export_image_to_drive(
-    image = ee.Image,
-    region = ee.Geometry,
-    description = str,
-    folder = str,
-    file_name_prefix = str,
-    scale = int,
+    image : ee.Image,
+    region : ee.Geometry,
+    description : str,
+    folder : str,
+    file_name_prefix : str,
+    scale : int,
     crs : str = "EPSG:4326"
 ) -> dict:
     
@@ -98,7 +98,120 @@ def export_image_to_drive(
     }
 
 # =============================================================================
-# 2. METADATA KAYDETME
+# 2. LANDSAT TIMESERIES COLLECTION EXPORT
+# =============================================================================
+def export_landsat_timeseries_lst_and_qa_to_drive(
+    collection: ee.ImageCollection,
+    region: ee.Geometry,
+    folder: str,
+    file_prefix: str,
+    scale: int = 30,
+    crs: str = "EPSG:4326",
+    max_exports: int = 20
+) -> list[dict]:
+    """
+    Landsat zaman serisi collection'ındaki her görüntü için
+    ST_B10 ve QA_PIXEL bantlarını ayrı GeoTIFF dosyaları olarak export eder.
+
+    Çıktılar:
+        - landsat_lst_YYYY-MM-DD.tif
+        - landsat_lst_YYYY-MM-DD_qa.tif
+    """
+    image_count = collection.size().getInfo()
+    export_count = min(image_count, max_exports)
+
+    log.info(f"Landsat zaman serisi toplam görüntü sayısı: {image_count}")
+    log.info(f"Export edilecek görüntü sayısı: {export_count}")
+
+    limited_collection = (
+        collection
+        .sort("system:time_start")
+        .limit(export_count)
+    )
+
+    collection_list = limited_collection.toList(export_count)
+
+    export_metadata = []
+
+    for i in range(export_count):
+        image = ee.Image(collection_list.get(i))
+
+        date_text = (
+            ee.Date(image.get("system:time_start"))
+            .format("YYYY-MM-dd")
+            .getInfo()
+        )
+
+        lst_image = image.select("ST_B10")
+        qa_image = image.select("QA_PIXEL")
+
+        unique_suffix = f"{i+1:03d}"
+
+        lst_description = f"export_{file_prefix}_{date_text}_{unique_suffix}"
+        lst_file_name = f"{file_prefix}_{date_text}_{unique_suffix}"
+
+        qa_description = f"export_{file_prefix}_{date_text}_{unique_suffix}_qa"
+        qa_file_name = f"{file_prefix}_{date_text}_{unique_suffix}_qa"
+
+        log.info(f"[{i + 1}/{export_count}] LST export başlatılıyor: {lst_file_name}")
+
+        lst_task = ee.batch.Export.image.toDrive(
+            image=lst_image,
+            description=lst_description,
+            folder=folder,
+            fileNamePrefix=lst_file_name,
+            region=region,
+            scale=scale,
+            crs=crs,
+            maxPixels=1e13,
+            fileFormat="GeoTIFF"
+        )
+        lst_task.start()
+        lst_status = lst_task.status()
+
+        log.info(f"[{i + 1}/{export_count}] QA export başlatılıyor: {qa_file_name}")
+
+        qa_task = ee.batch.Export.image.toDrive(
+            image=qa_image,
+            description=qa_description,
+            folder=folder,
+            fileNamePrefix=qa_file_name,
+            region=region,
+            scale=scale,
+            crs=crs,
+            maxPixels=1e13,
+            fileFormat="GeoTIFF"
+        )
+        qa_task.start()
+        qa_status = qa_task.status()
+
+        export_metadata.append({
+            "index": i + 1,
+            "date": date_text,
+            "folder": folder,
+            "scale": scale,
+            "crs": crs,
+            "lst": {
+                "band": "ST_B10",
+                "description": lst_description,
+                "file_name_prefix": lst_file_name,
+                "task_id": lst_status.get("id"),
+                "task_state": lst_status.get("state")
+            },
+            "qa": {
+                "band": "QA_PIXEL",
+                "description": qa_description,
+                "file_name_prefix": qa_file_name,
+                "task_id": qa_status.get("id"),
+                "task_state": qa_status.get("state")
+            }
+        })
+
+    return export_metadata
+
+
+# =============================================================================
+# 3. METADATA KAYDETME
 # =============================================================================
 def save_metadata(metadata: dict, filename: str = "step4_metadata.json") -> Path:
     """
@@ -133,8 +246,16 @@ def main() -> None:
         end=END_DATE
     )
 
-    log.info("Step3 Landsat LST görüntüsü üretiliyor.")
+    """log.info("Step3 Landsat tek görüntü LST ürünü hazırlanıyor.")
     landsat_image, landsat_processing_metadata = process_landsat_lst(
+        region=region,
+        region_name="dogu_akdeniz",
+        start=START_DATE,
+        end=END_DATE
+    )"""
+
+    log.info("Step3 Landsat zaman serisi koleksiyonu hazırlanıyor.")
+    landsat_timeseries_collection, landsat_timeseries_metadata = get_landsat_timeseries_collection(
         region=region,
         region_name="dogu_akdeniz",
         start=START_DATE,
@@ -150,13 +271,12 @@ def main() -> None:
         scale=1000
     )
 
-    landsat_export_metadata = export_image_to_drive(
-        image=landsat_image,
+    landsat_timeseries_exports = export_landsat_timeseries_lst_and_qa_to_drive(
+        collection=landsat_timeseries_collection,
         region=region,
-        description=LANDSAT_EXPORT_DESCRIPTION,
         folder=EXPORT_FOLDER,
-        file_name_prefix=LANDSAT_FILE_PREFIX,
-        scale=30
+        file_prefix="landsat_lst_dogu_akdeniz",
+        max_exports=MAX_LANDSAT_TIMESERIES_EXPORTS
     )
 
     metadata = {
@@ -165,16 +285,17 @@ def main() -> None:
         "date_start": START_DATE,
         "date_end": END_DATE,
         "export_folder": EXPORT_FOLDER,
+        "max_landsat_timeseries_exports": MAX_LANDSAT_TIMESERIES_EXPORTS,
         "created_at": datetime.now().isoformat(),
+        "log_file": str(log_file),
         "modis_processing_metadata": modis_processing_metadata,
-        "landsat_processing_metadata": landsat_processing_metadata,
+        "landsat_timeseries_metadata": landsat_timeseries_metadata,
         "exports": {
             "modis": modis_export_metadata,
-            "landsat": landsat_export_metadata
+            "landsat_timeseries": landsat_timeseries_exports
         },
         "status": "export_tasks_started"
     }
-
     metadata_path = save_metadata(metadata)
 
     log.info("=" * 60)
@@ -183,9 +304,8 @@ def main() -> None:
     log.info("Google Drive export görevleri başlatıldı.")
     log.info("=" * 60)
 
-
 if __name__ == "__main__":
     main()
 
 
-    
+#LOG DOSYALARI UST USTE BINIYOR VE LOG DOSYASI BOŞ GÖRÜNÜYOR BUNU ÇÖZ

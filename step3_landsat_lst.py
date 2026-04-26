@@ -113,9 +113,68 @@ def process_landsat_lst(
     log.info("Landsat LST işleme başarıyla tamamlandı.")
     return landsat_lst, metadata
 
+# =============================================================================
+# 2. LANDSAT TIMESERIES COLLECTION ÜRETME
+# =============================================================================
+def get_landsat_timeseries_collection(
+    region: ee.Geometry,
+    region_name: str,
+    start: str = START_DATE,
+    end: str = END_DATE
+) -> tuple[ee.ImageCollection, dict]:
+    """
+    Step4 tarafından tarih tarih export edilecek Landsat zaman serisi collection'ını hazırlar.
+
+    NOT:
+        Bu fonksiyon export yapmaz.
+        ST_B10 ve QA_PIXEL bandlarını birlikte döndürür.
+    """
+    log.info(f"Landsat zaman serisi collection hazırlanıyor. Bölge: {region_name}")
+    log.info(f"Tarih aralığı: {start} -> {end}")
+
+    base_collection = (
+        ee.ImageCollection(LANDSAT_COLLECTION)
+        .filterBounds(region)
+        .filterDate(start, end)
+    )
+
+    base_count = base_collection.size().getInfo()
+
+    filtered_collection = (
+        base_collection
+        .filter(ee.Filter.calendarRange(6, 9, "month"))
+        .select(["ST_B10", "QA_PIXEL"])
+        .map(lambda image: image.clip(region))
+    )
+
+    filtered_count = filtered_collection.size().getInfo()
+
+    if filtered_count == 0:
+        raise ValueError(
+            f"{region_name} bölgesi için {start} - {end} aralığında yaz aylarına ait Landsat görüntüsü bulunamadı."
+        )
+
+    metadata = {
+        "gee_project": GEE_PROJECT,
+        "region_name": region_name,
+        "collection": LANDSAT_COLLECTION,
+        "bands": ["ST_B10", "QA_PIXEL"],
+        "date_start": start,
+        "date_end": end,
+        "months_filter": "6-9",
+        "all_image_count": base_count,
+        "filtered_image_count": filtered_count,
+        "status": "timeseries_collection_prepared"
+    }
+
+    log.info(f"Tüm Landsat görüntü sayısı: {base_count}")
+    log.info(f"Yaz ayları filtreli Landsat görüntü sayısı: {filtered_count}")
+
+    return filtered_collection, metadata
+
 
 # =============================================================================
-# 2. METADATA KAYDETME
+# 3. METADATA KAYDETME
 # =============================================================================
 def save_metadata(metadata: dict, filename: str = "step3_metadata.json") -> Path:
     """
@@ -141,7 +200,7 @@ def main() -> None:
     init_gee()
     regions = build_regions()
 
-    landsat_lst_image, metadata = process_landsat_lst(
+    landsat_timeseries, metadata = get_landsat_timeseries_collection(
         region=regions["dogu_akdeniz"],
         region_name="dogu_akdeniz",
         start=START_DATE,
@@ -153,11 +212,11 @@ def main() -> None:
     log.info("=" * 60)
     log.info("STEP 3 TAMAMLANDI")
     log.info(f"Metadata dosyası: {metadata_path}")
-    log.info("Hazırlanan çıktı: ee.Image tipinde yüksek çözünürlüklü Landsat LST görüntüsü")
+    log.info("Hazırlanan çıktı: ee.ImageCollection tipinde yüksek çözünürlüklü Landsat zaman serisi")
     log.info("Sonraki adım: step4")
     log.info("=" * 60)
 
-    _ = landsat_lst_image
+    _ = landsat_timeseries # Step4'te kullanılmak üzere döndürülen collection burada tutulur
 
 
 if __name__ == "__main__":
