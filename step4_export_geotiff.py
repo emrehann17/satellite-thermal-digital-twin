@@ -14,12 +14,26 @@ NOT:
     Sadece Step2 ve Step3 çıktılarını dışa aktarır.
 """
 import json
+import requests
 from datetime import datetime
 from pathlib import Path
 
 import ee
 
-from core.config import *
+from core.config import (
+    START_DATE,
+    END_DATE,
+    REGION_NAME,
+    EXPORT_FOLDER,
+    MAX_LANDSAT_DAILY_EXPORTS,
+    EXPORT_CRS,
+    MODIS_EXPORT,
+    LANDSAT_EXPORT,
+    ENABLE_MODIS_EXPORT,
+    ENABLE_LANDSAT_EXPORT,
+    DOWNLOAD_MODE,
+)
+
 from core.gee_utils import init_gee
 from core.regions import build_regions
 from core.io_utils import setup_logger
@@ -40,15 +54,14 @@ log, log_file = setup_logger("step4")
 # =============================================================================
 
 def export_image_to_drive(
-    image : ee.Image,
-    region : ee.Geometry,
-    description : str,
-    folder : str,
-    file_name_prefix : str,
-    scale : int,
-    crs : str = "EPSG:4326"
+    image: ee.Image,
+    region: ee.Geometry,
+    description: str,
+    folder: str,
+    file_name_prefix: str,
+    scale: int,
+    crs: str = EXPORT_CRS,
 ) -> dict:
-    
 
     """
     Verilen ee.Image nesnesini belirtilen bölge,
@@ -101,40 +114,47 @@ def export_image_to_drive(
 # 2. LANDSAT DAILY LST+QA EXPORT 
 # =============================================================================
 def export_landsat_timeseries_lst_and_qa_to_drive(
-    collection: ee.ImageCollection,
+collection: ee.ImageCollection,
     date_list: list[str],
     region: ee.Geometry,
     folder: str,
     file_prefix: str,
-    scale: int = 30,
-    crs: str = "EPSG:4326",
+    scale: int = LANDSAT_EXPORT["scale"],
+    crs: str = EXPORT_CRS,
     max_exports: int = 20,
-    total_count: int | None = None
+    download_mode: str = "drive",
 ) -> list[dict]:
-    
     """
-    Landsat zaman serisi collection'ındaki her görüntü için
-    ST_B10 ve QA_PIXEL bantlarını ayrı GeoTIFF dosyaları olarak export eder.
+    Landsat günlük composite collection'ındaki her görüntü için
+    ST_B10 ve QA_PIXEL bantlarını export eder.
 
-    Çıktılar:
-        - landsat_lst_YYYY-MM-DD.tif
-        - landsat_lst_YYYY-MM-DD_qa.tif
+    download_mode:
+        - "drive"  -> Google Drive export
+        - "direct" -> ee.Image.getDownloadURL ile doğrudan yerel indirme
     """
-    
+    if not date_list:
+        log.warning("date_list boş geldi. Landsat export başlatılmadı.")
+        return []
+
     export_count = min(len(date_list), max_exports)
 
-    log.info(f"Export edilecek görüntü sayısı: {export_count}")
-    log.info(f"Toplam export görevleri: {export_count * 2} (her görüntü için LST ve QA)")
+    if export_count == 0:
+        log.warning("export_count = 0. Landsat export başlatılmadı.")
+        return []
+
+    log.info(f"Export edilecek günlük Landsat görüntü sayısı: {export_count}")
+    log.info(f"Çalışma modu: {download_mode}")
 
     limited_collection = (
         collection
-        .sort("system:time_start")
+        .sort("export_date")
         .limit(export_count)
     )
 
     collection_list = limited_collection.toList(export_count)
-
     export_metadata = []
+
+    lst_dir, qa_dir = ensure_direct_download_dirs() if download_mode == "direct" else (None, None)
 
     for i in range(export_count):
         image = ee.Image(collection_list.get(i))
@@ -149,44 +169,42 @@ def export_landsat_timeseries_lst_and_qa_to_drive(
         qa_description = f"export_{file_prefix}_{date_text}_qa"
         qa_file_name = f"{file_prefix}_{date_text}_qa"
 
-        log.info(f"[{i + 1}/{export_count}] LST export başlatılıyor:"
-                 f"{lst_file_name} (source scenes: {date_text})"
-        )
-        
-        lst_task = ee.batch.Export.image.toDrive(
-            image=lst_image,
-            description=lst_description,
-            folder=folder,
-            fileNamePrefix=lst_file_name,
-            region=region,
-            scale=scale,
-            crs=crs,
-            maxPixels=1e13,
-            fileFormat="GeoTIFF"
-        )
+        if download_mode == "drive":
+            log.info(f"[{i + 1}/{export_count}] LST Drive export: {lst_file_name}")
 
-        lst_task.start()
-        lst_status = lst_task.status()
+            lst_task = ee.batch.Export.image.toDrive(
+                image=lst_image,
+                description=lst_description,
+                folder=folder,
+                fileNamePrefix=lst_file_name,
+                region=region,
+                scale=scale,
+                crs=crs,
+                maxPixels=1e13,
+                fileFormat="GeoTIFF",
+            )
+            lst_task.start()
+            lst_status = lst_task.status()
 
-        log.info(f"[{i + 1}/{export_count}] QA export başlatılıyor: {qa_file_name}")
+            log.info(f"[{i + 1}/{export_count}] QA Drive export: {qa_file_name}")
 
-        qa_task = ee.batch.Export.image.toDrive(
-            image=qa_image,
-            description=qa_description,
-            folder=folder,
-            fileNamePrefix=qa_file_name,
-            region=region,
-            scale=scale,
-            crs=crs,
-            maxPixels=1e13,
-            fileFormat="GeoTIFF"
-        )
-        qa_task.start()
-        qa_status = qa_task.status()
+            qa_task = ee.batch.Export.image.toDrive(
+                image=qa_image,
+                description=qa_description,
+                folder=folder,
+                fileNamePrefix=qa_file_name,
+                region=region,
+                scale=scale,
+                crs=crs,
+                maxPixels=1e13,
+                fileFormat="GeoTIFF",
+            )
+            qa_task.start()
+            qa_status = qa_task.status()
 
-        export_metadata.append(
-            {
+            export_metadata.append({
                 "date": date_text,
+                "mode": "drive",
                 "folder": folder,
                 "scale": scale,
                 "crs": crs,
@@ -195,23 +213,111 @@ def export_landsat_timeseries_lst_and_qa_to_drive(
                     "description": lst_description,
                     "file_name_prefix": lst_file_name,
                     "task_id": lst_status.get("id"),
-                    "task_state": lst_status.get("state")
+                    "task_state": lst_status.get("state"),
                 },
                 "qa": {
                     "band": "QA_PIXEL",
                     "description": qa_description,
                     "file_name_prefix": qa_file_name,
                     "task_id": qa_status.get("id"),
-                    "task_state": qa_status.get("state")
+                    "task_state": qa_status.get("state"),
                 },
-            }
-        )
+            })
+
+        elif download_mode == "direct":
+            log.info(f"[{i + 1}/{export_count}] LST direct download: {lst_file_name}")
+            lst_meta = download_image_via_url(
+                image=lst_image,
+                region=region,
+                output_path=lst_dir / f"{lst_file_name}.tif",
+                scale=scale,
+                crs=crs,
+            )
+
+            log.info(f"[{i + 1}/{export_count}] QA direct download: {qa_file_name}")
+            qa_meta = download_image_via_url(
+                image=qa_image,
+                region=region,
+                output_path=qa_dir / f"{qa_file_name}.tif",
+                scale=scale,
+                crs=crs,
+            )
+
+            export_metadata.append({
+                "date": date_text,
+                "mode": "direct",
+                "scale": scale,
+                "crs": crs,
+                "lst": {
+                    "band": "ST_B10",
+                    **lst_meta,
+                },
+                "qa": {
+                    "band": "QA_PIXEL",
+                    **qa_meta,
+                },
+            })
+
+        else:
+            raise ValueError(f"Desteklenmeyen download_mode: {download_mode}")
 
     return export_metadata
 
+# =============================================================================
+# 3. DOWNLOAD MODE - GOOGLE DRIVE'DAN DOSYA İNDİRME
+# =============================================================================
+def ensure_direct_download_dirs() -> tuple[Path, Path]:
+    """
+    Direct download için yerel klasörleri hazırlar.
+    """
+    lst_dir = BASE_DIR / "data" / "landsat_timeseries"
+    qa_dir = BASE_DIR / "data" / "landsat_qa"
+
+    lst_dir.mkdir(parents=True, exist_ok=True)
+    qa_dir.mkdir(parents=True, exist_ok=True)
+
+    return lst_dir, qa_dir
+
+
+def download_image_via_url(
+    image: ee.Image,
+    region: ee.Geometry,
+    output_path: Path,
+    scale: int,
+    crs: str = EXPORT_CRS
+) -> dict:
+    """
+    ee.Image.getDownloadURL ile tek görüntüyü doğrudan indirir.
+    Küçük bölgeler ve test amaçlı kullanıma uygundur.
+    """
+    url = image.getDownloadURL({
+        "region": region,
+        "scale": scale,
+        "crs": crs,
+        "format": "GEO_TIFF"
+    }
+    )
+
+    log.info(f"Direct download başlatılıyor: {output_path.name}")
+
+    response = requests.get(url, timeout=300)
+    response.raise_for_status()
+
+    with open(output_path, "wb") as f:
+        f.write(response.content)
+
+    log.info(f"Direct download tamamlandı: {output_path}")
+
+    return {
+        "output_path": str(output_path),
+        "scale": scale,
+        "crs": crs,
+        "download_method": "getDownloadURL",
+        "downloaded_at": datetime.now().isoformat()
+    }
 
 # =============================================================================
-# 3. METADATA KAYDETME
+# 4. METADATA KAYDETME
 # =============================================================================
 def save_metadata(metadata: dict, filename: str = "step4_metadata.json") -> Path:
     """
@@ -238,67 +344,107 @@ def main() -> None:
     regions = build_regions()
     region = regions[REGION_NAME]
 
-    '''log.info("Step2 MODIS görüntüsü üretiliyor.")
-    modis_image, modis_processing_metadata = process_summer_mean(
-        region=region,
-        region_name=REGION_NAME,
-        start=START_DATE,
-        end=END_DATE
-    )
-    '''
+    modis_export_metadata = None
+    modis_processing_metadata = None
 
-    log.info("Step3 Landsat zaman serisi koleksiyonu hazırlanıyor.")
-    landsat_daily_collection, landsat_processing_metadata = get_landsat_daily_median_collection(
-        region=region,
-        region_name=REGION_NAME,
-        start=START_DATE,
-        end=END_DATE
-    )
+    if ENABLE_MODIS_EXPORT:
+        log.info("Step2 MODIS görüntüsü üretiliyor.")
+        modis_image, modis_processing_metadata = process_summer_mean(
+            region=region,
+            region_name=REGION_NAME,
+            start=START_DATE,
+            end=END_DATE
+        )
 
-    '''modis_export_metadata = export_image_to_drive(
-        image=modis_image,
-        region=region,
-        description=MODIS_EXPORT["description"],
-        folder=EXPORT_FOLDER,
-        file_name_prefix=MODIS_FILE_PREFIX,
-        scale=1000
-    )'''
+        modis_export_metadata = export_image_to_drive(
+            image=modis_image,
+            region=region,
+            description=MODIS_EXPORT["description"],
+            folder=EXPORT_FOLDER,
+            file_name_prefix=MODIS_EXPORT["file_name_prefix"],
+            scale=MODIS_EXPORT["scale"]
+        )
+    else:
+        log.info("MODIS export devre dışı bırakıldı.")
+        
 
-    landsat_timeseries_exports = export_landsat_timeseries_lst_and_qa_to_drive(
-        collection=landsat_daily_collection,
-        region=region,
-        folder=EXPORT_FOLDER,
-        file_prefix=f"landsat_lst_{REGION_NAME}",
-        max_exports=MAX_LANDSAT_DAILY_EXPORTS,
-        total_count=landsat_processing_metadata["daily_composite_count"],
-        date_list=landsat_processing_metadata["daily_dates"]
-    )
+    landsat_timeseries_exports = []
+    landsat_processing_metadata = None
 
+    if ENABLE_LANDSAT_EXPORT:
+        log.info("Step3 Landsat günlük composite koleksiyonu hazırlanıyor.")
+        landsat_daily_collection, landsat_processing_metadata = get_landsat_daily_median_collection(
+            region=region,
+            region_name=REGION_NAME,
+            start=START_DATE,
+            end=END_DATE
+        )
+
+        landsat_timeseries_exports = export_landsat_timeseries_lst_and_qa_to_drive(
+            collection=landsat_daily_collection,
+            date_list=landsat_processing_metadata["daily_dates"],
+            region=region,
+            folder=EXPORT_FOLDER,
+            file_prefix=LANDSAT_EXPORT["file_name_prefix"],
+            scale=LANDSAT_EXPORT["scale"],
+            max_exports=MAX_LANDSAT_DAILY_EXPORTS,
+            download_mode=DOWNLOAD_MODE
+        )
+    else:
+        log.info("Landsat export devre dışı bırakıldı.")
+
+        
     metadata = {
+        "step": "step4_export_geotiff",
+        "pipeline_stage": "online",
         "region_name": REGION_NAME,
         "date_start": START_DATE,
         "date_end": END_DATE,
         "export_folder": EXPORT_FOLDER,
-        "max_landsat_daily_exports": MAX_LANDSAT_DAILY_EXPORTS,
+        "download_mode": DOWNLOAD_MODE,
         "created_at": datetime.now().isoformat(),
         "log_file": str(log_file),
-        #"modis_processing_metadata": modis_processing_metadata,
-        "landsat_timeseries_metadata": "landsat_timeseries_metadata",
-        "exports": {
-            #"modis": modis_export_metadata,
-            "landsat_timeseries": landsat_timeseries_exports
+        "manual_download_required": DOWNLOAD_MODE == "drive",
+        "enabled_exports": {
+            "modis": ENABLE_MODIS_EXPORT,
+            "landsat": ENABLE_LANDSAT_EXPORT
         },
-        "status": "export_tasks_started"
+        "processing": {
+            "modis": modis_processing_metadata,
+            "landsat_daily_median": landsat_processing_metadata
+        },
+        "exports": {
+            "modis": modis_export_metadata,
+            "landsat_daily_lst_qa": landsat_timeseries_exports
+        },
+        "notes": {
+            "modis_download_mode": "drive_only_for_now",
+            "landsat_download_mode": DOWNLOAD_MODE
+        },
+        "status": "direct_download_completed" if DOWNLOAD_MODE == "direct" else "export_tasks_started"
     }
     metadata_path = save_metadata(metadata)
 
     log.info("=" * 60)
     log.info("STEP 4 TAMAMLANDI")
     log.info(f"Export metadata dosyası: {metadata_path}")
-    log.info("Google Drive export görevleri başlatıldı.")
+
+    if DOWNLOAD_MODE == "direct":
+        log.info("Landsat LST ve QA dosyaları doğrudan yerel klasörlere indirildi.")
+        log.info("Step5 çalıştırılabilir.")
+    else:
+        log.info("Google Drive export görevleri başlatıldı.")
+        log.info("Dosyaları manuel indirip Step5 klasörlerine yerleştirmen gerekiyor.")
+
     log.info("=" * 60)
+
+    if DOWNLOAD_MODE == "direct":
+        print("\nSTEP 4 tamamlandı. Landsat dosyaları yerel klasörlere indirildi.")
+        print("Şimdi Step5'i çalıştırabilirsin:")
+        print("python step5_preprocess_timeseries.py\n")
+    else:
+        print("\nSTEP 4 tamamlandı. Export görevleri Drive'a gönderildi.")
+        print("Drive'dan dosyaları indirip Step5 klasörlerine yerleştirmen gerekiyor.\n")
 
 if __name__ == "__main__":
     main()
-
-#getInfo step3 ve step4'te ust uste biniyor kod patliyor bunu coz

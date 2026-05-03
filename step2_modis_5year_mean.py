@@ -16,7 +16,7 @@ from pathlib import Path
 
 import ee
 
-from core.config import *
+from core.config import GEE_PROJECT, MODIS_COLLECTION, START_DATE, END_DATE
 from core.gee_utils import init_gee
 from core.regions import build_regions
 from core.io_utils import setup_logger
@@ -32,19 +32,14 @@ log, log_file = setup_logger("step2")
 # =============================================================================
 # 1. 5 YILLIK YAZ LST GÖRÜNTÜSÜNÜ HAZIRLAMA
 # =============================================================================
-def process_summer_mean(
-        region: ee.Geometry,
-        region_name: str,
-        start: str = START_DATE,
-        end: str = END_DATE
-    ) -> tuple[ee.Image, dict]:
+def process_summer_mean(region: ee.Geometry, region_name: str) -> tuple[ee.Image, dict]:
     """
     2019-2023 arası yaz aylarının (Haziran-Eylül) MODIS LST ortalamasını hesaplar.
     Export yapmaz. Sadece işlenmiş ee.Image üretir.
     """
-    log.info(f"Processing 5-year summer mean for region: {region_name}")
+    log.info(f"Processing 5-year summer MODIS baseline for region: {region_name}")
 
-    collection = (
+    raw_collection = (
         ee.ImageCollection(MODIS_COLLECTION)
         .filterBounds(region)
         .filterDate(START_DATE, END_DATE)
@@ -52,7 +47,7 @@ def process_summer_mean(
         .select("LST_Day_1km")
     )
 
-    count = collection.size().getInfo()
+    count = raw_collection.size().getInfo()
     log.info(f"Found {count} MODIS images for region '{region_name}'")
 
     if count == 0:
@@ -61,35 +56,59 @@ def process_summer_mean(
         )
 
     first_date = (
-        ee.Date(collection.first().get("system:time_start"))
+        ee.Date(raw_collection.first().get("system:time_start"))
         .format("YYYY-MM-dd")
         .getInfo()
     )
 
+    celsius_collection = raw_collection.map(
+        lambda image: (
+            image
+            .multiply(0.02)
+            .subtract(273.15)
+            .rename("LST_Celsius")
+            .copyProperties(image, ["system:time_start"])
+        )
+    )
+
     summer_mean = (
-        collection
+        celsius_collection
         .mean()
-        .multiply(0.02)
-        .subtract(273.15)
         .rename("LST_Celsius_SummerMean")
         .clip(region)
     )
 
+    summer_stddev = (
+        celsius_collection
+        .reduce(ee.Reducer.stdDev())
+        .rename("LST_Celsius_SummerStdDev")
+        .clip(region)
+    )
+
+    summer_baseline = summer_mean.addBands(summer_stddev)
+
     metadata = {
         "region_name": region_name,
         "collection": MODIS_COLLECTION,
-        "band": "LST_Day_1km",
+        "input_band": "LST_Day_1km",
+        "output_bands": [
+            "LST_Celsius_SummerMean",
+            "LST_Celsius_SummerStdDev"
+        ],
         "unit": "Celsius",
         "date_start": START_DATE,
         "date_end": END_DATE,
         "months": "6-9",
+        "baseline_years": "2019-2023",
+        "baseline_metrics": ["mean", "stdDev"],
         "image_count": count,
         "first_image_date": first_date,
         "created_at": datetime.now().isoformat(),
         "status": "processed"
     }
 
-    return summer_mean, metadata
+    log.info("MODIS summer baseline mean/stdDev image prepared.")
+    return summer_baseline, metadata
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 2. METADATA KAYDETME
@@ -116,11 +135,9 @@ def main():
     init_gee()
     regions = build_regions()
 
-    mean_image, metadata = process_summer_mean(
+    baseline_image, metadata = process_summer_mean(
         region=regions["dogu_akdeniz"],
-        region_name="dogu_akdeniz",
-        start=START_DATE,
-        end=END_DATE
+        region_name="dogu_akdeniz"
     )
 
     metadata_path = save_metadata(metadata)
@@ -128,11 +145,11 @@ def main():
     log.info("=" * 60)
     log.info("STEP 2 COMPLETED SUCCESSFULLY")
     log.info(f"Metadata file: {metadata_path}")
-    log.info("Output: processed ee.Image object (not exported yet)")
+    log.info("Output: processed ee.Image object with mean and stdDev bands (not exported yet)")
     log.info("Next step: anomaly calculation or GeoTIFF export")
     log.info("=" * 60)
 
-    _ = mean_image  # Şimdilik değişkeni korumak için
+    _ = baseline_image  # Şimdilik değişkeni korumak için
 
 
 if __name__ == "__main__":

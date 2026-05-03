@@ -2,5 +2,4 @@ earthengine-api
 rasterio
 numpy
 matplotlib
-xarray
-requests
+numpy

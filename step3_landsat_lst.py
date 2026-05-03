@@ -56,30 +56,22 @@ def process_landsat_lst(
     log.info(f"Landsat LST işleme başlatıldı. Bölge: {region_name}")
     log.info(f"Tarih aralığı: {start} -> {end}")
 
-    base_collection = (
+    collection = (
         ee.ImageCollection(LANDSAT_COLLECTION)
         .filterBounds(region)
         .filterDate(start, end)
-    )
-
-    base_count = base_collection.size().getInfo()
-    log.info(f"{start} - {end} aralığındaki Landsat görüntü sayısı: {base_count}")
-    
-    filtered_collection = (
-        base_collection
-        .filter(ee.Filter.calendarRange(6,9, "month"))
         .select("ST_B10")
     )
 
-    image_count = filtered_collection.size().getInfo()
-    log.info(f"{start} - {end} aralığındaki Yaz aylarındaki Landsat görüntü sayısı: {image_count}")
+    image_count = collection.size().getInfo()
+    log.info(f"Filtre sonrası Landsat görüntü sayısı: {image_count}")
 
     if image_count == 0:
         raise ValueError(
-            f"{region_name} bölgesi için {start} - {end} aralığında yaz aylarında Landsat görüntüsü bulunamadı."
+            f"{region_name} bölgesi için {start} - {end} aralığında Landsat görüntüsü bulunamadı."
         )
 
-    first_image = filtered_collection.first()
+    first_image = collection.first()
     first_image_date = (
         ee.Date(first_image.get("system:time_start"))
         .format("YYYY-MM-dd")
@@ -87,7 +79,7 @@ def process_landsat_lst(
     )
 
     landsat_lst = (
-        filtered_collection
+        collection
         .mean()
         .multiply(0.00341802)
         .add(149.0)
@@ -96,7 +88,7 @@ def process_landsat_lst(
         .clip(region)
     )
 
-    metadata = { #buraya filtre atılmaz. burası veri değil veri hakkında bilgi içerir
+    metadata = {
         "gee_project": GEE_PROJECT,
         "region_name": region_name,
         "collection": LANDSAT_COLLECTION,
@@ -104,8 +96,8 @@ def process_landsat_lst(
         "unit": "Celsius",
         "date_start": start,
         "date_end": end,
-        "all_image_count": base_count,
-        "filtered_image_count": image_count,
+        "months": "6-9",
+        "image_count": image_count,
         "first_image_date": first_image_date,
         "resolution": "30m",
         "created_at": datetime.now().isoformat(),
@@ -215,6 +207,87 @@ def get_landsat_daily_median_collection(
 
     log.info(f"Tüm Landsat görüntü sayısı: {base_count}")
     log.info(f"Yaz ayları filtreli Landsat görüntü sayısı: {filtered_count}")
+    log.info(f"Gunluk composite sayisi: {unique_date_count}")
+
+    return daily_collection, metadata
+
+def get_landsat_daily_median_collection(
+    region: ee.Geometry,
+    region_name: str,
+    start: str = START_DATE,
+    end: str = END_DATE,
+) -> tuple[ee.ImageCollection, dict]:
+    """
+    Step4 tarafindan export edilecek temiz Landsat zaman serisi collection'ini hazirlar.
+
+    Ayni tarihte birden fazla Landsat sahnesi varsa:
+        - ST_B10 icin median composite alinir.
+        - QA_PIXEL bit maskesi oldugu icin median yerine mode kullanilir.
+
+    Donus:
+        (daily_composite_collection, metadata_dict)
+    """
+    log.info(f"Landsat gunluk median composite hazirlaniyor. Bolge: {region_name}")
+    log.info(f"Tarih araligi: {start} -> {end}")
+
+    base_collection = (
+        ee.ImageCollection(LANDSAT_COLLECTION)
+        .filterBounds(region)
+        .filterDate(start, end)
+    )
+
+    filtered_collection = (
+        base_collection
+        .filter(ee.Filter.calendarRange(6, 9, "month"))
+        .select(["ST_B10", "QA_PIXEL"])
+        .map(lambda image: image.clip(region))
+        .map(_set_export_date)
+    )
+
+    unique_dates = filtered_collection.aggregate_array("export_date").distinct().sort()
+    daily_dates = unique_dates.getInfo()
+    unique_date_count = len(daily_dates)
+
+    if unique_date_count == 0:
+        raise ValueError(
+            f"{region_name} bolgesi icin {start} - {end} araliginda yaz aylarina ait Landsat goruntusu bulunamadi."
+        )
+
+    def build_daily_composite(date_value: ee.String) -> ee.Image:
+        daily_collection = filtered_collection.filter(ee.Filter.eq("export_date", date_value))
+
+        lst_median = daily_collection.select("ST_B10").median().rename("ST_B10")
+        qa_mode = daily_collection.select("QA_PIXEL").mode().rename("QA_PIXEL").toUint16()
+        first_image = ee.Image(daily_collection.sort("system:time_start").first())
+
+        return (
+            lst_median
+            .addBands(qa_mode)
+            .clip(region)
+            .set("export_date", date_value)
+            .set("system:time_start", first_image.get("system:time_start"))
+            .set("source_image_count", daily_collection.size())
+        )
+
+    daily_collection = ee.ImageCollection(unique_dates.map(build_daily_composite))
+
+    metadata = {
+        "gee_project": GEE_PROJECT,
+        "region_name": region_name,
+        "collection": LANDSAT_COLLECTION,
+        "bands": ["ST_B10", "QA_PIXEL"],
+        "date_start": start,
+        "date_end": end,
+        "months_filter": "6-9",
+        "daily_dates": daily_dates,
+        "daily_composite_count": unique_date_count,
+        "lst_composite_method": "daily_median",
+        "qa_composite_method": "daily_mode",
+        "resolution": "30m",
+        "created_at": datetime.now().isoformat(),
+        "status": "daily_median_collection_prepared",
+    }
+
     log.info(f"Gunluk composite sayisi: {unique_date_count}")
 
     return daily_collection, metadata
