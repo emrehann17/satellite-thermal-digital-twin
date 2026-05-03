@@ -254,7 +254,7 @@ Bu repo şu anda tamamlanmış bir **3B termal dijital ikiz sistemi** değildir.
 
 * anomaly’nin tüm bölgeyi temsil edecek şekilde güçlendirilmesi
 * daha fazla Landsat sahnesi ile Step5’in yeniden test edilmesi
-* veri boşluklarının azaltılması
+* veri boşluklarının azaltılması.
 * Step4 sonrası veri akışının iyileştirilmesi
 
 Bu eksikler giderildikçe proje daha güçlü 2B/3B termal temsil ve risk analizi katmanlarına doğru genişletilecektir.
