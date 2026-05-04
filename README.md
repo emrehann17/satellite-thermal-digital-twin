@@ -248,13 +248,13 @@ Aşağıda Step5 aşamasında üretilen örnek raster çıktıları yer almaktad
 
 Bu raster, seçilen zaman serisi boyunca Landsat yüzey sıcaklıklarının ortalamasını temsil eder.
 
-![Mean LST](docs/images/mean_example.png)
+![Mean LST](docs/images/landsat_lst_timeseries_mean_celsius.png)
 
 ### Anomaly Raster
 
 Bu raster, Landsat sıcaklık değerlerinin referans davranıştan (baseline) sapmasını göstermektedir.
 
-![Anomaly](docs/images/anomaly_example.png)
+![Anomaly](docs/images/landsat_lst_latest_anomaly_celsius.png)
 
 ## Çıktılar Hakkında Önemli Notlar
 
