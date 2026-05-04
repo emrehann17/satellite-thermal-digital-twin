@@ -183,7 +183,7 @@ def main() -> None:
 
     mean_lst = interpolated.mean(dim="time", skipna=True)
 
-    windows_size = min(3, interpolated.sizes["time"])
+    windows_size = min(5, interpolated.sizes["time"])
     latest_lst = interpolated.isel(time=slice(-windows_size, None)).mean(dim="time", skipna=True)
     
     anomaly = latest_lst - mean_lst

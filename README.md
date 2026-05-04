@@ -242,9 +242,36 @@ python step5_preprocess_timeseries.py
 
 ## Örnek Çıktılar
 
-Projede şu anda mean raster ve anomaly raster üretilebilmektedir. Ancak mevcut anomaly çıktıları az sayıda sahne ile üretildiği için bazı alanlarda veri boşlukları bulunmaktadır. Bu çıktıların ilerleyen aşamalarda daha fazla sahne ile güncellenmesi planlanmaktadır.
+Aşağıda Step5 aşamasında üretilen örnek raster çıktıları yer almaktadır. 
 
-Bu nedenle README’ye eklenecek örnek görseller, nihai veya tam doğrulanmış ürünler olarak değil, **erken aşama prototip çıktıları** olarak değerlendirilmelidir.
+### Mean LST Raster
+
+Bu raster, seçilen zaman serisi boyunca Landsat yüzey sıcaklıklarının ortalamasını temsil eder.
+
+![Mean LST](docs/images/mean_example.png)
+
+### Anomaly Raster
+
+Bu raster, Landsat sıcaklık değerlerinin referans davranıştan (baseline) sapmasını göstermektedir.
+
+![Anomaly](docs/images/anomaly_example.png)
+
+## Çıktılar Hakkında Önemli Notlar
+
+Bu görseller, projenin mevcut geliştirme aşamasını temsil eden **erken prototip çıktılarıdır** ve aşağıdaki sınırlamaları içermektedir:
+
+- Çıktılar, işlem süresini kısaltmak amacıyla **az sayıda Landsat sahnesi** kullanılarak üretilmiştir.
+- Bu nedenle anomaly raster üzerinde **veri bulunmayan (boş / beyaz) alanlar** bulunmaktadır.
+- Bu boşluklar sistemsel bir hatadan değil, **yetersiz zamansal kapsama** probleminden kaynaklanmaktadır.
+- Anomaly hesaplaması şu an için tüm bölgeyi kapsayan tam bir temsil değildir; kullanılan Landsat sahnelerinin kapsama alanı ile sınırlıdır.
+- Mevcut anomaly çıktısı, son tek sahne yerine **son birkaç sahnenin ortalaması alınarak** iyileştirilmeye çalışılmıştır, ancak bu yöntem henüz nihai çözüm olarak doğrulanmamıştır.
+
+## Planlanan İyileştirmeler
+
+- Daha fazla Landsat sahnesi kullanılarak veri boşluklarının azaltılması
+- Anomaly tanımının tüm bölgeyi kapsayacak şekilde yeniden yapılandırılması
+- MODIS baseline ile Landsat anomaly ilişkisinin daha sağlam kurulması
+- Nihai, doğrulanmış ve daha temiz görsel çıktılarla bu bölümün güncellenmesi
 
 ## Not
 
