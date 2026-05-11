@@ -26,7 +26,7 @@ ENABLE_LANDSAT_EXPORT = True
 LANDSAT_SCALE = 0.00341802
 LANDSAT_OFFSET = 149.0
 
-REGION_NAME = "dogu_akdeniz"
+REGION_NAME = "kozan_aoi"  # Test için küçük bölge kullan
 
 MODIS_EXPORT_FOLDER = "B7_Thermal_Digital_Twin_MODIS"
 LANDSAT_LST_EXPORT_FOLDER = "B7_Thermal_Digital_Twin_Landsat_Timeseries"
@@ -37,7 +37,7 @@ MODIS_FILE_PREFIX = "modis_lst_dogu_akdeniz_5y_summer_mean"
 SUMMER_MONTH_START = 6
 SUMMER_MONTH_END = 9
 
-MAX_LANDSAT_DAILY_EXPORTS = 12
+MAX_LANDSAT_DAILY_EXPORTS = 10  # Test için 10 sahne yeterli
 
 EXPORT_CRS = "EPSG:4326"
 
@@ -48,10 +48,10 @@ DIRECT_LANDSAT_QA_SUBDIR = "landsat_qa"
 DIRECT_DOWNLOAD_SCALE = 30
 DIRECT_DOWNLOAD_MAX_IMAGES = 5
 
-# Anomali pencere ayarları
-BASELINE_START_DATE = "2019-01-01"
-BASELINE_END_DATE = "2022-12-31"
+# Anomali pencere ayarları (TEST İÇİN KÜÇÜK PENCERELER)
+BASELINE_START_DATE = "2022-06-01"  # Tek yaz sezonu
+BASELINE_END_DATE = "2022-09-30"
 
 # Current period - anomali hesabı için kullanılacak güncel pencere
-CURRENT_PERIOD_DAYS = 60  # Son 60 gün
-CURRENT_PERIOD_END_DATE = "2023-09-30"  # Analiz tarihinin sonu
+CURRENT_PERIOD_DAYS = 30  # 30 gün test için yeterli
+CURRENT_PERIOD_END_DATE = "2023-08-31"  # 2023 yaz sonu

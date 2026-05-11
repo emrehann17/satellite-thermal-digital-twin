@@ -4,7 +4,9 @@ Bu proje, Google Earth Engine (GEE) üzerinden alınan **MODIS** ve **Landsat** 
 
 Bu repo şu anda tamamlanmış bir **3B termal dijital ikiz** veya **yangın riski tahmin sistemi** değildir. Mevcut haliyle, bu hedeflere ilerleyen bir **termal veri işleme ve ön analiz prototipi** olarak değerlendirilmelidir.
 
-## Amaç
+---
+
+# Amaç
 
 Projede amaç, uydu tabanlı yüzey sıcaklığı verilerini kullanarak Doğu Akdeniz bölgesine ait:
 
@@ -15,7 +17,9 @@ Projede amaç, uydu tabanlı yüzey sıcaklığı verilerini kullanarak Doğu Ak
 
 ve daha sonraki aşamalarda bunları 3B görselleştirme, risk analizi ve karar destek katmanlarına bağlayabilecek bir temel hazırlamaktır.
 
-## Proje Kapsamı
+---
+
+# Proje Kapsamı
 
 Projede şu adımlar yer almaktadır:
 
@@ -28,10 +32,12 @@ Projede şu adımlar yer almaktadır:
 - GeoTIFF export
 - QA tabanlı bulut maskeleme
 - Python ile zaman serisi ön işleme
-- mean raster ve anomaly raster üretimi
+- baseline ve anomaly raster üretimi
 - ileride 2B/3B görselleştirme ve risk analizi
 
-## Mevcut Durum
+---
+
+# Mevcut Durum
 
 Şu anda tamamlanan veya büyük ölçüde kurulan kısımlar şunlardır:
 
@@ -48,34 +54,42 @@ Projede şu adımlar yer almaktadır:
 - Step4’te MODIS ve Landsat exportlarının aç/kapa mantığıyla kontrol edilmesi
 - Step4’e kadar çalışan bir `main.py` yapısının kurulması
 - Step5’in küçük örnek veri ile çalıştırılması
-- mean raster, anomaly raster, NetCDF ve metadata çıktılarının üretilmesi
+- baseline mean raster, baseline std raster, current period median raster ve z-score anomaly raster çıktılarının üretilmesi
+- NetCDF zaman serisi çıktılarının oluşturulması
 
-## Şu Anda Gözlenen Sınırlılıklar
+---
+
+# Şu Anda Gözlenen Sınırlılıklar
 
 Proje çalışıyor olsa da şu anda bazı önemli teknik sınırlılıklar bulunmaktadır:
 
 - Step4 sonrası veri akışı hâlâ tam otomatik değildir; Drive export sonrası dosyalar manuel olarak indirilip Step5 klasörlerine yerleştirilmektedir.
 - `ee.Image.getDownloadURL()` ile doğrudan indirme denenmiştir ancak büyük boyutlu rasterlarda yeterli olmadığı görülmüştür.
-- Step5 şu ana kadar **az sayıda sahne** ile test edilmiştir.
-- Bu nedenle anomaly ve diğer raster çıktılarında **verisi olmayan beyaz alanlar** oluşmaktadır.
-- Üretilen anomaly raster şu an tüm bölgenin anomaly’sini değil, kullanılan son dönem Landsat verisinin geçerli kapsama alanını temsil etmektedir.
-- Son tek sahne yerine son 3 çıktının ortalaması kullanılarak anomaly kapsamasını iyileştirme denemesi yapılmaktadır, ancak bu yaklaşım henüz nihai çözüm olarak doğrulanmış değildir.
-- Daha fazla sahne ile tekrar çalıştırıldığında boş alanların azalacağı öngörülmektedir, ancak bu henüz tam olarak test edilmemiştir.
+- Step5 şu ana kadar sınırlı sayıda sahne ile test edilmiştir.
+- Bu nedenle anomaly ve diğer raster çıktılarında veri bulunmayan beyaz alanlar oluşabilmektedir.
+- Anomaly üretimi artık tek sahne yaklaşımı yerine belirli bir zaman penceresi içerisindeki Landsat sahnelerinin median composite çıktısı üzerinden yapılmaktadır.
+- Ancak küçük test pencerelerinde veya sınırlı sahne sayısında hâlâ veri boşlukları oluşabilmektedir.
+- Bu boşlukların temel nedeni yetersiz zamansal kapsama ve Landsat sahnelerinin doğal mekânsal kapsama farklılıklarıdır.
+- Step5 çıktıları henüz büyük ölçekli veri ile tam doğrulanmış değildir.
 
-## Geliştirme Aşamasında Olan Kısımlar
+---
+
+# Geliştirme Aşamasında Olan Kısımlar
 
 Şu anda aktif olarak geliştirilen / iyileştirilen alanlar:
 
-- anomaly rasterın tüm bölgeyi daha iyi temsil etmesi
-- daha fazla sahne ile Step5’in yeniden çalıştırılması
-- veri boşluklarının azaltılması
-- anomaly tanımının daha sağlam hale getirilmesi
+- anomaly üretiminde temporal window yaklaşımının iyileştirilmesi
+- daha geniş zaman pencereleri ile veri boşluklarının azaltılması
+- current period composite üretiminin daha kararlı hale getirilmesi
 - çıktıların README’ye eklenebilecek düzeyde iyileştirilmesi
 - Step4 sonrası veri geçiş sürecinin daha kontrollü hale getirilmesi
 - config bağımlılığının zamanla azaltılması
 - step fonksiyonlarına parametre geçişinin artırılması
+- raster işleme sırasında bellek kullanımının optimize edilmesi
 
-## Planlanan Çalışmalar
+---
+
+# Planlanan Çalışmalar
 
 Henüz tamamlanmamış veya ileride geliştirilecek başlıklar:
 
@@ -88,25 +102,31 @@ Henüz tamamlanmamış veya ileride geliştirilecek başlıklar:
 - daha kararlı online/offline pipeline ayrımı
 - Step5 sonrası aşamaların yapılandırılması
 
-## Veri Kaynakları
+---
 
-### MODIS
+# Veri Kaynakları
+
+## MODIS
+
 - Veri kümesi: `MODIS/061/MOD11A1`
 - İçerik: günlük kara yüzey sıcaklığı verisi
 - Çözünürlük: yaklaşık 1 km
 - Kullanım amacı: geniş alanlı termal baseline üretimi
 
-### Landsat 8
+## Landsat 8
+
 - Veri kümesi: `LANDSAT/LC08/C02/T1_L2`
 - İçerik: Surface Temperature (`ST_B10`) ve kalite bandı (`QA_PIXEL`)
 - Çözünürlük: yaklaşık 30 m
 - Kullanım amacı: yüksek çözünürlüklü termal katman ve zaman serisi işleme
 
-## MODIS Baseline Seçiminin Gerekçesi
+---
 
-Projede MODIS verisi, Doğu Akdeniz için düşük çözünürlüklü ama zamansal olarak daha düzenli bir **referans termal davranış** üretmek amacıyla kullanılmaktadır.
+# MODIS Baseline Seçiminin Gerekçesi
 
-Bu aşamada MODIS tarafında tam zaman serisi yerine **5 yıllık yaz dönemi ortalaması ve standart sapması** alınmıştır. Bunun başlıca gerekçeleri şunlardır:
+Projede MODIS verisi, Doğu Akdeniz için düşük çözünürlüklü ama zamansal olarak daha düzenli bir referans termal davranış üretmek amacıyla kullanılmaktadır.
+
+Bu aşamada MODIS tarafında tam zaman serisi yerine 5 yıllık yaz dönemi ortalaması ve standart sapması alınmıştır. Bunun başlıca gerekçeleri şunlardır:
 
 - MODIS, Landsat’a göre daha düzenli gözlem sıklığı sağlar.
 - 5 yıllık pencere, tek bir yıla göre daha kararlı bir baseline üretir.
@@ -114,9 +134,11 @@ Bu aşamada MODIS tarafında tam zaman serisi yerine **5 yıllık yaz dönemi or
 - Ortalama tek başına yeterli olmadığı için, değişkenliği tanımlamak üzere standart sapma da eklenmiştir.
 - Bu yapı, ileride z-score veya normalize anomali hesapları için temel sağlayacaktır.
 
-Bu nedenle MODIS çıktısı, Landsat’ın yerine geçen bir zaman serisi değil; daha çok Landsat analizini destekleyen **referans termal katman** olarak kullanılmaktadır.
+Bu nedenle MODIS çıktısı, Landsat’ın yerine geçen bir zaman serisi değil; daha çok Landsat analizini destekleyen referans termal katman olarak kullanılmaktadır.
 
-## Metodoloji
+---
+
+# Metodoloji
 
 Projede genel akış şu şekildedir:
 
@@ -127,11 +149,13 @@ Projede genel akış şu şekildedir:
 5. Aynı tarihe ait çoklu Landsat sahneleri daily median composite ile tek çıktıya indirilir.
 6. MODIS ve Landsat rasterları GeoTIFF olarak export edilir.
 7. QA verisi kullanılarak bulut maskeleme yapılır.
-8. Python tarafında zaman serisi kurulup mean ve anomaly rasterları üretilir.
+8. Python tarafında zaman serisi kurulup baseline mean/std rasterları, current period median rasterı ve z-score anomaly rasterı üretilir.
 9. Çıktılar görsel ve sayısal olarak kontrol edilir.
 10. Sonraki aşamada daha fazla sahne ile anomaly çıktısının güçlendirilmesi hedeflenmektedir.
 
-## Proje Yapısı
+---
+
+# Proje Yapısı
 
 ```text
 core/
@@ -148,42 +172,60 @@ step5_preprocess_timeseries.py
 main.py
 ````
 
-## Step Açıklamaları
+---
 
-### Step 1
+# Step Açıklamaları
+
+## Step 1
 
 GEE bağlantısını başlatır, çalışma bölgelerini tanımlar ve temel MODIS sorgusunu gerçekleştirir.
 
-### Step 2
+## Step 2
 
 MODIS verisini kullanarak 5 yıllık yaz dönemi baseline katmanlarını üretir. Bu aşamada ortalama ve standart sapma hesaplanır.
 
-### Step 3
+## Step 3
 
 Landsat zaman serisi koleksiyonunu hazırlar. Aynı tarihe ait çoklu görüntüler daily median composite ile tek çıktıya indirgenir.
 
-### Step 4
+## Step 4
 
 Online export katmanıdır. MODIS ve Landsat rasterlarını GeoTIFF olarak export eder. Gerekirse MODIS ve Landsat exportları ayrı ayrı açılıp kapatılabilir.
 
-### Step 5
+## Step 5
 
-Offline raster işleme katmanıdır. İndirilen GeoTIFF dosyaları okunur, QA tabanlı maskeleme uygulanır, mean raster ve anomaly raster üretilir.
+Offline raster işleme katmanıdır. İndirilen GeoTIFF dosyaları okunur, QA tabanlı maskeleme uygulanır ve aşağıdaki çıktılar üretilir:
 
-### main.py
+* baseline mean raster
+* baseline standard deviation raster
+* current period median raster
+* z-score anomaly raster
+* interpolated NetCDF zaman serisi çıktısı
+
+## main.py
 
 Şu anda Step4’e kadar olan akışı organize biçimde çalıştırmak için kullanılmaktadır. Step5 ve sonrası manuel olarak yürütülmektedir.
 
-## Kurulum
+---
 
-Projeyi klonlayın:
+# Step5 Çıktıları
+
+Step5 sonunda aşağıdaki raster ve zaman serisi çıktıları üretilmektedir:
+
+* `baseline_lst_mean_celsius.tif`
+* `baseline_lst_std_celsius.tif`
+* `current_period_median_celsius.tif`
+* `anomaly_zscore.tif`
+* `baseline_timeseries_interpolated.nc`
+
+---
+
+# Kurulum
 
 ```bash
 git clone https://github.com/emrehann17/satellite-thermal-digital-twin.git
 cd satellite-thermal-digital-twin
 ```
-
-Sanal ortam oluşturun:
 
 ```bash
 python -m venv .venv
@@ -201,27 +243,25 @@ Linux / macOS:
 source .venv/bin/activate
 ```
 
-Gerekli kütüphaneleri yükleyin:
-
 ```bash
 pip install -r requirements.txt
 ```
-
-Google Earth Engine erişimi için kimlik doğrulaması yapın:
 
 ```bash
 earthengine authenticate
 ```
 
-## Çalıştırma Sırası
+---
 
-### Online kısım
+# Çalıştırma Sırası
+
+## Online kısım
 
 ```bash
 python main.py
 ```
 
-veya tek tek:
+veya:
 
 ```bash
 python step1_fetch_modis.py
@@ -230,58 +270,64 @@ python step3_landsat_lst.py
 python step4_export_geotiff.py
 ```
 
-### Manuel geçiş
+## Manuel geçiş
 
 Step4 sonrası export edilen GeoTIFF dosyaları Google Drive’dan indirilir ve Step5 için ilgili veri klasörlerine yerleştirilir.
 
-### Offline kısım
+## Offline kısım
 
 ```bash
 python step5_preprocess_timeseries.py
 ```
 
-## Örnek Çıktılar
+---
 
-Aşağıda Step5 aşamasında üretilen örnek raster çıktıları yer almaktadır. 
+# Örnek Çıktılar
 
-### Mean LST Raster
+## Baseline Mean Raster
 
-Bu raster, seçilen zaman serisi boyunca Landsat yüzey sıcaklıklarının ortalamasını temsil eder.
+Bu raster, baseline dönemi boyunca hesaplanan ortalama yüzey sıcaklığını temsil etmektedir.
 
-![Mean LST](docs/images/landsat_lst_timeseries_mean_celsius.png)
+![Baseline Mean](docs/images/baseline_lst_mean_celsius.png)
 
-### Anomaly Raster
+## Z-Score Anomaly Raster
 
-Bu raster, Landsat sıcaklık değerlerinin referans davranıştan (baseline) sapmasını göstermektedir.
+Bu raster, current period median sıcaklık değerlerinin baseline mean ve standard deviation kullanılarak hesaplanan z-score anomaly çıktısını göstermektedir.
 
-![Anomaly](docs/images/landsat_lst_latest_anomaly_celsius.png)
+![Anomaly](docs/images/anomaly_zscore.png)
 
-## Çıktılar Hakkında Önemli Notlar
+---
 
-Bu görseller, projenin mevcut geliştirme aşamasını temsil eden **erken prototip çıktılarıdır** ve aşağıdaki sınırlamaları içermektedir:
+# Çıktılar Hakkında Önemli Notlar
 
-- Çıktılar, işlem süresini kısaltmak amacıyla **az sayıda Landsat sahnesi** kullanılarak üretilmiştir.
-- Bu nedenle anomaly raster üzerinde **veri bulunmayan (boş / beyaz) alanlar** bulunmaktadır.
-- Bu boşluklar sistemsel bir hatadan değil, **yetersiz zamansal kapsama** probleminden kaynaklanmaktadır.
-- Anomaly hesaplaması şu an için tüm bölgeyi kapsayan tam bir temsil değildir; kullanılan Landsat sahnelerinin kapsama alanı ile sınırlıdır.
-- Mevcut anomaly çıktısı, son tek sahne yerine **son birkaç sahnenin ortalaması alınarak** iyileştirilmeye çalışılmıştır, ancak bu yöntem henüz nihai çözüm olarak doğrulanmamıştır.
+Bu görseller, projenin mevcut geliştirme aşamasını temsil eden erken prototip çıktılarıdır ve aşağıdaki sınırlamaları içermektedir:
 
-## Planlanan İyileştirmeler
+* Çıktılar, işlem süresini kısaltmak amacıyla sınırlı sayıda Landsat sahnesi kullanılarak üretilmiştir.
+* Bu nedenle anomaly raster üzerinde veri bulunmayan alanlar oluşabilmektedir.
+* Bu boşluklar sistemsel bir hatadan değil, yetersiz zamansal kapsama probleminden kaynaklanmaktadır.
+* Current thermal state, belirli bir zaman penceresine düşen Landsat sahnelerinin median composite çıktısı olarak tanımlanmaktadır.
+* Bu yaklaşım, tek sahne kullanımına göre daha kararlı ve daha geniş kapsamalı anomaly üretimi sağlamayı hedeflemektedir.
 
-- Daha fazla Landsat sahnesi kullanılarak veri boşluklarının azaltılması
-- Anomaly tanımının tüm bölgeyi kapsayacak şekilde yeniden yapılandırılması
-- MODIS baseline ile Landsat anomaly ilişkisinin daha sağlam kurulması
-- Nihai, doğrulanmış ve daha temiz görsel çıktılarla bu bölümün güncellenmesi
+---
 
-## Not
+# Planlanan İyileştirmeler
 
-Bu repo şu anda tamamlanmış bir **3B termal dijital ikiz sistemi** değildir. Mevcut haliyle, MODIS ve Landsat tabanlı termal veri işleme ve ön analiz akışını kurmaya odaklanan bir prototip çalışmadır.
+* Daha fazla Landsat sahnesi kullanılarak veri boşluklarının azaltılması
+* Temporal window ve composite stratejisinin daha güçlü anomaly kapsaması sağlayacak şekilde geliştirilmesi
+* MODIS baseline ile Landsat anomaly ilişkisinin daha sağlam kurulması
+* Nihai, doğrulanmış ve daha temiz görsel çıktılarla bu bölümün güncellenmesi
+
+---
+
+# Not
+
+Bu repo şu anda tamamlanmış bir 3B termal dijital ikiz sistemi değildir. Mevcut haliyle, MODIS ve Landsat tabanlı termal veri işleme ve ön analiz akışını kurmaya odaklanan bir prototip çalışmadır.
 
 Şu anki en önemli açık konular:
 
 * anomaly’nin tüm bölgeyi temsil edecek şekilde güçlendirilmesi
 * daha fazla Landsat sahnesi ile Step5’in yeniden test edilmesi
-* veri boşluklarının azaltılması.
+* veri boşluklarının azaltılması
 * Step4 sonrası veri akışının iyileştirilmesi
 
 Bu eksikler giderildikçe proje daha güçlü 2B/3B termal temsil ve risk analizi katmanlarına doğru genişletilecektir.

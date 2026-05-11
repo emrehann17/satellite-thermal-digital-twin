@@ -218,11 +218,11 @@ def main() -> None:
     log.info("=" * 60)
 
     # 1. Baseline zaman serisi yükle
-    log.info("\n1) Baseline zaman serisi yükleniyor...")
+    log.info("1) Baseline zaman serisi yükleniyor...")
     baseline_series, profile = load_baseline_timeseries()
     
     # 2. Baseline'ı zamansal interpolasyon ile temizle
-    log.info("\n2) Baseline zamansal interpolasyon...")
+    log.info("2) Baseline zamansal interpolasyon...")
     baseline_series = baseline_series.sortby("time")
     baseline_interpolated = baseline_series.interpolate_na(
         dim="time",
@@ -231,7 +231,7 @@ def main() -> None:
     )
     
     # 3. Baseline istatistikleri hesapla
-    log.info("\n3) Baseline istatistikleri hesaplanıyor...")
+    log.info("3) Baseline istatistikleri hesaplanıyor...")
     baseline_mean = baseline_interpolated.mean(dim="time", skipna=True)
     baseline_std = baseline_interpolated.std(dim="time", skipna=True)
     
@@ -239,11 +239,11 @@ def main() -> None:
     log.info(f"   Baseline std:  {float(baseline_std.mean()):.2f}°C")
     
     # 4. Current period median yükle
-    log.info("\n4) Current period median yükleniyor...")
+    log.info("4) Current period median yükleniyor...")
     current_median = load_current_period_median(profile)
     
     # 5. Z-score bazlı anomali hesapla
-    log.info("\n5) Z-score bazlı anomali hesaplanıyor...")
+    log.info("5) Z-score bazlı anomali hesaplanıyor...")
     log.info("   Formül: z_score = (current_median - baseline_mean) / baseline_std")
     
     anomaly_zscore = (current_median - baseline_mean.values) / baseline_std.values
@@ -264,7 +264,7 @@ def main() -> None:
     log.info(f"   Anomali aralığı: [{np.nanmin(anomaly_zscore):.2f}, {np.nanmax(anomaly_zscore):.2f}] σ")
     
     # 6. Çıktıları kaydet
-    log.info("\n6) Çıktılar kaydediliyor...")
+    log.info("6) Çıktılar kaydediliyor...")
     
     # Baseline mean
     save_geotiff(
