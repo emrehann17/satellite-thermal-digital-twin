@@ -37,7 +37,7 @@ MODIS_FILE_PREFIX = "modis_lst_dogu_akdeniz_5y_summer_mean"
 SUMMER_MONTH_START = 6
 SUMMER_MONTH_END = 9
 
-MAX_LANDSAT_DAILY_EXPORTS = 2
+MAX_LANDSAT_DAILY_EXPORTS = 12
 
 EXPORT_CRS = "EPSG:4326"
 
@@ -47,3 +47,11 @@ DIRECT_LANDSAT_QA_SUBDIR = "landsat_qa"
 
 DIRECT_DOWNLOAD_SCALE = 30
 DIRECT_DOWNLOAD_MAX_IMAGES = 5
+
+# Anomali pencere ayarları
+BASELINE_START_DATE = "2019-01-01"
+BASELINE_END_DATE = "2022-12-31"
+
+# Current period - anomali hesabı için kullanılacak güncel pencere
+CURRENT_PERIOD_DAYS = 60  # Son 60 gün
+CURRENT_PERIOD_END_DATE = "2023-09-30"  # Analiz tarihinin sonu

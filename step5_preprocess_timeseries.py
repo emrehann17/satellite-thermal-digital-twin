@@ -1,13 +1,17 @@
 """
 step5_preprocess_timeseries.py
 
-Yapılanlar:
-    - GeoTIFF dosyalarını okumak
-    - DN değerlerini Celsius'a çevirmek
-    - Varsa QA_PIXEL bandı ile bulut maskeleme yapmak
-    - Zaman serisi oluşturmak
-    - Eksik değerleri zamansal interpolasyon ile doldurmak
-    - Ortalama LST ve anomali rasteri üretmek
+Yeni Yaklaşım (Zaman Penceresi Bazlı Anomali):
+    - Baseline zaman serisinden mean ve std hesaplamak
+    - Current period median raster'ı okumak
+    - Z-score bazlı anomali hesaplamak: (current - baseline_mean) / baseline_std
+    - QA tabanlı bulut maskeleme yapmak
+    - Zamansal interpolasyon uygulamak
+    - Çıktıları kaydetmek
+
+Eski Yaklaşım (Kaldırıldı):
+    - "Son N sahne ortalaması" yaklaşımı kaldırıldı
+    - Artık zaman penceresi ve median composite kullanılıyor
 """
 
 from core.config import *
@@ -24,13 +28,15 @@ import xarray as xr
 
 
 BASE_DIR = Path(__file__).resolve().parent
-INPUT_DIR = BASE_DIR / "data" / "landsat_timeseries"
+BASELINE_INPUT_DIR = BASE_DIR / "data" / "landsat_timeseries"
 QA_DIR = BASE_DIR / "data" / "landsat_qa"
+CURRENT_PERIOD_DIR = BASE_DIR / "data" / "current_period"
 OUTPUT_DIR = BASE_DIR / "outputs" / "step5"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-INPUT_DIR.mkdir(parents=True, exist_ok=True)
+BASELINE_INPUT_DIR.mkdir(parents=True, exist_ok=True)
 QA_DIR.mkdir(parents=True, exist_ok=True)
+CURRENT_PERIOD_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 log, log_file = setup_logger("step5")
@@ -65,15 +71,16 @@ def dn_to_celsius(dn_array: np.ndarray) -> np.ndarray:
     """
 
     kelvin = dn_array * LANDSAT_SCALE + LANDSAT_OFFSET
-    celcius = kelvin - 273.15
-    return celcius
+    celsius = kelvin - 273.15
+    return celsius
+
 
 def build_cloud_mask_from_qa(qa_array: np.ndarray) -> np.ndarray:
     """
-        Landsat QA_PIXEL bandına göre bulut maskesi üretir.
+    Landsat QA_PIXEL bandına göre bulut maskesi üretir.
 
-        True  = temiz piksel
-        False = maskelenecek piksel
+    True  = temiz piksel
+    False = maskelenecek piksel
     """
 
     fill = 1 << 0
@@ -83,13 +90,14 @@ def build_cloud_mask_from_qa(qa_array: np.ndarray) -> np.ndarray:
     cloud_shadow = 1 << 4
     snow = 1 << 5   
 
-    bad_pixels = (fill | dilated_cloud | cirrus | cloud | cloud_shadow | snow) # 1111... olan bir sayı
+    bad_pixels = (fill | dilated_cloud | cirrus | cloud | cloud_shadow | snow)
 
     clean_mask = (qa_array.astype(np.uint16) & bad_pixels) == 0 
     return clean_mask
 
+
 def read_raster(path: Path) -> tuple[np.ndarray, dict]:
-    """tek bant raster okuyor"""
+    """Tek bant raster okur"""
 
     with rasterio.open(path) as src:
         array = src.read(1).astype("float32")
@@ -97,8 +105,9 @@ def read_raster(path: Path) -> tuple[np.ndarray, dict]:
 
     return array, profile
 
+
 def save_geotiff(array: np.ndarray, profile: dict, output_path: Path) -> None:
-    """tek bant geotiff kaydeder"""
+    """Tek bant geotiff kaydeder"""
     output_profile = profile.copy()
     output_profile.update(
         dtype = "float32",
@@ -111,18 +120,20 @@ def save_geotiff(array: np.ndarray, profile: dict, output_path: Path) -> None:
         dst.write(array.astype("float32"), 1)
 
 
-def load_landsat_timeseries() -> tuple[xr.DataArray, dict]:
+def load_baseline_timeseries() -> tuple[xr.DataArray, dict]:
     """
-    Landsat GeoTIFF dosyalarından zaman serisi DataArray oluşturur.
+    Baseline zaman serisini yükler (2019-2022 gibi geçmiş veri).
+    Bu veriden mean ve std hesaplanacak.
     """
-    tif_files = sorted(INPUT_DIR.glob("*.tif"))
+    tif_files = sorted(BASELINE_INPUT_DIR.glob("*.tif"))
 
     if not tif_files:
         raise FileNotFoundError(
-            f"GeoTIFF dosyası bulunamadı: {INPUT_DIR}\n"
-            "Step5 zaman serisi için bu klasöre tarih içeren Landsat GeoTIFF dosyaları koymalısın.\n"
-            "Örnek: landsat_lst_2019-06-15.tif"
+            f"Baseline GeoTIFF dosyası bulunamadı: {BASELINE_INPUT_DIR}\n"
+            "Step4'ten export edilen baseline zaman serisi dosyalarını buraya koymalısın."
         )
+
+    log.info(f"Baseline zaman serisi yükleniyor: {len(tif_files)} dosya bulundu")
 
     arrays = []
     times = []
@@ -137,12 +148,14 @@ def load_landsat_timeseries() -> tuple[xr.DataArray, dict]:
 
         lst_celsius = dn_to_celsius(dn_array)
 
+        # QA maskeleme
         qa_path = QA_DIR / tif_path.name.replace(".tif", "_qa.tif")
         if qa_path.exists():
             qa_array, _ = read_raster(qa_path)
             clean_mask = build_cloud_mask_from_qa(qa_array)
             lst_celsius = np.where(clean_mask, lst_celsius, np.nan)
 
+        # Fiziksel sınırlar
         lst_celsius = np.where(
             (lst_celsius > -30) & (lst_celsius < 80),
             lst_celsius,
@@ -158,72 +171,180 @@ def load_landsat_timeseries() -> tuple[xr.DataArray, dict]:
         stack,
         dims=("time", "y", "x"),
         coords={"time": times},
-        name="landsat_lst_celsius"
+        name="baseline_lst_celsius"
     )
+
+    log.info(f"Baseline zaman serisi yüklendi: {data.sizes['time']} görüntü")
 
     return data, base_profile
 
+
+def load_current_period_median(profile: dict) -> np.ndarray:
+    """
+    Current period median raster'ını yükler.
+    Bu zaten Celsius cinsinden geliyor (GEE tarafında dönüştürülmüş).
+    """
+    current_files = list(CURRENT_PERIOD_DIR.glob("*.tif"))
+    
+    if not current_files:
+        raise FileNotFoundError(
+            f"Current period median dosyası bulunamadı: {CURRENT_PERIOD_DIR}\n"
+            "Step4'ten export edilen 'landsat_current_period_XXdays.tif' dosyasını buraya koymalısın."
+        )
+    
+    if len(current_files) > 1:
+        log.warning(f"Birden fazla current period dosyası bulundu, ilki kullanılıyor: {current_files[0].name}")
+    
+    current_path = current_files[0]
+    log.info(f"Current period median yükleniyor: {current_path.name}")
+    
+    current_celsius, _ = read_raster(current_path)
+    
+    # Fiziksel sınırlar
+    current_celsius = np.where(
+        (current_celsius > -30) & (current_celsius < 80),
+        current_celsius,
+        np.nan
+    )
+    
+    log.info(f"Current period median yüklendi")
+    
+    return current_celsius
+
+
 def main() -> None:
     log.info("=" * 60)
-    log.info("STEP 5 BAŞLIYOR")
+    log.info("STEP 5 BAŞLIYOR (Yeni Zaman Penceresi Yaklaşımı)")
     log.info("=" * 60)
 
-    lst_series, profile = load_landsat_timeseries()
-
-    log.info(f"Zaman serisi yüklendi. Görüntü sayısı: {lst_series.sizes['time']}")
-
-    lst_series = lst_series.sortby("time")
-
-    log.info("Zamansal interpolasyon uygulanıyor.")
-    interpolated = lst_series.interpolate_na(
+    # 1. Baseline zaman serisi yükle
+    log.info("\n1) Baseline zaman serisi yükleniyor...")
+    baseline_series, profile = load_baseline_timeseries()
+    
+    # 2. Baseline'ı zamansal interpolasyon ile temizle
+    log.info("\n2) Baseline zamansal interpolasyon...")
+    baseline_series = baseline_series.sortby("time")
+    baseline_interpolated = baseline_series.interpolate_na(
         dim="time",
         method="linear",
         use_coordinate=True
     )
-
-    mean_lst = interpolated.mean(dim="time", skipna=True)
-
-    windows_size = min(5, interpolated.sizes["time"])
-    latest_lst = interpolated.isel(time=slice(-windows_size, None)).mean(dim="time", skipna=True)
     
-    anomaly = latest_lst - mean_lst
-
+    # 3. Baseline istatistikleri hesapla
+    log.info("\n3) Baseline istatistikleri hesaplanıyor...")
+    baseline_mean = baseline_interpolated.mean(dim="time", skipna=True)
+    baseline_std = baseline_interpolated.std(dim="time", skipna=True)
+    
+    log.info(f"   Baseline mean: {float(baseline_mean.mean()):.2f}°C")
+    log.info(f"   Baseline std:  {float(baseline_std.mean()):.2f}°C")
+    
+    # 4. Current period median yükle
+    log.info("\n4) Current period median yükleniyor...")
+    current_median = load_current_period_median(profile)
+    
+    # 5. Z-score bazlı anomali hesapla
+    log.info("\n5) Z-score bazlı anomali hesaplanıyor...")
+    log.info("   Formül: z_score = (current_median - baseline_mean) / baseline_std")
+    
+    anomaly_zscore = (current_median - baseline_mean.values) / baseline_std.values
+    
+    # Sonsuz değerleri temizle (std=0 olan pikseller için)
+    anomaly_zscore = np.where(
+        np.isfinite(anomaly_zscore),
+        anomaly_zscore,
+        np.nan
+    )
+    
+    valid_pixels = np.sum(~np.isnan(anomaly_zscore))
+    total_pixels = anomaly_zscore.size
+    coverage_pct = 100 * valid_pixels / total_pixels
+    
+    log.info(f"   Geçerli piksel kapsama: {coverage_pct:.1f}%")
+    log.info(f"   Anomali ortalaması: {np.nanmean(anomaly_zscore):.2f} σ")
+    log.info(f"   Anomali aralığı: [{np.nanmin(anomaly_zscore):.2f}, {np.nanmax(anomaly_zscore):.2f}] σ")
+    
+    # 6. Çıktıları kaydet
+    log.info("\n6) Çıktılar kaydediliyor...")
+    
+    # Baseline mean
     save_geotiff(
-        mean_lst.values,
+        baseline_mean.values,
         profile,
-        OUTPUT_DIR / "landsat_lst_timeseries_mean_celsius.tif"
+        OUTPUT_DIR / "baseline_lst_mean_celsius.tif"
     )
-    log.info("Ortalama LST GeoTIFF kaydedildi.")
-
+    log.info("   ✓ Baseline mean GeoTIFF kaydedildi")
+    
+    # Baseline std
     save_geotiff(
-        anomaly.values,
+        baseline_std.values,
         profile,
-        OUTPUT_DIR / "landsat_lst_latest_anomaly_celsius.tif"
+        OUTPUT_DIR / "baseline_lst_std_celsius.tif"
     )
-    log.info("Son görüntü anomalisi GeoTIFF kaydedildi.")
-
-    interpolated.to_netcdf(
-        OUTPUT_DIR / "landsat_lst_timeseries_interpolated.nc"
+    log.info("   ✓ Baseline std GeoTIFF kaydedildi")
+    
+    # Current period median
+    save_geotiff(
+        current_median,
+        profile,
+        OUTPUT_DIR / "current_period_median_celsius.tif"
     )
-    log.info("İnterpole edilmiş zaman serisi NetCDF olarak kaydedildi.")
-
-    window_size = min(3, interpolated.sizes["time"])
-
+    log.info("   ✓ Current period median GeoTIFF kaydedildi")
+    
+    # Anomali (z-score)
+    save_geotiff(
+        anomaly_zscore,
+        profile,
+        OUTPUT_DIR / "anomaly_zscore.tif"
+    )
+    log.info("   ✓ Anomali z-score GeoTIFF kaydedildi")
+    
+    # NetCDF (baseline zaman serisi)
+    baseline_interpolated.to_netcdf(
+        OUTPUT_DIR / "baseline_timeseries_interpolated.nc"
+    )
+    log.info("   ✓ Baseline zaman serisi NetCDF kaydedildi")
+    
+    # 7. Metadata kaydet
     metadata = {
         "step": "step5_preprocess_timeseries",
+        "method": "window_based_zscore_anomaly",
         "created_at": datetime.now().isoformat(),
-        "input_dir": str(INPUT_DIR),
-        "qa_dir": str(QA_DIR),
+        "input_dirs": {
+            "baseline_timeseries": str(BASELINE_INPUT_DIR),
+            "qa_masks": str(QA_DIR),
+            "current_period": str(CURRENT_PERIOD_DIR)
+        },
         "log_file": str(log_file),
-        "time_count": int(interpolated.sizes["time"]),
-        "anomaly_method": "recent_window_median_minus_timeseries_mean",
-        "anomaly_window_size": int(window_size),
-        "interpolation_method": "linear",
-        "masking_source": "QA_PIXEL",
+        "baseline": {
+            "time_count": int(baseline_interpolated.sizes["time"]),
+            "date_range": f"{baseline_interpolated.time.values[0]} to {baseline_interpolated.time.values[-1]}",
+            "interpolation_method": "linear",
+            "mean_celsius": float(baseline_mean.mean()),
+            "std_celsius": float(baseline_std.mean())
+        },
+        "current_period": {
+            "window_days": CURRENT_PERIOD_DAYS,
+            "end_date": CURRENT_PERIOD_END_DATE,
+            "mean_celsius": float(np.nanmean(current_median))
+        },
+        "anomaly": {
+            "method": "z_score",
+            "formula": "(current_median - baseline_mean) / baseline_std",
+            "coverage_percent": float(coverage_pct),
+            "mean_zscore": float(np.nanmean(anomaly_zscore)),
+            "min_zscore": float(np.nanmin(anomaly_zscore)),
+            "max_zscore": float(np.nanmax(anomaly_zscore))
+        },
+        "masking": {
+            "qa_source": "QA_PIXEL",
+            "physical_range": "[-30, 80] Celsius"
+        },
         "outputs": {
-            "mean_lst": "landsat_lst_timeseries_mean_celsius.tif",
-            "recent_anomaly": "landsat_lst_recent_anomaly_celsius.tif",
-            "interpolated_netcdf": "landsat_lst_timeseries_interpolated.nc"
+            "baseline_mean": "baseline_lst_mean_celsius.tif",
+            "baseline_std": "baseline_lst_std_celsius.tif",
+            "current_median": "current_period_median_celsius.tif",
+            "anomaly_zscore": "anomaly_zscore.tif",
+            "baseline_netcdf": "baseline_timeseries_interpolated.nc"
         },
         "status": "processed"
     }
@@ -234,10 +355,16 @@ def main() -> None:
         encoding="utf-8"
     )
 
-    log.info(f"Metadata kaydedildi: {metadata_path}")
+    log.info(f"\n   ✓ Metadata kaydedildi: {metadata_path}")
     log.info("=" * 60)
     log.info("STEP 5 TAMAMLANDI")
     log.info(f"Çıktı klasörü: {OUTPUT_DIR}")
+    log.info("\nÜretilen dosyalar:")
+    log.info("  1. baseline_lst_mean_celsius.tif")
+    log.info("  2. baseline_lst_std_celsius.tif")
+    log.info("  3. current_period_median_celsius.tif")
+    log.info("  4. anomaly_zscore.tif")
+    log.info("  5. baseline_timeseries_interpolated.nc")
     log.info("=" * 60)
 
 

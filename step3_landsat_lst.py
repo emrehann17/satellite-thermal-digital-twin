@@ -20,7 +20,19 @@ from pathlib import Path
 
 import ee
 
-from core.config import GEE_PROJECT, LANDSAT_COLLECTION, START_DATE, END_DATE
+from core.config import (
+    GEE_PROJECT, 
+    LANDSAT_COLLECTION, 
+    START_DATE, 
+    END_DATE,
+    LANDSAT_SCALE,
+    LANDSAT_OFFSET,
+    REGION_NAME,
+    CURRENT_PERIOD_DAYS,
+    CURRENT_PERIOD_END_DATE,
+    BASELINE_START_DATE,
+    BASELINE_END_DATE
+)
 from core.gee_utils import init_gee
 from core.regions import build_regions
 from core.io_utils import setup_logger
@@ -293,7 +305,93 @@ def get_landsat_daily_median_collection(
     return daily_collection, metadata
 
 # =============================================================================
-# 3. METADATA KAYDETME
+# 3. CURRENT PERIOD MEDIAN (ANOMALY IÇIN)
+# =============================================================================
+def get_current_period_median(
+    region: ee.Geometry,
+    region_name: str,
+    end_date: str,
+    window_days: int = 60
+) -> tuple[ee.Image, dict]:
+    """
+    Anomali hesabı için 'current state' tanımlar.
+    
+    Son N günlük penceredeki TÜM Landsat sahnelerini (path/row fark etmez)
+    median composite ile tek görüntüye indirir.
+    
+    Args:
+        region: Çalışma bölgesi
+        region_name: Bölge adı
+        end_date: Pencerenin bitiş tarihi (YYYY-MM-DD)
+        window_days: Pencere genişliği (gün)
+    
+    Returns:
+        (current_median_image, metadata_dict)
+    """
+    from datetime import datetime, timedelta
+    
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    start_dt = end_dt - timedelta(days=window_days)
+    start_date = start_dt.strftime("%Y-%m-%d")
+    
+    log.info(f"Current period median hazırlanıyor:")
+    log.info(f"  Bölge: {region_name}")
+    log.info(f"  Pencere: {start_date} -> {end_date} ({window_days} gün)")
+    
+    collection = (
+        ee.ImageCollection(LANDSAT_COLLECTION)
+        .filterBounds(region)
+        .filterDate(start_date, end_date)
+        .filter(ee.Filter.calendarRange(6, 9, "month"))  # Yaz ayları
+        .select("ST_B10")
+        .map(lambda img: img.clip(region))
+    )
+    
+    scene_count = collection.size().getInfo()
+    
+    if scene_count == 0:
+        raise ValueError(
+            f"{region_name} için {start_date} - {end_date} arasında yaz aylarında "
+            f"Landsat sahnesi bulunamadı."
+        )
+    
+    log.info(f"  Current period sahne sayısı: {scene_count}")
+    
+    # Tüm sahnelerin median'ını al
+    current_median = (
+        collection
+        .median()
+        .multiply(LANDSAT_SCALE)
+        .add(LANDSAT_OFFSET)
+        .subtract(273.15)
+        .rename("Current_Period_LST_Celsius")
+        .clip(region)
+    )
+    
+    metadata = {
+        "gee_project": GEE_PROJECT,
+        "region_name": region_name,
+        "collection": LANDSAT_COLLECTION,
+        "band": "ST_B10",
+        "unit": "Celsius",
+        "window_start": start_date,
+        "window_end": end_date,
+        "window_days": window_days,
+        "scene_count": scene_count,
+        "months_filter": "6-9",
+        "composite_method": "median",
+        "resolution": "30m",
+        "created_at": datetime.now().isoformat(),
+        "status": "current_period_median_prepared"
+    }
+    
+    log.info("Current period median başarıyla oluşturuldu.")
+    
+    return current_median, metadata
+
+
+# =============================================================================
+# 4. METADATA KAYDETME
 # =============================================================================
 def save_metadata(metadata: dict, filename: str = "step3_metadata.json") -> Path:
     """
@@ -319,24 +417,42 @@ def main() -> None:
     init_gee()
     regions = build_regions()
 
-    landsat_timeseries, metadata = get_landsat_daily_median_collection(
+    # Baseline için zaman serisi collection
+    log.info("\n1) Baseline zaman serisi hazırlanıyor...")
+    landsat_timeseries, ts_metadata = get_landsat_daily_median_collection(
         region=regions["dogu_akdeniz"],
         region_name="dogu_akdeniz",
-        start=START_DATE,
-        end=END_DATE
+        start=BASELINE_START_DATE,
+        end=BASELINE_END_DATE
     )
 
-    metadata_path = save_metadata(metadata)
+    #Current period median (anomali için)
+    log.info("\n2) Current period median hazırlanıyor...")
+    current_median, current_metadata = get_current_period_median(
+        region=regions["dogu_akdeniz"],
+        region_name=REGION_NAME,
+        end_date=CURRENT_PERIOD_END_DATE,
+        window_days=CURRENT_PERIOD_DAYS
+    )
+
+    # Metadata kaydetme
+    combined_metadata = {
+        "baseline_timeseries": ts_metadata,
+        "current_period": current_metadata
+    }
+    
+    metadata_path = save_metadata(combined_metadata)
 
     log.info("=" * 60)
     log.info("STEP 3 TAMAMLANDI")
     log.info(f"Metadata dosyası: {metadata_path}")
-    log.info("Hazırlanan çıktı: ee.ImageCollection tipinde yüksek çözünürlüklü Landsat zaman serisi")
-    log.info("Sonraki adım: step4")
+    log.info("\nHazırlanan çıktılar:")
+    log.info("  1. Baseline zaman serisi (ee.ImageCollection)")
+    log.info("  2. Current period median (ee.Image)")
+    log.info("Sonraki adım: step4 (export)")
     log.info("=" * 60)
 
-    _ = landsat_timeseries # Step4'te kullanılmak üzere döndürülen collection burada tutulur
-
+    return landsat_timeseries, current_median
 
 if __name__ == "__main__":
     main()

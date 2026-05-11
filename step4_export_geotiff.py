@@ -32,6 +32,10 @@ from core.config import (
     ENABLE_MODIS_EXPORT,
     ENABLE_LANDSAT_EXPORT,
     DOWNLOAD_MODE,
+    BASELINE_START_DATE,
+    BASELINE_END_DATE,
+    CURRENT_PERIOD_DAYS,
+    CURRENT_PERIOD_END_DATE,
 )
 
 from core.gee_utils import init_gee
@@ -40,7 +44,7 @@ from core.io_utils import setup_logger
 
 
 from step2_modis_5year_mean import process_summer_mean
-from step3_landsat_lst import get_landsat_daily_median_collection
+from step3_landsat_lst import get_landsat_daily_median_collection, get_current_period_median
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -370,14 +374,17 @@ def main() -> None:
 
     landsat_timeseries_exports = []
     landsat_processing_metadata = None
+    current_period_export = None
+    current_period_metadata = None
 
     if ENABLE_LANDSAT_EXPORT:
-        log.info("Step3 Landsat günlük composite koleksiyonu hazırlanıyor.")
+        # 1. Baseline zaman serisi
+        log.info("\nBaseline zaman serisi hazırlanıyor...")
         landsat_daily_collection, landsat_processing_metadata = get_landsat_daily_median_collection(
             region=region,
             region_name=REGION_NAME,
-            start=START_DATE,
-            end=END_DATE
+            start=BASELINE_START_DATE,
+            end=BASELINE_END_DATE
         )
 
         landsat_timeseries_exports = export_landsat_timeseries_lst_and_qa_to_drive(
@@ -390,6 +397,26 @@ def main() -> None:
             max_exports=MAX_LANDSAT_DAILY_EXPORTS,
             download_mode=DOWNLOAD_MODE
         )
+        
+        # 2. Current period median (anomali için)
+        log.info("\nCurrent period median hazırlanıyor...")
+        current_median_image, current_period_metadata = get_current_period_median(
+            region=region,
+            region_name=REGION_NAME,
+            end_date=CURRENT_PERIOD_END_DATE,
+            window_days=CURRENT_PERIOD_DAYS
+        )
+        
+        # Current period median'ı export et
+        current_period_export = export_image_to_drive(
+            image=current_median_image,
+            region=region,
+            description=f"export_current_period_median_{CURRENT_PERIOD_DAYS}days",
+            folder=EXPORT_FOLDER,
+            file_name_prefix=f"landsat_current_period_{CURRENT_PERIOD_DAYS}days",
+            scale=LANDSAT_EXPORT["scale"]
+        )
+        
     else:
         log.info("Landsat export devre dışı bırakıldı.")
 
@@ -398,8 +425,10 @@ def main() -> None:
         "step": "step4_export_geotiff",
         "pipeline_stage": "online",
         "region_name": REGION_NAME,
-        "date_start": START_DATE,
-        "date_end": END_DATE,
+        "baseline_date_start": BASELINE_START_DATE,
+        "baseline_date_end": BASELINE_END_DATE,
+        "current_period_end": CURRENT_PERIOD_END_DATE,
+        "current_period_days": CURRENT_PERIOD_DAYS,
         "export_folder": EXPORT_FOLDER,
         "download_mode": DOWNLOAD_MODE,
         "created_at": datetime.now().isoformat(),
@@ -411,15 +440,18 @@ def main() -> None:
         },
         "processing": {
             "modis": modis_processing_metadata,
-            "landsat_daily_median": landsat_processing_metadata
+            "landsat_baseline_timeseries": landsat_processing_metadata,
+            "landsat_current_period": current_period_metadata
         },
         "exports": {
             "modis": modis_export_metadata,
-            "landsat_daily_lst_qa": landsat_timeseries_exports
+            "landsat_baseline_timeseries": landsat_timeseries_exports,
+            "landsat_current_period": current_period_export
         },
         "notes": {
             "modis_download_mode": "drive_only_for_now",
-            "landsat_download_mode": DOWNLOAD_MODE
+            "landsat_download_mode": DOWNLOAD_MODE,
+            "anomaly_method": "z_score_window_based"
         },
         "status": "direct_download_completed" if DOWNLOAD_MODE == "direct" else "export_tasks_started"
     }
@@ -430,11 +462,14 @@ def main() -> None:
     log.info(f"Export metadata dosyası: {metadata_path}")
 
     if DOWNLOAD_MODE == "direct":
-        log.info("Landsat LST ve QA dosyaları doğrudan yerel klasörlere indirildi.")
+        log.info("Landsat dosyaları doğrudan yerel klasörlere indirildi.")
         log.info("Step5 çalıştırılabilir.")
     else:
         log.info("Google Drive export görevleri başlatıldı.")
         log.info("Dosyaları manuel indirip Step5 klasörlerine yerleştirmen gerekiyor.")
+        log.info("\nExport edilen dosyalar:")
+        log.info("  1. Baseline zaman serisi (ST_B10 + QA_PIXEL)")
+        log.info("  2. Current period median (LST Celsius)")
 
     log.info("=" * 60)
 
@@ -448,3 +483,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    
