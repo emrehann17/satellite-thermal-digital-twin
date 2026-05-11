@@ -55,3 +55,7 @@ BASELINE_END_DATE = "2022-09-30"
 # Current period - anomali hesabı için kullanılacak güncel pencere
 CURRENT_PERIOD_DAYS = 30  # 30 gün test için yeterli
 CURRENT_PERIOD_END_DATE = "2023-08-31"  # 2023 yaz sonu
+
+STEP5_WINDOW_SIZE = 512
+STEP5_STD_EPSILON = 1e-6  # Sıfır bölmeye karşı küçük bir değermis
+STEP5_WRITE_INTERPOLATED_NETCDF = False

@@ -50,179 +50,8 @@ def _set_export_date(image: ee.Image) -> ee.Image:
     return image.set("export_date", export_date)
 
 # =============================================================================
-# 1. LANDSAT LST İŞLEME
+# 1. LANDSAT TIMESERIES COLLECTION ÜRETME
 # =============================================================================
-def process_landsat_lst(
-    region: ee.Geometry,
-    region_name: str,
-    start: str = START_DATE,
-    end: str = END_DATE
-) -> tuple[ee.Image, dict]:
-    """
-    Landsat 8 Collection 2 Level 2 veri setini verilen bölge ve tarih aralığına göre filtreler,
-    ST_B10 bandını seçer, sıcaklık dönüşümünü uygular ve ortalama LST görüntüsü üretir.
-
-    Dönüş:
-        (landsat_lst_image, metadata_dict)
-    """
-    log.info(f"Landsat LST işleme başlatıldı. Bölge: {region_name}")
-    log.info(f"Tarih aralığı: {start} -> {end}")
-
-    collection = (
-        ee.ImageCollection(LANDSAT_COLLECTION)
-        .filterBounds(region)
-        .filterDate(start, end)
-        .select("ST_B10")
-    )
-
-    image_count = collection.size().getInfo()
-    log.info(f"Filtre sonrası Landsat görüntü sayısı: {image_count}")
-
-    if image_count == 0:
-        raise ValueError(
-            f"{region_name} bölgesi için {start} - {end} aralığında Landsat görüntüsü bulunamadı."
-        )
-
-    first_image = collection.first()
-    first_image_date = (
-        ee.Date(first_image.get("system:time_start"))
-        .format("YYYY-MM-dd")
-        .getInfo()
-    )
-
-    landsat_lst = (
-        collection
-        .mean()
-        .multiply(0.00341802)
-        .add(149.0)
-        .subtract(273.15)
-        .rename("Landsat_LST_Celsius")
-        .clip(region)
-    )
-
-    metadata = {
-        "gee_project": GEE_PROJECT,
-        "region_name": region_name,
-        "collection": LANDSAT_COLLECTION,
-        "band": "ST_B10",
-        "unit": "Celsius",
-        "date_start": start,
-        "date_end": end,
-        "months": "6-9",
-        "image_count": image_count,
-        "first_image_date": first_image_date,
-        "resolution": "30m",
-        "created_at": datetime.now().isoformat(),
-        "status": "processed"
-    }
-
-    log.info("Landsat LST işleme başarıyla tamamlandı.")
-    return landsat_lst, metadata
-
-# =============================================================================
-# 2. LANDSAT TIMESERIES COLLECTION ÜRETME
-# =============================================================================
-def get_landsat_daily_median_collection(
-    region: ee.Geometry,
-    region_name: str,
-    start: str = START_DATE,
-    end: str = END_DATE
-) -> tuple[ee.ImageCollection, dict]:
-    """
-    Step4 tarafından tarih tarih export edilecek Landsat zaman serisi collection'ını hazırlar.
-
-    NOT:
-        Bu fonksiyon export yapmaz.
-        ST_B10 ve QA_PIXEL bandlarını birlikte döndürür.
-    """
-    log.info(f"Landsat gunluk median composite hazirlaniyor. Bölge: {region_name}")
-    log.info(f"Tarih aralığı: {start} -> {end}")
-
-    base_collection = (
-        ee.ImageCollection(LANDSAT_COLLECTION)
-        .filterBounds(region)
-        .filterDate(start, end)
-    )
-
-    base_count = base_collection.size().getInfo()
-
-    filtered_collection = (
-        base_collection
-        .filter(ee.Filter.calendarRange(6, 9, "month"))
-        .select(["ST_B10", "QA_PIXEL"])
-        .map(lambda image: image.clip(region))
-        .map(_set_export_date)
-    )
-
-    filtered_count = filtered_collection.size().getInfo()
-
-    if filtered_count == 0:
-        raise ValueError(
-            f"{region_name} bölgesi için {start} - {end} aralığında yaz aylarına ait Landsat görüntüsü bulunamadı."
-        )
-    
-    unique_date = filtered_collection.aggregate_array("export_date").distinct().sort()
-    unique_date_count = unique_date.size().getInfo()
-    daily_date = unique_date.getInfo()
-    log.info(f"Yaz aylarında bulunan benzersiz tarih sayısı: {unique_date_count}")
-
-    def build_daily_composite(date_value):
-        date_value = ee.String(date_value)
-
-        daily_collection = filtered_collection.filter(
-            ee.Filter.eq("export_date", date_value)
-            )
-        
-        lst_median = daily_collection.select("ST_B10").median().rename("ST_B10")
-        qa_mode = daily_collection.select("QA_PIXEL").mode().rename("QA_PIXEL").toUint16()
-        first_image = ee.Image(daily_collection.sort("system:time_start").first())
-
-        return (
-            lst_median
-            .addBands(qa_mode)
-            .clip(region)
-            .set("export_date", date_value)
-            .set("system:time_start", first_image.get("system:time_start"))
-            .set("source_image_count", daily_collection.size())
-        )
-    
-    daily_collection = ee.ImageCollection(unique_date.map(build_daily_composite))
-
-    '''
-        ST_B10 fiziksel/sayısal bir ölçüm bandı: yüzey sıcaklığı DN değeri. Aynı tarihte birden fazla sahne varsa bu değerleri median ile birleştirmek mantıklı;
-        uç değerleri yumuşatır ve tek bir temsil üretir.
-
-        QA_PIXEL ise sıcaklık gibi sürekli bir ölçüm değil, bit maskesi. İçinde “bulut var mı”, “gölge var mı”, “snow var mı”, “fill mi” gibi bayraklar bit bit kodlanır.
-        Bu yüzden median almak teknik olarak yanlış olabilir; iki QA kodunun ortanca değeri gerçek bir QA durumu temsil etmeyebilir.
-        mode ise aynı gün sahnelerindeki en sık görülen QA kodunu seçer,
-        bit maskesi için daha savunulabilir bir basit composite yöntemidir.
-    '''
-    
-    metadata = {
-        "gee_project": GEE_PROJECT,
-        "region_name": region_name,
-        "collection": LANDSAT_COLLECTION,
-        "bands": ["ST_B10", "QA_PIXEL"],
-        "date_start": start,
-        "date_end": end,
-        "months_filter": "6-9",
-        "all_image_count": base_count,
-        "filtered_image_count": filtered_count,
-        "daily_composite_count": unique_date_count,
-        "daily_dates": daily_date,
-        "lst_composite_method": "median",
-        "qa_composite_method": "mode",
-        "all_image_count": base_count,
-        "created_at": datetime.now().isoformat(),
-        "status": "timeseries_collection_prepared"
-    }
-
-    log.info(f"Tüm Landsat görüntü sayısı: {base_count}")
-    log.info(f"Yaz ayları filtreli Landsat görüntü sayısı: {filtered_count}")
-    log.info(f"Gunluk composite sayisi: {unique_date_count}")
-
-    return daily_collection, metadata
-
 def get_landsat_daily_median_collection(
     region: ee.Geometry,
     region_name: str,
@@ -305,7 +134,7 @@ def get_landsat_daily_median_collection(
     return daily_collection, metadata
 
 # =============================================================================
-# 3. CURRENT PERIOD MEDIAN (ANOMALY IÇIN)
+# 2. CURRENT PERIOD MEDIAN (ANOMALY IÇIN)
 # =============================================================================
 def get_current_period_median(
     region: ee.Geometry,
@@ -391,7 +220,7 @@ def get_current_period_median(
 
 
 # =============================================================================
-# 4. METADATA KAYDETME
+# 3. METADATA KAYDETME
 # =============================================================================
 def save_metadata(metadata: dict, filename: str = "step3_metadata.json") -> Path:
     """

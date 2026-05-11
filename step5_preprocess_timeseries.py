@@ -25,7 +25,7 @@ from datetime import datetime
 import numpy as np
 import rasterio
 import xarray as xr
-
+from rasterio.windows import Window
 
 BASE_DIR = Path(__file__).resolve().parent
 BASELINE_INPUT_DIR = BASE_DIR / "data" / "landsat_timeseries"
@@ -38,6 +38,11 @@ QA_DIR.mkdir(parents=True, exist_ok=True)
 CURRENT_PERIOD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+STEP5_WINDOW_SIZE = globals().get("STEP5_WINDOW_SIZE", 512)
+STEP5_WRITE_INTERPOLATED_NETCDF = globals().get(
+    "STEP5_WRITE_INTERPOLATED_NETCDF",
+    False,
+)
 
 log, log_file = setup_logger("step5")
 
@@ -63,17 +68,8 @@ def extract_date_from_filename(path: Path) -> datetime.date:
 
 
 def dn_to_celsius(dn_array: np.ndarray) -> np.ndarray:
-    """
-    Landsat Collection 2 Level 2 ST_B10 DN değerini Celsius'a çevirir.
-
-    Kelvin = DN * 0.00341802 + 149.0
-    Celsius = Kelvin - 273.15
-    """
-
     kelvin = dn_array * LANDSAT_SCALE + LANDSAT_OFFSET
-    celsius = kelvin - 273.15
-    return celsius
-
+    return kelvin - 273.15
 
 def build_cloud_mask_from_qa(qa_array: np.ndarray) -> np.ndarray:
     """
@@ -92,8 +88,7 @@ def build_cloud_mask_from_qa(qa_array: np.ndarray) -> np.ndarray:
 
     bad_pixels = (fill | dilated_cloud | cirrus | cloud | cloud_shadow | snow)
 
-    clean_mask = (qa_array.astype(np.uint16) & bad_pixels) == 0 
-    return clean_mask
+    return (qa_array.astype(np.uint16) & bad_pixels) == 0
 
 
 def read_raster(path: Path) -> tuple[np.ndarray, dict]:
