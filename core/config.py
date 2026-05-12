@@ -13,14 +13,6 @@ DRIVE_TASK_POLLING_ENABLED = True
 DRIVE_TASK_POLL_INTERVAL_SECONDS = 60
 DRIVE_TASK_TIMEOUT_SECONDS = 6 * 60 * 60
 
-# Export görevleri tamamlandıktan sonra Drive klasörünü geemap/gdown ile indir.
-# Google Drive klasörünün paylaşılabilir URL'si veya klasör ID'si gerekir.
-DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT = False
-GOOGLE_DRIVE_EXPORT_FOLDER_URL = None
-GOOGLE_DRIVE_EXPORT_FOLDER_ID = None
-DRIVE_DOWNLOAD_STAGING_SUBDIR = "drive_exports"
-DRIVE_DOWNLOAD_OVERWRITE = True
-
 MODIS_EXPORT = {
     "description": "export_modis_lst_5y_summer_mean",
     "file_name_prefix": "modis_lst_dogu_akdeniz_5y_summer_mean",
@@ -31,6 +23,11 @@ LANDSAT_EXPORT = {
     "file_name_prefix": "landsat_lst_dogu_akdeniz",
     "scale": 30,
 }
+
+DOWNLOAD_MODE = "auto_drive"   # "drive", "direct", veya "auto_drive"
+# "drive" -> Manuel Drive indirme
+# "direct" -> getDownloadURL ile doğrudan (küçük dosyalar için)
+# "auto_drive" -> Drive export + otomatik task polling + otomatik indirme
 
 ENABLE_MODIS_EXPORT = False
 ENABLE_LANDSAT_EXPORT = False
@@ -64,3 +61,10 @@ CURRENT_PERIOD_END_DATE = "2023-08-31"  # 2023 yaz sonu
 STEP5_WINDOW_SIZE = 512
 STEP5_STD_EPSILON = 1e-6
 STEP5_WRITE_INTERPOLATED_NETCDF = False
+
+DIRECT_DOWNLOAD_DIR = "data"
+DIRECT_LANDSAT_LST_SUBDIR = "landsat_timeseries"
+DIRECT_LANDSAT_QA_SUBDIR = "landsat_qa"
+
+DIRECT_DOWNLOAD_SCALE = 30
+DIRECT_DOWNLOAD_MAX_IMAGES = 5
