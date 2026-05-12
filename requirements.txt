@@ -3,3 +3,4 @@ rasterio
 numpy
 matplotlib
 numpy
+geemap

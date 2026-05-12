@@ -2,14 +2,8 @@
 main.py
 
 Yapılanlar:
-    - Step1'den Step4'e kadar olan akışı sırasıyla çalıştırır
+    - Step1'den Step5'e kadar olan akışı sırasıyla çalıştırır
     - GEE tarafındaki online pipeline'ı tek yerden yönetir
-    - Step4 sonrası manuel indirme gerektiğini kullanıcıya bildirir
-
-NOT:
-    Step5 bu dosya tarafından çalıştırılmaz.
-    Step4 sonrası export edilen GeoTIFF dosyaları manuel olarak indirilip
-    ilgili klasörlere yerleştirildikten sonra Step5 ayrı çalıştırılmalıdır.
 """
 
 from datetime import datetime
@@ -22,6 +16,7 @@ import step1_fetch_modis
 import step2_modis_5year_mean
 import step3_landsat_lst
 import step4_export_geotiff
+import step5_preprocess_timeseries
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -44,7 +39,7 @@ def main() -> None:
     start_time = datetime.now()
 
     log.info("#" * 80)
-    log.info("ONLINE PIPELINE BAŞLIYOR (STEP1 -> STEP4)")
+    log.info("PIPELINE BAŞLIYOR (STEP1 -> STEP5)")
     log.info(f"Başlangıç zamanı: {start_time.isoformat()}")
     log.info("#" * 80)
 
@@ -53,6 +48,7 @@ def main() -> None:
         run_step("STEP 2", step2_modis_5year_mean.main)
         run_step("STEP 3", step3_landsat_lst.main)
         run_step("STEP 4", step4_export_geotiff.main)
+        run_step("STEP 5", step5_preprocess_timeseries.main)
 
         end_time = datetime.now()
 
@@ -61,19 +57,6 @@ def main() -> None:
         log.info(f"Bitiş zamanı: {end_time.isoformat()}")
         log.info(f"Log dosyası: {log_file}")
         log.info("#" * 80)
-
-        log.info("Step4 sonrası export edilen GeoTIFF dosyaları Google Drive'a gönderilmiştir.")
-        log.info("Bir sonraki adım: GeoTIFF dosyalarını manuel olarak indirip ilgili veri klasörlerine yerleştirin.")
-        log.info("Daha sonra Step5'i ayrı olarak çalıştırın:")
-        log.info("python step5_preprocess_timeseries.py")
-
-        print("\n" + "=" * 80)
-        print("STEP1 -> STEP4 tamamlandı.")
-        print("Step4 export görevleri başlatıldı / tamamlandı.")
-        print("Şimdi GeoTIFF dosyalarını Drive'dan indirip uygun klasörlere yerleştirmelisin.")
-        print("Sonrasında Step5'i manuel çalıştır:")
-        print("python step5_preprocess_timeseries.py")
-        print("=" * 80 + "\n")
 
     except Exception as e:
         log.error("Pipeline çalışırken hata oluştu.")
