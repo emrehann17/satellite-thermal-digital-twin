@@ -14,11 +14,14 @@ NOT:
     Sadece Step2 ve Step3 çıktılarını dışa aktarır.
 """
 import json
-import requests
+import re
+import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 
 import ee
+import core.config as runtime_config
 
 from core.config import (
     START_DATE,
@@ -31,24 +34,19 @@ from core.config import (
     LANDSAT_EXPORT,
     ENABLE_MODIS_EXPORT,
     ENABLE_LANDSAT_EXPORT,
-    DOWNLOAD_MODE,
+    DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT,
+    DRIVE_DOWNLOAD_OVERWRITE,
+    DRIVE_DOWNLOAD_STAGING_SUBDIR,
+    DRIVE_TASK_POLLING_ENABLED,
+    DRIVE_TASK_POLL_INTERVAL_SECONDS,
+    DRIVE_TASK_TIMEOUT_SECONDS,
+    GOOGLE_DRIVE_EXPORT_FOLDER_ID,
+    GOOGLE_DRIVE_EXPORT_FOLDER_URL,
     BASELINE_START_DATE,
     BASELINE_END_DATE,
     CURRENT_PERIOD_DAYS,
     CURRENT_PERIOD_END_DATE,
 )
-
-# Auto-drive için ek config
-try:
-    from core.config import (
-        AUTO_DRIVE_DOWNLOAD_DIR,
-        AUTO_DRIVE_CHECK_INTERVAL,
-        AUTO_DRIVE_TIMEOUT
-    )
-except ImportError:
-    AUTO_DRIVE_DOWNLOAD_DIR = "data"
-    AUTO_DRIVE_CHECK_INTERVAL = 30
-    AUTO_DRIVE_TIMEOUT = 3600
 
 from core.gee_utils import init_gee
 from core.regions import build_regions
@@ -58,24 +56,98 @@ from core.io_utils import setup_logger
 from step2_modis_5year_mean import process_summer_mean
 from step3_landsat_lst import get_landsat_daily_median_collection, get_current_period_median
 
-# Otomatik Drive indirme için
-try:
-    from core.drive_downloader import TaskPoller, batch_export_and_wait
-    DRIVE_DOWNLOADER_AVAILABLE = True
-except ImportError:
-    DRIVE_DOWNLOADER_AVAILABLE = False
-    if DOWNLOAD_MODE == "auto_drive":
-        '''log.warning(
-            "drive_downloader module not found. "
-            "Auto-drive mode will not work. Falling back to 'drive' mode."
-        )'''
-
 
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUTS_DIR = BASE_DIR / "outputs" / "step4"
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
 log, log_file = setup_logger("step4")
+DRIVE_EXPORT_TASKS = []
+
+
+def register_drive_task(
+    task: ee.batch.Task,
+    metadata_ref: dict,
+    description: str,
+    file_name_prefix: str,
+    output_group: str,
+) -> None:
+    """
+    Drive export task'ını polling aşamasında takip edebilmek için kaydeder.
+
+    metadata_ref, daha sonra task state alanları güncellensin diye ilgili
+    metadata sözlüğüne referans olarak tutulur.
+    """
+    DRIVE_EXPORT_TASKS.append(
+        {
+            "task": task,
+            "metadata": metadata_ref,
+            "description": description,
+            "file_name_prefix": file_name_prefix,
+            "output_group": output_group,
+        }
+    )
+
+
+def get_legacy_download_mode() -> str | None:
+    value = getattr(runtime_config, "DOWNLOAD_MODE", None)
+    if value is None:
+        return None
+
+    normalized = str(value).strip().lower()
+    return normalized or None
+
+
+def log_drive_download_configuration() -> None:
+    legacy_download_mode = get_legacy_download_mode()
+
+    log.info(
+        "Drive download config: polling=%s, auto_download=%s, folder_url=%s, folder_id=%s",
+        DRIVE_TASK_POLLING_ENABLED,
+        DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT,
+        bool(GOOGLE_DRIVE_EXPORT_FOLDER_URL),
+        bool(GOOGLE_DRIVE_EXPORT_FOLDER_ID),
+    )
+
+    if legacy_download_mode is not None:
+        log.warning(
+            "Legacy DOWNLOAD_MODE=%s bulundu. Step4 artik bu alanla davranis secmiyor; "
+            "otomatik indirme icin DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT=True ve "
+            "GOOGLE_DRIVE_EXPORT_FOLDER_URL veya GOOGLE_DRIVE_EXPORT_FOLDER_ID kullanilmali.",
+            legacy_download_mode,
+        )
+
+
+def extract_google_drive_folder_id(url_or_id: str | None) -> str | None:
+    if not url_or_id:
+        return None
+
+    value = str(url_or_id).strip()
+    if not value:
+        return None
+
+    match = re.search(r"/folders/([a-zA-Z0-9_-]+)", value)
+    if match:
+        return match.group(1)
+
+    if re.fullmatch(r"[a-zA-Z0-9_-]{10,}", value):
+        return value
+
+    return None
+
+
+def resolve_drive_folder_reference() -> tuple[str | None, str | None]:
+    folder_id = extract_google_drive_folder_id(GOOGLE_DRIVE_EXPORT_FOLDER_ID)
+    if folder_id is None:
+        folder_id = extract_google_drive_folder_id(GOOGLE_DRIVE_EXPORT_FOLDER_URL)
+
+    folder_url = None
+    if folder_id is not None:
+        folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+    elif GOOGLE_DRIVE_EXPORT_FOLDER_URL:
+        folder_url = str(GOOGLE_DRIVE_EXPORT_FOLDER_URL).strip()
+
+    return folder_url, folder_id
 
 # =============================================================================
 # 1. GOOGLE DRIVE EXPORT
@@ -126,7 +198,7 @@ def export_image_to_drive(
     log.info(f"Task ID: {status.get('id')}")
     log.info(f"Task state: {status.get('state')}")
 
-    return {
+    metadata = {
         "description": description,
         "folder": folder,
         "file_name_prefix" : file_name_prefix,
@@ -137,6 +209,14 @@ def export_image_to_drive(
         "task_state": status.get("state"),
         "started_at": datetime.now().isoformat()
     }
+    register_drive_task(
+        task=task,
+        metadata_ref=metadata,
+        description=description,
+        file_name_prefix=file_name_prefix,
+        output_group="modis" if "modis" in file_name_prefix.lower() else "current_period",
+    )
+    return metadata
 
 # =============================================================================
 # 2. LANDSAT DAILY LST+QA EXPORT 
@@ -150,16 +230,10 @@ collection: ee.ImageCollection,
     scale: int = LANDSAT_EXPORT["scale"],
     crs: str = EXPORT_CRS,
     max_exports: int = 20,
-    download_mode: str = "drive",
 ) -> list[dict]:
     """
     Landsat günlük composite collection'ındaki her görüntü için
-    ST_B10 ve QA_PIXEL bantlarını export eder.
-
-    download_mode:
-        - "drive"      -> Google Drive export (manuel indirme)
-        - "direct"     -> ee.Image.getDownloadURL ile doğrudan yerel indirme
-        - "auto_drive" -> Drive export + otomatik task polling + indirme talimatı
+    ST_B10 ve QA_PIXEL bantlarını Google Drive'a export eder.
     """
     if not date_list:
         log.warning("date_list boş geldi. Landsat export başlatılmadı.")
@@ -172,12 +246,7 @@ collection: ee.ImageCollection,
         return []
 
     log.info(f"Export edilecek günlük Landsat görüntü sayısı: {export_count}")
-    log.info(f"Çalışma modu: {download_mode}")
-    
-    # Auto-drive modunda drive'a geri dön eğer module yüklü değilse
-    if download_mode == "auto_drive" and not DRIVE_DOWNLOADER_AVAILABLE:
-        log.warning("drive_downloader bulunamadı, 'drive' moduna geçiliyor")
-        download_mode = "drive"
+    log.info("Çalışma modu: Drive export + task polling")
 
     limited_collection = (
         collection
@@ -187,11 +256,6 @@ collection: ee.ImageCollection,
 
     collection_list = limited_collection.toList(export_count)
     export_metadata = []
-    
-    # Task listesi (auto_drive için)
-    all_tasks = []
-
-    lst_dir, qa_dir = ensure_direct_download_dirs() if download_mode == "direct" else (None, None)
 
     for i in range(export_count):
         image = ee.Image(collection_list.get(i))
@@ -206,209 +270,330 @@ collection: ee.ImageCollection,
         qa_description = f"export_{file_prefix}_{date_text}_qa"
         qa_file_name = f"{file_prefix}_{date_text}_qa"
 
-        if download_mode in ["drive", "auto_drive"]:
-            log.info(f"[{i + 1}/{export_count}] LST Drive export: {lst_file_name}")
+        log.info(f"[{i + 1}/{export_count}] LST Drive export: {lst_file_name}")
 
-            lst_task = ee.batch.Export.image.toDrive(
-                image=lst_image,
-                description=lst_description,
-                folder=folder,
-                fileNamePrefix=lst_file_name,
-                region=region,
-                scale=scale,
-                crs=crs,
-                maxPixels=1e13,
-                fileFormat="GeoTIFF",
-            )
-            lst_task.start()
-            lst_status = lst_task.status()
-            
-            if download_mode == "auto_drive":
-                all_tasks.append(("lst", lst_task, lst_file_name))
-
-            log.info(f"[{i + 1}/{export_count}] QA Drive export: {qa_file_name}")
-
-            qa_task = ee.batch.Export.image.toDrive(
-                image=qa_image,
-                description=qa_description,
-                folder=folder,
-                fileNamePrefix=qa_file_name,
-                region=region,
-                scale=scale,
-                crs=crs,
-                maxPixels=1e13,
-                fileFormat="GeoTIFF",
-            )
-            qa_task.start()
-            qa_status = qa_task.status()
-            
-            if download_mode == "auto_drive":
-                all_tasks.append(("qa", qa_task, qa_file_name))
-
-            export_metadata.append({
-                "date": date_text,
-                "mode": download_mode,
-                "folder": folder,
-                "scale": scale,
-                "crs": crs,
-                "lst": {
-                    "band": "ST_B10",
-                    "description": lst_description,
-                    "file_name_prefix": lst_file_name,
-                    "task_id": lst_status.get("id"),
-                    "task_state": lst_status.get("state"),
-                },
-                "qa": {
-                    "band": "QA_PIXEL",
-                    "description": qa_description,
-                    "file_name_prefix": qa_file_name,
-                    "task_id": qa_status.get("id"),
-                    "task_state": qa_status.get("state"),
-                },
-            })
-
-        elif download_mode == "direct":
-            log.info(f"[{i + 1}/{export_count}] LST direct download: {lst_file_name}")
-            lst_meta = download_image_via_url(
-                image=lst_image,
-                region=region,
-                output_path=lst_dir / f"{lst_file_name}.tif",
-                scale=scale,
-                crs=crs,
-            )
-
-            log.info(f"[{i + 1}/{export_count}] QA direct download: {qa_file_name}")
-            qa_meta = download_image_via_url(
-                image=qa_image,
-                region=region,
-                output_path=qa_dir / f"{qa_file_name}.tif",
-                scale=scale,
-                crs=crs,
-            )
-
-            export_metadata.append({
-                "date": date_text,
-                "mode": "direct",
-                "scale": scale,
-                "crs": crs,
-                "lst": {
-                    "band": "ST_B10",
-                    **lst_meta,
-                },
-                "qa": {
-                    "band": "QA_PIXEL",
-                    **qa_meta,
-                },
-            })
-
-        else:
-            raise ValueError(f"Desteklenmeyen download_mode: {download_mode}")
-    
-    # Auto-drive modunda: Task'lerin tamamlanmasını bekle
-    if download_mode == "auto_drive" and all_tasks:
-        log.info("\n" + "=" * 60)
-        log.info("AUTO-DRIVE: Task polling başlatılıyor...")
-        log.info(f"Toplam {len(all_tasks)} task bekleniyor")
-        log.info(f"Kontrol aralığı: {AUTO_DRIVE_CHECK_INTERVAL}s")
-        log.info(f"Timeout: {AUTO_DRIVE_TIMEOUT}s")
-        log.info("=" * 60)
-        
-        poller = TaskPoller(
-            check_interval=AUTO_DRIVE_CHECK_INTERVAL,
-            timeout=AUTO_DRIVE_TIMEOUT,
-            output_dir=Path(AUTO_DRIVE_DOWNLOAD_DIR)
+        lst_task = ee.batch.Export.image.toDrive(
+            image=lst_image,
+            description=lst_description,
+            folder=folder,
+            fileNamePrefix=lst_file_name,
+            region=region,
+            scale=scale,
+            crs=crs,
+            maxPixels=1e13,
+            fileFormat="GeoTIFF",
         )
-        
-        # Tüm task'leri bekle
-        tasks_only = [task for _, task, _ in all_tasks]
-        results = poller.wait_for_tasks(tasks_only)
-        
-        # Metadata'ya sonuçları ekle
-        for meta in export_metadata:
-            lst_task_id = meta["lst"]["task_id"]
-            qa_task_id = meta["qa"]["task_id"]
-            
-            meta["lst"]["task_completed"] = results.get(lst_task_id, False)
-            meta["qa"]["task_completed"] = results.get(qa_task_id, False)
-        
-        # İndirme talimatları
-        successful_count = sum(results.values())
-        log.info("\n" + "=" * 60)
-        log.info(f"Task polling tamamlandı: {successful_count}/{len(tasks_only)} başarılı")
-        log.info("\nÖNEMLİ: Dosyalar Google Drive'a export edildi.")
-        log.info(f"Google Drive/{folder}/ klasöründen dosyaları manuel olarak indir:")
-        log.info("")
-        
-        for task_type, task, filename in all_tasks:
-            task_id = task.status()['id']
-            if results.get(task_id, False):
-                if task_type == "lst":
-                    target_dir = "data/landsat_timeseries/"
-                else:  # qa
-                    target_dir = "data/landsat_qa/"
-                
-                log.info(f"  ✓ {filename}.tif -> {target_dir}")
-        
-        log.info("\nDrive'dan indirme talimatları:")
-        log.info("  1. Google Drive'ı aç")
-        log.info(f"  2. {folder}/ klasörüne git")
-        log.info("  3. LST dosyalarını -> data/landsat_timeseries/ klasörüne kopyala")
-        log.info("  4. QA dosyalarını -> data/landsat_qa/ klasörüne kopyala")
-        log.info("=" * 60)
+        lst_task.start()
+        lst_status = lst_task.status()
+
+        log.info(f"[{i + 1}/{export_count}] QA Drive export: {qa_file_name}")
+
+        qa_task = ee.batch.Export.image.toDrive(
+            image=qa_image,
+            description=qa_description,
+            folder=folder,
+            fileNamePrefix=qa_file_name,
+            region=region,
+            scale=scale,
+            crs=crs,
+            maxPixels=1e13,
+            fileFormat="GeoTIFF",
+        )
+        qa_task.start()
+        qa_status = qa_task.status()
+
+        lst_meta = {
+            "band": "ST_B10",
+            "description": lst_description,
+            "file_name_prefix": lst_file_name,
+            "task_id": lst_status.get("id"),
+            "task_state": lst_status.get("state"),
+        }
+        qa_meta = {
+            "band": "QA_PIXEL",
+            "description": qa_description,
+            "file_name_prefix": qa_file_name,
+            "task_id": qa_status.get("id"),
+            "task_state": qa_status.get("state"),
+        }
+
+        register_drive_task(
+            task=lst_task,
+            metadata_ref=lst_meta,
+            description=lst_description,
+            file_name_prefix=lst_file_name,
+            output_group="baseline_lst",
+        )
+        register_drive_task(
+            task=qa_task,
+            metadata_ref=qa_meta,
+            description=qa_description,
+            file_name_prefix=qa_file_name,
+            output_group="baseline_qa",
+        )
+
+        export_metadata.append({
+            "date": date_text,
+            "mode": "drive",
+            "folder": folder,
+            "scale": scale,
+            "crs": crs,
+            "lst": lst_meta,
+            "qa": qa_meta,
+        })
 
     return export_metadata
 
 # =============================================================================
-# 3. DOWNLOAD MODE - GOOGLE DRIVE'DAN DOSYA İNDİRME
+# 3. DRIVE TASK POLLING VE GEEMAP İNDİRME
 # =============================================================================
-def ensure_direct_download_dirs() -> tuple[Path, Path]:
+def poll_drive_export_tasks(
+    task_records: list[dict],
+    poll_interval_seconds: int = DRIVE_TASK_POLL_INTERVAL_SECONDS,
+    timeout_seconds: int = DRIVE_TASK_TIMEOUT_SECONDS,
+) -> dict:
     """
-    Direct download için yerel klasörleri hazırlar.
+    Başlatılmış Earth Engine Drive export task'larını tamamlanana kadar izler.
+
+    Task durumları metadata referanslarına da yazılır. Herhangi bir task FAILED
+    veya CANCELLED olursa hata yükseltilir; böylece Step5'e eksik veriyle
+    geçilmesi engellenir.
     """
+    if not task_records:
+        log.info("Polling için kayıtlı Drive export task'ı yok.")
+        return {
+            "enabled": True,
+            "task_count": 0,
+            "completed": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "statuses": [],
+        }
+
+    started_at = time.monotonic()
+    terminal_states = {"COMPLETED", "FAILED", "CANCELLED"}
+    statuses_by_id = {}
+
+    log.info("Drive export task polling başlıyor: %s task", len(task_records))
+
+    while True:
+        completed_count = 0
+        failed_records = []
+        cancelled_records = []
+
+        for record in task_records:
+            status = record["task"].status()
+            state = status.get("state", "UNKNOWN")
+            metadata_ref = record["metadata"]
+
+            metadata_ref["task_state"] = state
+            metadata_ref["last_checked_at"] = datetime.now().isoformat()
+            metadata_ref["error_message"] = status.get("error_message")
+
+            if state in terminal_states:
+                metadata_ref["finished_at"] = metadata_ref.get(
+                    "finished_at",
+                    datetime.now().isoformat(),
+                )
+                completed_count += 1
+
+            if state == "FAILED":
+                failed_records.append(record)
+            elif state == "CANCELLED":
+                cancelled_records.append(record)
+
+            statuses_by_id[status.get("id") or record["description"]] = {
+                "description": record["description"],
+                "file_name_prefix": record["file_name_prefix"],
+                "output_group": record["output_group"],
+                "state": state,
+                "error_message": status.get("error_message"),
+            }
+
+        log.info(
+            "Drive export task durumu: %s/%s tamamlandı",
+            completed_count,
+            len(task_records),
+        )
+
+        if failed_records or cancelled_records:
+            details = [
+                f"{record['description']}={record['metadata'].get('task_state')}"
+                for record in failed_records + cancelled_records
+            ]
+            raise RuntimeError(
+                "Bazı Drive export task'ları başarısız oldu: " + ", ".join(details)
+            )
+
+        if completed_count == len(task_records):
+            break
+
+        elapsed = time.monotonic() - started_at
+        if elapsed >= timeout_seconds:
+            raise TimeoutError(
+                f"Drive export task polling zaman aşımına uğradı: {timeout_seconds} sn"
+            )
+
+        time.sleep(poll_interval_seconds)
+
+    statuses = list(statuses_by_id.values())
+    return {
+        "enabled": True,
+        "task_count": len(task_records),
+        "completed": sum(1 for item in statuses if item["state"] == "COMPLETED"),
+        "failed": sum(1 for item in statuses if item["state"] == "FAILED"),
+        "cancelled": sum(1 for item in statuses if item["state"] == "CANCELLED"),
+        "statuses": statuses,
+        "completed_at": datetime.now().isoformat(),
+    }
+
+
+def ensure_step5_data_dirs() -> tuple[Path, Path, Path, Path]:
+    """İndirilen rasterlar için yerel veri klasörlerini hazırlar."""
     lst_dir = BASE_DIR / "data" / "landsat_timeseries"
     qa_dir = BASE_DIR / "data" / "landsat_qa"
+    current_dir = BASE_DIR / "data" / "current_period"
+    modis_dir = BASE_DIR / "data" / "modis"
 
     lst_dir.mkdir(parents=True, exist_ok=True)
     qa_dir.mkdir(parents=True, exist_ok=True)
+    current_dir.mkdir(parents=True, exist_ok=True)
+    modis_dir.mkdir(parents=True, exist_ok=True)
 
-    return lst_dir, qa_dir
+    return lst_dir, qa_dir, current_dir, modis_dir
 
 
-def download_image_via_url(
-    image: ee.Image,
-    region: ee.Geometry,
-    output_path: Path,
-    scale: int,
-    crs: str = EXPORT_CRS
-) -> dict:
+def copy_with_overwrite_control(source_path: Path, target_path: Path) -> None:
+    """Dosyayı hedefe kopyalar; overwrite ayarı kapalıysa mevcut dosyayı korur."""
+    if target_path.exists() and not DRIVE_DOWNLOAD_OVERWRITE:
+        log.info("Dosya zaten var, atlandı: %s", target_path)
+        return
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, target_path)
+
+
+def place_downloaded_drive_tifs(staging_dir: Path) -> dict:
     """
-    ee.Image.getDownloadURL ile tek görüntüyü doğrudan indirir.
-    Küçük bölgeler ve test amaçlı kullanıma uygundur.
+    geemap ile indirilen Drive GeoTIFF dosyalarını yerel veri klasörlerine dağıtır.
+
+    Dosya adı eşleşmeleri:
+        *_qa.tif                         -> data/landsat_qa
+        landsat_current_period_*.tif     -> data/current_period
+        landsat_lst_*.tif                -> data/landsat_timeseries
+        modis_*.tif                      -> data/modis
     """
-    url = image.getDownloadURL({
-        "region": region,
-        "scale": scale,
-        "crs": crs,
-        "format": "GEO_TIFF"
+    lst_dir, qa_dir, current_dir, modis_dir = ensure_step5_data_dirs()
+    copied = {
+        "baseline_lst": [],
+        "baseline_qa": [],
+        "current_period": [],
+        "modis": [],
+        "unmatched": [],
     }
-    )
 
-    log.info(f"Direct download başlatılıyor: {output_path.name}")
+    for source_path in sorted(staging_dir.rglob("*.tif")):
+        name = source_path.name
+        lower_name = name.lower()
 
-    response = requests.get(url, timeout=300)
-    response.raise_for_status()
+        if lower_name.endswith("_qa.tif"):
+            target_path = qa_dir / name
+            copied["baseline_qa"].append(str(target_path))
+        elif lower_name.startswith("landsat_current_period_"):
+            target_path = current_dir / name
+            copied["current_period"].append(str(target_path))
+        elif lower_name.startswith(MODIS_EXPORT["file_name_prefix"].lower()):
+            target_path = modis_dir / name
+            copied["modis"].append(str(target_path))
+        elif lower_name.startswith(LANDSAT_EXPORT["file_name_prefix"].lower()):
+            target_path = lst_dir / name
+            copied["baseline_lst"].append(str(target_path))
+        else:
+            copied["unmatched"].append(str(source_path))
+            continue
 
-    with open(output_path, "wb") as f:
-        f.write(response.content)
+        copy_with_overwrite_control(source_path, target_path)
+        log.info("Drive çıktısı Step5 klasörüne kopyalandı: %s", target_path)
 
-    log.info(f"Direct download tamamlandı: {output_path}")
+    return copied
+
+
+def download_drive_exports_with_geemap() -> dict:
+    """
+    Google Drive export klasörünü geemap.download_folder ile yerel staging alanına indirir.
+
+    Not: geemap/gdown tarafı Drive klasör URL'si veya klasör ID'si ister. Export
+    folder adı tek başına indirme için yeterli değildir.
+    """
+    if not DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT:
+        log.warning("Drive otomatik indirme kapali: DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT=False")
+        return {
+            "enabled": False,
+            "attempted": False,
+            "downloaded": False,
+            "reason": "DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT=False",
+            "message": (
+                "Otomatik Drive indirme devre disi. "
+                "DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT=True yapilmadi."
+            ),
+        }
+
+    folder_url, folder_id = resolve_drive_folder_reference()
+
+    if not folder_url and not folder_id:
+        log.error(
+            "Drive otomatik indirme istendi ama GOOGLE_DRIVE_EXPORT_FOLDER_URL/ID bos."
+        )
+        return {
+            "enabled": True,
+            "attempted": False,
+            "downloaded": False,
+            "reason": "missing_google_drive_folder_url_or_id",
+            "message": (
+                "Otomatik indirme acik ama Drive klasor URL/ID verilmemis. "
+                "GOOGLE_DRIVE_EXPORT_FOLDER_URL veya GOOGLE_DRIVE_EXPORT_FOLDER_ID ayarlanmali."
+            ),
+        }
+
+    try:
+        import geemap
+    except ImportError as exc:
+        raise ImportError(
+            "Drive klasörü indirmek için geemap gerekli. "
+            "Kurulum: pip install geemap"
+        ) from exc
+
+    staging_dir = BASE_DIR / "data" / DRIVE_DOWNLOAD_STAGING_SUBDIR
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info("Drive klasoru indiriliyor: %s", staging_dir)
+    log.info("Drive referansi cozuldu: folder_id=%s, folder_url=%s", folder_id, folder_url)
+
+    download_kwargs = {
+        "output": str(staging_dir),
+        "remaining_ok": True,
+        "quiet": False,
+    }
+    if folder_id:
+        download_kwargs["id"] = folder_id
+    elif folder_url:
+        download_kwargs["url"] = folder_url
+
+    downloaded_files = geemap.download_folder(**download_kwargs)
+
+    copied = place_downloaded_drive_tifs(staging_dir)
 
     return {
-        "output_path": str(output_path),
-        "scale": scale,
-        "crs": crs,
-        "download_method": "getDownloadURL",
-        "downloaded_at": datetime.now().isoformat()
+        "enabled": True,
+        "attempted": True,
+        "downloaded": True,
+        "staging_dir": str(staging_dir),
+        "downloaded_files": downloaded_files,
+        "copied": copied,
+        "downloaded_at": datetime.now().isoformat(),
+        "message": "Drive klasoru indirildi ve GeoTIFF dosyalari Step5 klasorlerine kopyalandi.",
+        "resolved_folder_id": folder_id,
+        "resolved_folder_url": folder_url,
     }
 
 # =============================================================================
@@ -435,6 +620,7 @@ def main() -> None:
     log.info("STEP 4 BAŞLIYOR")
     log.info("=" * 60)
 
+    log_drive_download_configuration()
     init_gee()
     regions = build_regions()
     region = regions[REGION_NAME]
@@ -467,6 +653,13 @@ def main() -> None:
     landsat_processing_metadata = None
     current_period_export = None
     current_period_metadata = None
+    drive_task_polling_metadata = {
+        "enabled": DRIVE_TASK_POLLING_ENABLED,
+        "task_count": 0,
+    }
+    drive_download_metadata = {
+        "enabled": DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT,
+    }
 
     if ENABLE_LANDSAT_EXPORT:
         # 1. Baseline zaman serisi
@@ -485,8 +678,7 @@ def main() -> None:
             folder=EXPORT_FOLDER,
             file_prefix=LANDSAT_EXPORT["file_name_prefix"],
             scale=LANDSAT_EXPORT["scale"],
-            max_exports=MAX_LANDSAT_DAILY_EXPORTS,
-            download_mode=DOWNLOAD_MODE
+            max_exports=MAX_LANDSAT_DAILY_EXPORTS
         )
         
         # 2. Current period median (anomali için)
@@ -499,73 +691,37 @@ def main() -> None:
         )
         
         # Current period median'ı export et
-        current_period_description = f"export_current_period_median_{CURRENT_PERIOD_DAYS}days"
-        current_period_filename = f"landsat_current_period_{CURRENT_PERIOD_DAYS}days"
-        
-        if DOWNLOAD_MODE == "auto_drive":
-            log.info(f"\nCurrent period median export (auto_drive): {current_period_filename}")
-            
-            # Task'i başlat
-            current_task = ee.batch.Export.image.toDrive(
-                image=current_median_image,
-                description=current_period_description,
-                folder=EXPORT_FOLDER,
-                fileNamePrefix=current_period_filename,
-                region=region,
-                scale=LANDSAT_EXPORT["scale"],
-                crs=EXPORT_CRS,
-                maxPixels=1e13,
-                fileFormat="GeoTIFF"
-            )
-            current_task.start()
-            current_status = current_task.status()
-            
-            # Metadata kaydet
-            current_period_export = {
-                "description": current_period_description,
-                "folder": EXPORT_FOLDER,
-                "file_name_prefix": current_period_filename,
-                "scale": LANDSAT_EXPORT["scale"],
-                "crs": EXPORT_CRS,
-                "task_id": current_status.get("id"),
-                "task_state": current_status.get("state"),
-                "started_at": datetime.now().isoformat()
-            }
-            
-            # Task'in tamamlanmasını bekle
-            log.info("\n" + "=" * 60)
-            log.info("AUTO-DRIVE: Current period task bekleniyor...")
-            log.info("=" * 60)
-            
-            poller = TaskPoller(
-                check_interval=AUTO_DRIVE_CHECK_INTERVAL,
-                timeout=AUTO_DRIVE_TIMEOUT,
-                output_dir=Path(AUTO_DRIVE_DOWNLOAD_DIR) / "current_period"
-            )
-            
-            success = poller.wait_for_task(current_task)
-            current_period_export["task_completed"] = success
-            
-            if success:
-                log.info("\n" + "=" * 60)
-                log.info("CURRENT PERIOD EXPORT TAMAMLANDI")
-                log.info(f"Google Drive/{EXPORT_FOLDER}/{current_period_filename}.tif")
-                log.info("→ data/current_period/ klasörüne manuel olarak kopyala")
-                log.info("=" * 60)
-        else:
-            # Standart drive veya direct export
-            current_period_export = export_image_to_drive(
-                image=current_median_image,
-                region=region,
-                description=current_period_description,
-                folder=EXPORT_FOLDER,
-                file_name_prefix=current_period_filename,
-                scale=LANDSAT_EXPORT["scale"]
-            )
+        current_period_export = export_image_to_drive(
+            image=current_median_image,
+            region=region,
+            description=f"export_current_period_median_{CURRENT_PERIOD_DAYS}days",
+            folder=EXPORT_FOLDER,
+            file_name_prefix=f"landsat_current_period_{CURRENT_PERIOD_DAYS}days",
+            scale=LANDSAT_EXPORT["scale"]
+        )
         
     else:
         log.info("Landsat export devre dışı bırakıldı.")
 
+    if DRIVE_TASK_POLLING_ENABLED and DRIVE_EXPORT_TASKS:
+        drive_task_polling_metadata = poll_drive_export_tasks(DRIVE_EXPORT_TASKS)
+        drive_download_metadata = download_drive_exports_with_geemap()
+    elif DRIVE_EXPORT_TASKS:
+        log.info("Drive task polling kapalı; export görevleri başlatıldıktan sonra çıkılıyor.")
+        drive_task_polling_metadata = {
+            "enabled": False,
+            "task_count": len(DRIVE_EXPORT_TASKS),
+            "reason": "DRIVE_TASK_POLLING_ENABLED=False",
+        }
+    else:
+        log.info("Polling gerektiren Drive export task'ı yok.")
+
+    drive_files_downloaded = bool(drive_download_metadata.get("downloaded"))
+    manual_download_required = (
+        bool(DRIVE_EXPORT_TASKS)
+        and not drive_files_downloaded
+    )
+    drive_download_message = drive_download_metadata.get("message")
         
     metadata = {
         "step": "step4_export_geotiff",
@@ -576,10 +732,9 @@ def main() -> None:
         "current_period_end": CURRENT_PERIOD_END_DATE,
         "current_period_days": CURRENT_PERIOD_DAYS,
         "export_folder": EXPORT_FOLDER,
-        "download_mode": DOWNLOAD_MODE,
         "created_at": datetime.now().isoformat(),
         "log_file": str(log_file),
-        "manual_download_required": DOWNLOAD_MODE == "drive",
+        "manual_download_required": manual_download_required,
         "enabled_exports": {
             "modis": ENABLE_MODIS_EXPORT,
             "landsat": ENABLE_LANDSAT_EXPORT
@@ -594,12 +749,20 @@ def main() -> None:
             "landsat_baseline_timeseries": landsat_timeseries_exports,
             "landsat_current_period": current_period_export
         },
+        "drive_task_polling": drive_task_polling_metadata,
+        "drive_download": drive_download_metadata,
         "notes": {
             "modis_download_mode": "drive_only_for_now",
-            "landsat_download_mode": DOWNLOAD_MODE,
+            "landsat_download_mode": "drive_export_with_task_polling",
             "anomaly_method": "z_score_window_based"
         },
-        "status": "direct_download_completed" if DOWNLOAD_MODE == "direct" else "export_tasks_started"
+        "status": (
+            "drive_download_completed"
+            if drive_files_downloaded
+            else "export_tasks_completed"
+            if drive_task_polling_metadata.get("completed") == len(DRIVE_EXPORT_TASKS)
+            else "export_tasks_started"
+        )
     }
     metadata_path = save_metadata(metadata)
 
@@ -607,11 +770,16 @@ def main() -> None:
     log.info("STEP 4 TAMAMLANDI")
     log.info(f"Export metadata dosyası: {metadata_path}")
 
-    if DOWNLOAD_MODE == "direct":
-        log.info("Landsat dosyaları doğrudan yerel klasörlere indirildi.")
+    if drive_files_downloaded:
+        log.info("Drive export dosyaları indirildi ve Step5 klasörlerine yerleştirildi.")
         log.info("Step5 çalıştırılabilir.")
     else:
-        log.info("Google Drive export görevleri başlatıldı.")
+        if DRIVE_TASK_POLLING_ENABLED:
+            log.info("Google Drive export görevleri tamamlandı.")
+        else:
+            log.info("Google Drive export görevleri başlatıldı.")
+        if drive_download_message:
+            log.warning("Otomatik indirme durumu: %s", drive_download_message)
         log.info("Dosyaları manuel indirip Step5 klasörlerine yerleştirmen gerekiyor.")
         log.info("\nExport edilen dosyalar:")
         log.info("  1. Baseline zaman serisi (ST_B10 + QA_PIXEL)")
@@ -619,12 +787,14 @@ def main() -> None:
 
     log.info("=" * 60)
 
-    if DOWNLOAD_MODE == "direct":
-        print("\nSTEP 4 tamamlandı. Landsat dosyaları yerel klasörlere indirildi.")
+    if drive_files_downloaded:
+        print("\nSTEP 4 tamamlandı. Drive çıktıları indirildi ve Step5 klasörlerine yerleştirildi.")
         print("Şimdi Step5'i çalıştırabilirsin:")
         print("python step5_preprocess_timeseries.py\n")
     else:
-        print("\nSTEP 4 tamamlandı. Export görevleri Drive'a gönderildi.")
+        print("\nSTEP 4 tamamlandı. Export görevleri Drive'da tamamlandı.")
+        if drive_download_message:
+            print(f"Otomatik indirme notu: {drive_download_message}")
         print("Drive'dan dosyaları indirip Step5 klasörlerine yerleştirmen gerekiyor.\n")
 
 if __name__ == "__main__":

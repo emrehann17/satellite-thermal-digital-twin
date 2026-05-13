@@ -13,6 +13,14 @@ DRIVE_TASK_POLLING_ENABLED = True
 DRIVE_TASK_POLL_INTERVAL_SECONDS = 60
 DRIVE_TASK_TIMEOUT_SECONDS = 6 * 60 * 60
 
+# Export görevleri tamamlandıktan sonra Drive klasörünü geemap/gdown ile indir.
+# Google Drive klasörünün paylaşılabilir URL'si veya klasör ID'si gerekir.
+DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT = True
+GOOGLE_DRIVE_EXPORT_FOLDER_URL = "https://drive.google.com/drive/u/0/folders/1eyqH0MpYH46-F5Ao3VQqv834T9mfyYfn"
+GOOGLE_DRIVE_EXPORT_FOLDER_ID = "1eyqH0MpYH46-F5Ao3VQqv834T9mfyYfn"
+DRIVE_DOWNLOAD_STAGING_SUBDIR = "drive_exports"
+DRIVE_DOWNLOAD_OVERWRITE = True
+
 MODIS_EXPORT = {
     "description": "export_modis_lst_5y_summer_mean",
     "file_name_prefix": "modis_lst_dogu_akdeniz_5y_summer_mean",
@@ -24,13 +32,8 @@ LANDSAT_EXPORT = {
     "scale": 30,
 }
 
-DOWNLOAD_MODE = "auto_drive"   # "drive", "direct", veya "auto_drive"
-# "drive" -> Manuel Drive indirme
-# "direct" -> getDownloadURL ile doğrudan (küçük dosyalar için)
-# "auto_drive" -> Drive export + otomatik task polling + otomatik indirme
-
 ENABLE_MODIS_EXPORT = False
-ENABLE_LANDSAT_EXPORT = False
+ENABLE_LANDSAT_EXPORT = True
 
 LANDSAT_SCALE = 0.00341802
 LANDSAT_OFFSET = 149.0
@@ -46,7 +49,7 @@ MODIS_FILE_PREFIX = "modis_lst_dogu_akdeniz_5y_summer_mean"
 SUMMER_MONTH_START = 6
 SUMMER_MONTH_END = 9
 
-MAX_LANDSAT_DAILY_EXPORTS = 10  # Test için 10 sahne yeterli
+MAX_LANDSAT_DAILY_EXPORTS = 0  # Test için 10 sahne yeterli
 
 EXPORT_CRS = "EPSG:4326"
 
@@ -58,13 +61,15 @@ BASELINE_END_DATE = "2022-09-30"
 CURRENT_PERIOD_DAYS = 30  # 30 gün test için yeterli
 CURRENT_PERIOD_END_DATE = "2023-08-31"  # 2023 yaz sonu
 
+# Step5 bellek kullanımı ayarları
+# Her seferinde okunacak raster pencere kenarı (piksel).
+# Yaklaşık bellek: sahne_sayısı * STEP5_WINDOW_SIZE^2 * 4 byte.
 STEP5_WINDOW_SIZE = 512
+
+# Standart sapma bu eşiğin altındaysa z-score anomali NaN yazılır.
+# Bu, sabit piksellerde sonsuz/yanıltıcı z-score üretimini engeller.
 STEP5_STD_EPSILON = 1e-6
+
+# Windowed akış ana raster çıktıları üretir. Interpolated full NetCDF çıktısı
+# büyük veri için tekrar yüksek bellek/disk baskısı yaratabileceği için kapalıdır.
 STEP5_WRITE_INTERPOLATED_NETCDF = False
-
-DIRECT_DOWNLOAD_DIR = "data"
-DIRECT_LANDSAT_LST_SUBDIR = "landsat_timeseries"
-DIRECT_LANDSAT_QA_SUBDIR = "landsat_qa"
-
-DIRECT_DOWNLOAD_SCALE = 30
-DIRECT_DOWNLOAD_MAX_IMAGES = 5
