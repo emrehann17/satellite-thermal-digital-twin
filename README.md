@@ -313,7 +313,7 @@ python step5_preprocess_timeseries.py
 
 ## Step4 -> Step5 Geçişi
 
-Step4, Drive export task'larını polling ile tamamlanana kadar bekler. `DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT=True` yapılır ve `GOOGLE_DRIVE_EXPORT_FOLDER_URL` veya `GOOGLE_DRIVE_EXPORT_FOLDER_ID` girilirse Drive klasörü geemap/gdown ile indirilir.
+Step4, Drive export task'larını polling ile tamamlanana kadar bekler. `DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT=True` yapılır ve `GOOGLE_DRIVE_EXPORT_FOLDER_URL` veya `GOOGLE_DRIVE_EXPORT_FOLDER_ID` girilirse Drive klasörü geemap/gdown ile indirilir. Bu aşamada config ayarları ve Google Drive dosya erişim izinlerini kullanıcının manuel olarak yapması beklenir. 
 
 İndirilen GeoTIFF dosyaları otomatik olarak şu klasörlere yerleştirilir:
 

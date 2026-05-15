@@ -8,7 +8,7 @@ dosyalarını mekansal pencereler halinde işler. Yaklaşık tepe bellek kullan�
 
     time_count * window_size * window_size * float32
 
-tam raster yığını yerine yalnızca pencere yığını ve birkaç çıktı bloğu.
+tam raster yığını yerine yalnızca pencere yığını ve birkaç çıktı bloğu
 """
 
 from core.config import *

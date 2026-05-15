@@ -49,7 +49,7 @@ MODIS_FILE_PREFIX = "modis_lst_dogu_akdeniz_5y_summer_mean"
 SUMMER_MONTH_START = 6
 SUMMER_MONTH_END = 9
 
-MAX_LANDSAT_DAILY_EXPORTS = 0  # Test için 10 sahne yeterli
+MAX_LANDSAT_DAILY_EXPORTS = 5  
 
 EXPORT_CRS = "EPSG:4326"
 
