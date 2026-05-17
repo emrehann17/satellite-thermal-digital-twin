@@ -249,8 +249,8 @@ def main() -> None:
     # Baseline için zaman serisi collection
     log.info("\n1) Baseline zaman serisi hazırlanıyor...")
     landsat_timeseries, ts_metadata = get_landsat_daily_median_collection(
-        region=regions["dogu_akdeniz"],
-        region_name="dogu_akdeniz",
+        region=regions[REGION_NAME],
+        region_name=REGION_NAME,
         start=BASELINE_START_DATE,
         end=BASELINE_END_DATE
     )
@@ -258,7 +258,7 @@ def main() -> None:
     #Current period median (anomali için)
     log.info("\n2) Current period median hazırlanıyor...")
     current_median, current_metadata = get_current_period_median(
-        region=regions["dogu_akdeniz"],
+        region=regions[REGION_NAME],
         region_name=REGION_NAME,
         end_date=CURRENT_PERIOD_END_DATE,
         window_days=CURRENT_PERIOD_DAYS
@@ -281,7 +281,12 @@ def main() -> None:
     log.info("Sonraki adım: step4 (export)")
     log.info("=" * 60)
 
-    return landsat_timeseries, current_median
+    return {
+        "landsat_timeseries": landsat_timeseries,
+        "landsat_metadata": ts_metadata,
+        "current_median": current_median,
+        "current_metadata": current_metadata,
+    }
 
 if __name__ == "__main__":
     main()

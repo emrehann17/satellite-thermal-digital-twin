@@ -16,7 +16,14 @@ from pathlib import Path
 
 import ee
 
-from core.config import GEE_PROJECT, MODIS_COLLECTION, START_DATE, END_DATE
+from core.config import (
+    MODIS_COLLECTION,
+    REGION_NAME,
+    START_DATE,
+    END_DATE,
+    SUMMER_MONTH_END,
+    SUMMER_MONTH_START
+)
 from core.gee_utils import init_gee
 from core.regions import build_regions
 from core.io_utils import setup_logger
@@ -32,18 +39,32 @@ log, log_file = setup_logger("step2")
 # =============================================================================
 # 1. 5 YILLIK YAZ LST GÖRÜNTÜSÜNÜ HAZIRLAMA
 # =============================================================================
-def process_summer_mean(region: ee.Geometry, region_name: str) -> tuple[ee.Image, dict]:
+def process_summer_mean(
+    region: ee.Geometry,
+    region_name: str,
+    start_date: str,
+    end_date: str,
+    month_start: int = SUMMER_MONTH_START,
+    month_end: int = SUMMER_MONTH_END,
+    ) -> tuple[ee.Image, dict]:
     """
     2019-2023 arası yaz aylarının (Haziran-Eylül) MODIS LST ortalamasını hesaplar.
     Export yapmaz. Sadece işlenmiş ee.Image üretir.
     """
-    log.info(f"Processing 5-year summer MODIS baseline for region: {region_name}")
+    log.info(
+        "Processing MODIS summer baseline for region: %s (%s -> %s, months %s-%s)",
+        region_name,
+        start_date,
+        end_date,
+        month_start,
+        month_end,
+    )
 
     raw_collection = (
         ee.ImageCollection(MODIS_COLLECTION)
         .filterBounds(region)
-        .filterDate(START_DATE, END_DATE)
-        .filter(ee.Filter.calendarRange(6, 9, "month"))
+        .filterDate(start_date, end_date)
+        .filter(ee.Filter.calendarRange(month_start, month_end, "month"))
         .select("LST_Day_1km")
     )
 
@@ -136,8 +157,12 @@ def main():
     regions = build_regions()
 
     baseline_image, metadata = process_summer_mean(
-        region=regions["dogu_akdeniz"],
-        region_name="dogu_akdeniz"
+        region=regions[REGION_NAME],
+        region_name=REGION_NAME,
+        start_date=START_DATE,
+        end_date=END_DATE,
+        month_start=SUMMER_MONTH_START,
+        month_end=SUMMER_MONTH_END
     )
 
     metadata_path = save_metadata(metadata)

@@ -28,11 +28,12 @@ def run_step(step_name: str, step_func) -> None:
     log.info(f"{step_name} BAŞLATILIYOR")
     log.info("=" * 70)
 
-    step_func()
+    result = step_func()
 
     log.info("=" * 70)
     log.info(f"{step_name} TAMAMLANDI")
     log.info("=" * 70)
+    return result
 
 
 def main() -> None:
@@ -46,8 +47,11 @@ def main() -> None:
     try:
         run_step("STEP 1", step1_fetch_modis.main)
         run_step("STEP 2", step2_modis_5year_mean.main)
-        run_step("STEP 3", step3_landsat_lst.main)
-        run_step("STEP 4", step4_export_geotiff.main)
+        step3_result = run_step("STEP 3", step3_landsat_lst.main)
+        run_step(
+            "STEP 4",
+            lambda: step4_export_geotiff.main(step3_result=step3_result),
+        )
         run_step("STEP 5", step5_preprocess_timeseries.main)
 
         end_time = datetime.now()

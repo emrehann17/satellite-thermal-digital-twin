@@ -116,8 +116,8 @@ def main() -> None:
 
     # 3) Doğu Akdeniz için LST görüntüsünü hazırla
     lst_image, metadata = fetch_modis_lst(
-        region=regions["dogu_akdeniz"],
-        region_name="dogu_akdeniz",
+        region=regions[REGION_NAME],
+        region_name=REGION_NAME,
         start=START_DATE,
         end=END_DATE
     )

@@ -427,7 +427,7 @@ def process_step5_windowed(
         1. Baseline dosyalarını tarihe göre sıralar.
         2. Tüm rasterların aynı gridde olduğunu doğrular.
         3. Rasterı STEP5_WINDOW_SIZE boyutlu pencerelere böler.
-        4. Her pencere için baseline zaman yığınını okur ve interpolate eder.
+        4. Her pencere için baseline zaman yığınını okur.
         5. Baseline mean/std, current median ve z-score anomali hesaplar.
         6. Sonuçları aynı anda çıktı GeoTIFF dosyalarına yazar.
 
@@ -437,7 +437,6 @@ def process_step5_windowed(
     sort_order = np.argsort(times)
     tif_files = [tif_files[index] for index in sort_order]
     times = [times[index] for index in sort_order]
-    time_axis = time_offsets_days(times)
 
     with rasterio.open(tif_files[0]) as src:
         profile = src.profile.copy()
@@ -462,6 +461,7 @@ def process_step5_windowed(
     log.info("Baseline sahne sayısı: %s", len(tif_files))
     log.info("Raster boyutu: %sx%s", width, height)
     log.info("Pencere boyutu: %s px (%s pencere)", STEP5_WINDOW_SIZE, window_count)
+    log.info("Minimum geçerli baseline gözlem sayısı: %s", STEP5_MIN_BASELINE_VALID_COUNT)
     log.info("Pencere başına yaklaşık baseline stack belleği: %.1f MB", memory_estimate_mb)
 
     baseline_mean_stats = RunningStats()
@@ -475,6 +475,7 @@ def process_step5_windowed(
     output_paths = {
         "baseline_mean": OUTPUT_DIR / "baseline_lst_mean_celsius.tif",
         "baseline_std": OUTPUT_DIR / "baseline_lst_std_celsius.tif",
+        "baseline_valid_count": OUTPUT_DIR / "baseline_valid_count.tif",
         "current_median": OUTPUT_DIR / "current_period_median_celsius.tif",
         "anomaly_zscore": OUTPUT_DIR / "anomaly_zscore.tif",
     }
@@ -494,6 +495,7 @@ def process_step5_windowed(
             rasterio.open(current_path) as current_src,
             open_output(output_paths["baseline_mean"], profile) as mean_dst,
             open_output(output_paths["baseline_std"], profile) as std_dst,
+            open_output(output_paths["baseline_valid_count"], profile) as valid_count_dst,
             open_output(output_paths["current_median"], profile) as current_dst,
             open_output(output_paths["anomaly_zscore"], profile) as anomaly_dst,
         ):
@@ -507,13 +509,23 @@ def process_step5_windowed(
                     tif_files,
                     window,
                 )
-                baseline_stack = interpolate_stack_along_time(
-                    baseline_stack,
-                    time_axis,
-                )
 
+                valid_count = np.sum(np.isfinite(baseline_stack), axis=0).astype(
+                    "float32"
+                )
                 baseline_mean = nanmean_float32(baseline_stack)
                 baseline_std = nanstd_float32(baseline_stack)
+                enough_observations = valid_count >= STEP5_MIN_BASELINE_VALID_COUNT
+                baseline_mean = np.where(
+                    enough_observations,
+                    baseline_mean,
+                    np.nan,
+                ).astype("float32")
+                baseline_std = np.where(
+                    enough_observations,
+                    baseline_std,
+                    np.nan,
+                ).astype("float32")
 
                 current_median = read_window(current_src, window)
                 current_median = np.where(
@@ -536,6 +548,7 @@ def process_step5_windowed(
 
                 mean_dst.write(baseline_mean, 1, window=window)
                 std_dst.write(baseline_std, 1, window=window)
+                valid_count_dst.write(valid_count, 1, window=window)
                 current_dst.write(current_median, 1, window=window)
                 anomaly_dst.write(anomaly_zscore, 1, window=window)
 
@@ -603,13 +616,15 @@ def write_metadata(
             "window_size": STEP5_WINDOW_SIZE,
             "window_count": result["window_count"],
             "std_epsilon": STEP5_STD_EPSILON,
+            "min_baseline_valid_count": STEP5_MIN_BASELINE_VALID_COUNT,
             "estimated_stack_memory_mb": result["estimated_stack_memory_mb"],
             "netcdf_written": baseline_netcdf is not None,
         },
         "baseline": {
             "time_count": len(tif_files),
             "date_range": f"{times[0]} to {times[-1]}",
-            "interpolation_method": "linear_internal_gaps_per_window",
+            "interpolation_method": "none",
+            "min_valid_count": STEP5_MIN_BASELINE_VALID_COUNT,
             "mean_celsius": result["baseline_mean_stats"]["mean"],
             "std_celsius": result["baseline_std_stats"]["mean"],
             "input_files": [path.name for path in tif_files],
@@ -635,6 +650,7 @@ def write_metadata(
         "outputs": {
             "baseline_mean": output_paths["baseline_mean"].name,
             "baseline_std": output_paths["baseline_std"].name,
+            "baseline_valid_count": output_paths["baseline_valid_count"].name,
             "current_median": output_paths["current_median"].name,
             "anomaly_zscore": output_paths["anomaly_zscore"].name,
             "baseline_netcdf": baseline_netcdf,

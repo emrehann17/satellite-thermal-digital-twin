@@ -46,6 +46,8 @@ from core.config import (
     BASELINE_END_DATE,
     CURRENT_PERIOD_DAYS,
     CURRENT_PERIOD_END_DATE,
+    SUMMER_MONTH_START,
+    SUMMER_MONTH_END,
 )
 
 from core.gee_utils import init_gee
@@ -615,7 +617,7 @@ def save_metadata(metadata: dict, filename: str = "step4_metadata.json") -> Path
 # =============================================================================
 # ANA AKIŞ
 # =============================================================================
-def main() -> None:
+def main(step3_result: dict | None = None) -> None:
     log.info("=" * 60)
     log.info("STEP 4 BAŞLIYOR")
     log.info("=" * 60)
@@ -634,7 +636,9 @@ def main() -> None:
             region=region,
             region_name=REGION_NAME,
             start=START_DATE,
-            end=END_DATE
+            end=END_DATE,
+            month_start=SUMMER_MONTH_START,
+            month_end=SUMMER_MONTH_END,
         )
 
         modis_export_metadata = export_image_to_drive(
@@ -662,14 +666,18 @@ def main() -> None:
     }
 
     if ENABLE_LANDSAT_EXPORT:
-        # 1. Baseline zaman serisi
-        log.info("\nBaseline zaman serisi hazırlanıyor...")
-        landsat_daily_collection, landsat_processing_metadata = get_landsat_daily_median_collection(
-            region=region,
-            region_name=REGION_NAME,
-            start=BASELINE_START_DATE,
-            end=BASELINE_END_DATE
-        )
+        if step3_result is not None:
+            log.info("\nStep3 çıktıları kullanılıyor; Landsat collection tekrar hesaplanmayacak.")
+            landsat_daily_collection = step3_result["landsat_timeseries"]
+            landsat_processing_metadata = step3_result["landsat_metadata"]
+        else:
+            log.info("\nStep3 çıktısı verilmedi; baseline zaman serisi Step4 içinde hazırlanıyor.")
+            landsat_daily_collection, landsat_processing_metadata = get_landsat_daily_median_collection(
+                region=region,
+                region_name=REGION_NAME,
+                start=BASELINE_START_DATE,
+                end=BASELINE_END_DATE
+            )
 
         landsat_timeseries_exports = export_landsat_timeseries_lst_and_qa_to_drive(
             collection=landsat_daily_collection,
@@ -681,14 +689,18 @@ def main() -> None:
             max_exports=MAX_LANDSAT_DAILY_EXPORTS
         )
         
-        # 2. Current period median (anomali için)
-        log.info("\nCurrent period median hazırlanıyor...")
-        current_median_image, current_period_metadata = get_current_period_median(
-            region=region,
-            region_name=REGION_NAME,
-            end_date=CURRENT_PERIOD_END_DATE,
-            window_days=CURRENT_PERIOD_DAYS
-        )
+        if step3_result is not None:
+            log.info("\nStep3 current period median çıktısı kullanılıyor.")
+            current_median_image = step3_result["current_median"]
+            current_period_metadata = step3_result["current_metadata"]
+        else:
+            log.info("\nStep3 çıktısı verilmedi; current period median Step4 içinde hazırlanıyor.")
+            current_median_image, current_period_metadata = get_current_period_median(
+                region=region,
+                region_name=REGION_NAME,
+                end_date=CURRENT_PERIOD_END_DATE,
+                window_days=CURRENT_PERIOD_DAYS
+            )
         
         # Current period median'ı export et
         current_period_export = export_image_to_drive(
