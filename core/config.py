@@ -1,4 +1,8 @@
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 GEE_PROJECT = "b7-thermal-digital-twin"
 
@@ -18,8 +22,8 @@ DRIVE_TASK_TIMEOUT_SECONDS = 6 * 60 * 60
 # Export görevleri tamamlandıktan sonra Drive klasörünü geemap/gdown ile indir.
 # Google Drive klasörünün paylaşılabilir URL'si veya klasör ID'si gerekir.
 DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT = True
-GOOGLE_DRIVE_EXPORT_FOLDER_URL = os.getenv("https://drive.google.com/drive/u/0/folders/1eyqH0MpYH46-F5Ao3VQqv834T9mfyYfn")
-GOOGLE_DRIVE_EXPORT_FOLDER_ID = os.getenv("1eyqH0MpYH46-F5Ao3VQqv834T9mfyYfn")
+GOOGLE_DRIVE_EXPORT_FOLDER_URL = os.getenv("GOOGLE_DRIVE_EXPORT_FOLDER_URL")
+GOOGLE_DRIVE_EXPORT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_EXPORT_FOLDER_ID")
 DRIVE_DOWNLOAD_STAGING_SUBDIR = "drive_exports"
 DRIVE_DOWNLOAD_OVERWRITE = True
 
