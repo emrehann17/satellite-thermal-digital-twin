@@ -635,8 +635,8 @@ def main(step3_result: dict | None = None) -> None:
         modis_image, modis_processing_metadata = process_summer_mean(
             region=region,
             region_name=REGION_NAME,
-            start=START_DATE,
-            end=END_DATE,
+            start_date=START_DATE,
+            end_date=END_DATE,
             month_start=SUMMER_MONTH_START,
             month_end=SUMMER_MONTH_END,
         )

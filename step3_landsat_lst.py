@@ -49,6 +49,26 @@ def _set_export_date(image: ee.Image) -> ee.Image:
     export_date = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd")
     return image.set("export_date", export_date)
 
+
+def apply_qa_mask(image: ee.Image) -> ee.Image:
+    """
+    Landsat QA_PIXEL bandındaki bulut/gölge/kar/dolgu piksellerini maskeler.
+
+    Bu maske current period median için özellikle gereklidir; aksi halde soğuk
+    bulut pikselleri güncel LST gibi median'a girip mavi anomali blokları üretir.
+    """
+    qa = image.select("QA_PIXEL")
+    bad_bits = (
+        (1 << 0)  # fill
+        | (1 << 1)  # dilated cloud
+        | (1 << 2)  # cirrus
+        | (1 << 3)  # cloud
+        | (1 << 4)  # cloud shadow
+        | (1 << 5)  # snow
+    )
+    clean_mask = qa.bitwiseAnd(bad_bits).eq(0)
+    return image.updateMask(clean_mask)
+
 # =============================================================================
 # 1. LANDSAT TIMESERIES COLLECTION ÜRETME
 # =============================================================================
@@ -172,8 +192,10 @@ def get_current_period_median(
         .filterBounds(region)
         .filterDate(start_date, end_date)
         .filter(ee.Filter.calendarRange(6, 9, "month"))  # Yaz ayları
-        .select("ST_B10")
+        .select(["ST_B10", "QA_PIXEL"])
         .map(lambda img: img.clip(region))
+        .map(apply_qa_mask)
+        .select("ST_B10")
     )
     
     scene_count = collection.size().getInfo()
@@ -209,6 +231,8 @@ def get_current_period_median(
         "scene_count": scene_count,
         "months_filter": "6-9",
         "composite_method": "median",
+        "qa_mask_applied": True,
+        "qa_masked_bits": ["fill", "dilated_cloud", "cirrus", "cloud", "cloud_shadow", "snow"],
         "resolution": "30m",
         "created_at": datetime.now().isoformat(),
         "status": "current_period_median_prepared"

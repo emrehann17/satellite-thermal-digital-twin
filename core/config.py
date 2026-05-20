@@ -19,8 +19,8 @@ DRIVE_TASK_TIMEOUT_SECONDS = 6 * 60 * 60
 # Export görevleri tamamlandıktan sonra Drive klasörünü geemap/gdown ile indir.
 # Google Drive klasörünün paylaşılabilir URL'si veya klasör ID'si gerekir.
 DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT = True
-GOOGLE_DRIVE_EXPORT_FOLDER_URL = os.getenv("GOOGLE_DRIVE_EXPORT_FOLDER_URL", "")
-GOOGLE_DRIVE_EXPORT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_EXPORT_FOLDER_ID", "")
+GOOGLE_DRIVE_EXPORT_FOLDER_URL = os.getenv("GOOGLE_DRIVE_EXPORT_FOLDER_URL", "https://drive.google.com/drive/u/0/folders/1eyqH0MpYH46-F5Ao3VQqv834T9mfyYfn")
+GOOGLE_DRIVE_EXPORT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_EXPORT_FOLDER_ID", "1eyqH0MpYH46-F5Ao3VQqv834T9mfyYfn")
 DRIVE_DOWNLOAD_STAGING_SUBDIR = "drive_exports"
 DRIVE_DOWNLOAD_OVERWRITE = True
 
@@ -35,7 +35,7 @@ LANDSAT_EXPORT = {
     "scale": 30,
 }
 
-ENABLE_MODIS_EXPORT = False
+ENABLE_MODIS_EXPORT = True
 ENABLE_LANDSAT_EXPORT = True
 
 LANDSAT_SCALE = 0.00341802
@@ -52,13 +52,13 @@ MODIS_FILE_PREFIX = "modis_lst_dogu_akdeniz_5y_summer_mean"
 SUMMER_MONTH_START = 6
 SUMMER_MONTH_END = 9
 
-MAX_LANDSAT_DAILY_EXPORTS = 5  
+MAX_LANDSAT_DAILY_EXPORTS = 4  
 
 EXPORT_CRS = "EPSG:4326"
 
 # Anomali pencere ayarları (TEST İÇİN KÜÇÜK PENCERELER)
-BASELINE_START_DATE = "2022-06-01"  # Tek yaz sezonu
-BASELINE_END_DATE = "2022-09-30"
+BASELINE_START_DATE = "2019-06-01"  # Tek yaz sezonu
+BASELINE_END_DATE = "2023-09-30"
 
 # Current period - anomali hesabı için kullanılacak güncel pencere
 CURRENT_PERIOD_DAYS = 30  # 30 gün test için yeterli
