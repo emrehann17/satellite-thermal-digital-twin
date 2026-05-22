@@ -55,16 +55,16 @@ MODIS_FILE_PREFIX = "modis_lst_dogu_akdeniz_5y_summer_mean"
 SUMMER_MONTH_START = 6
 SUMMER_MONTH_END = 9
 
-MAX_LANDSAT_DAILY_EXPORTS = 4  
+MAX_LANDSAT_DAILY_EXPORTS = 15  
 
 EXPORT_CRS = "EPSG:4326"
 
 # Anomali pencere ayarları (TEST İÇİN KÜÇÜK PENCERELER)
-BASELINE_START_DATE = "2019-06-01"  # Tek yaz sezonu
+BASELINE_START_DATE = "2019-06-01"  
 BASELINE_END_DATE = "2023-09-30"
 
 # Current period - anomali hesabı için kullanılacak güncel pencere
-CURRENT_PERIOD_DAYS = 30  # 30 gün test için yeterli
+CURRENT_PERIOD_DAYS = 45  # 45 gün test için yeterli
 CURRENT_PERIOD_END_DATE = "2023-08-31"  # 2023 yaz sonu
 
 # Step5 bellek kullanımı ayarları
@@ -80,6 +80,12 @@ STEP5_STD_EPSILON = 1e-6
 # hesaplanmaz; piksel NaN bırakılır.
 STEP5_MIN_BASELINE_VALID_COUNT = 3
 
+# Current period median en az bu kadar QA-temiz gözlemden oluşmalıdır.
+# Aksi halde tek bulut kaçağı veya tek sahne kaynaklı soğuk pikseller anomaliye girmez.
+STEP5_MIN_CURRENT_VALID_COUNT = 2
+
 # Windowed akış ana raster çıktıları üretir. Interpolated full NetCDF çıktısı
 # büyük veri için tekrar yüksek bellek/disk baskısı yaratabileceği için kapalıdır.
 STEP5_WRITE_INTERPOLATED_NETCDF = False
+
+STEP5_MIN_BASELINE_STD_CELSIUS = 1.0

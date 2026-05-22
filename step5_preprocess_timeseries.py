@@ -148,6 +148,29 @@ def read_window(src: rasterio.io.DatasetReader, window: Window) -> np.ndarray:
     return array.filled(np.nan)
 
 
+def read_band_window(
+    src: rasterio.io.DatasetReader,
+    window: Window,
+    band_index: int,
+    default: float = np.nan,
+) -> np.ndarray:
+    """
+    İstenen bandı float32 okur; bant yoksa aynı pencere boyutunda default döndürür.
+
+    Bu, eski tek bant current period rasterlarıyla geriye dönük uyumluluk sağlar.
+    Yeni current period exportlarında 2. bant QA-temiz gözlem sayısıdır.
+    """
+    if src.count < band_index:
+        return np.full(
+            (int(window.height), int(window.width)),
+            default,
+            dtype="float32",
+        )
+
+    array = src.read(band_index, window=window, masked=True).astype("float32")
+    return array.filled(np.nan)
+
+
 def read_qa_window(src: rasterio.io.DatasetReader, window: Window) -> np.ndarray:
     """
     QA rasterından belirtilen pencereyi uint16 olarak okur.
@@ -476,7 +499,11 @@ def process_step5_windowed(
         "baseline_mean": OUTPUT_DIR / "baseline_lst_mean_celsius.tif",
         "baseline_std": OUTPUT_DIR / "baseline_lst_std_celsius.tif",
         "baseline_valid_count": OUTPUT_DIR / "baseline_valid_count.tif",
+        "low_baseline_count_mask": OUTPUT_DIR / "low_baseline_count_mask.tif",
+        "low_baseline_std_mask": OUTPUT_DIR / "low_baseline_std_mask.tif",
         "current_median": OUTPUT_DIR / "current_period_median_celsius.tif",
+        "current_valid_count": OUTPUT_DIR / "current_period_valid_count.tif",
+        "low_current_count_mask": OUTPUT_DIR / "low_current_count_mask.tif",
         "anomaly_zscore": OUTPUT_DIR / "anomaly_zscore.tif",
     }
 
@@ -496,9 +523,21 @@ def process_step5_windowed(
             open_output(output_paths["baseline_mean"], profile) as mean_dst,
             open_output(output_paths["baseline_std"], profile) as std_dst,
             open_output(output_paths["baseline_valid_count"], profile) as valid_count_dst,
+            open_output(output_paths["low_baseline_count_mask"], profile) as low_baseline_count_dst,
+            open_output(output_paths["low_baseline_std_mask"], profile) as low_baseline_std_dst,
             open_output(output_paths["current_median"], profile) as current_dst,
+            open_output(output_paths["current_valid_count"], profile) as current_count_dst,
+            open_output(output_paths["low_current_count_mask"], profile) as low_current_count_dst,
             open_output(output_paths["anomaly_zscore"], profile) as anomaly_dst,
         ):
+            current_has_valid_count = current_src.count >= 2
+            if not current_has_valid_count:
+                log.warning(
+                    "Current period rasterında valid-count bandı yok. "
+                    "STEP5_MIN_CURRENT_VALID_COUNT uygulanmayacak; current export'u "
+                    "Step3/Step4 ile yeniden üretmek gerekir."
+                )
+
             for index, window in enumerate(
                 iter_windows(width, height, STEP5_WINDOW_SIZE),
                 start=1,
@@ -527,16 +566,45 @@ def process_step5_windowed(
                     np.nan,
                 ).astype("float32")
 
-                current_median = read_window(current_src, window)
+                current_median = read_band_window(current_src, window, band_index=1)
+                current_valid_count = read_band_window(
+                    current_src,
+                    window,
+                    band_index=2,
+                    default=np.nan,
+                )
+                if current_src.count < 2:
+                    current_valid_count = np.where(
+                        np.isfinite(current_median),
+                        float(STEP5_MIN_CURRENT_VALID_COUNT),
+                        np.nan,
+                    ).astype("float32")
+
                 current_median = np.where(
                     (current_median > -30) & (current_median < 80),
                     current_median,
                     np.nan,
                 ).astype("float32")
+                enough_current = current_valid_count >= STEP5_MIN_CURRENT_VALID_COUNT
+                current_median = np.where(enough_current, current_median, np.nan).astype(
+                    "float32"
+                )
+
+                low_baseline_count_mask = (~enough_observations).astype("float32")
+                low_baseline_std_mask = (
+                    enough_observations
+                    & np.isfinite(baseline_std)
+                    & (baseline_std < STEP5_MIN_BASELINE_STD_CELSIUS)
+                ).astype("float32")
+                low_current_count_mask = (
+                    np.isfinite(current_valid_count)
+                    & (current_valid_count < STEP5_MIN_CURRENT_VALID_COUNT)
+                ).astype("float32")
 
                 with np.errstate(invalid="ignore", divide="ignore"):
                     anomaly_zscore = np.where(
-                        baseline_std > STEP5_STD_EPSILON,
+                        enough_current
+                        & (baseline_std >= STEP5_MIN_BASELINE_STD_CELSIUS),
                         (current_median - baseline_mean) / baseline_std,
                         np.nan,
                     ).astype("float32")
@@ -549,7 +617,11 @@ def process_step5_windowed(
                 mean_dst.write(baseline_mean, 1, window=window)
                 std_dst.write(baseline_std, 1, window=window)
                 valid_count_dst.write(valid_count, 1, window=window)
+                low_baseline_count_dst.write(low_baseline_count_mask, 1, window=window)
+                low_baseline_std_dst.write(low_baseline_std_mask, 1, window=window)
                 current_dst.write(current_median, 1, window=window)
+                current_count_dst.write(current_valid_count, 1, window=window)
+                low_current_count_dst.write(low_current_count_mask, 1, window=window)
                 anomaly_dst.write(anomaly_zscore, 1, window=window)
 
                 baseline_mean_stats.update(baseline_mean)
@@ -615,8 +687,9 @@ def write_metadata(
             "mode": "windowed",
             "window_size": STEP5_WINDOW_SIZE,
             "window_count": result["window_count"],
-            "std_epsilon": STEP5_STD_EPSILON,
+            "min_baseline_std_celsius": STEP5_MIN_BASELINE_STD_CELSIUS,
             "min_baseline_valid_count": STEP5_MIN_BASELINE_VALID_COUNT,
+            "min_current_valid_count": STEP5_MIN_CURRENT_VALID_COUNT,
             "estimated_stack_memory_mb": result["estimated_stack_memory_mb"],
             "netcdf_written": baseline_netcdf is not None,
         },
@@ -633,6 +706,10 @@ def write_metadata(
             "window_days": CURRENT_PERIOD_DAYS,
             "end_date": CURRENT_PERIOD_END_DATE,
             "input_file": current_path.name,
+            "valid_count_band": (
+                "Current_Period_Valid_Count if present; otherwise legacy fallback"
+            ),
+            "min_valid_count": STEP5_MIN_CURRENT_VALID_COUNT,
             "mean_celsius": result["current_stats"]["mean"],
         },
         "anomaly": {
@@ -651,7 +728,11 @@ def write_metadata(
             "baseline_mean": output_paths["baseline_mean"].name,
             "baseline_std": output_paths["baseline_std"].name,
             "baseline_valid_count": output_paths["baseline_valid_count"].name,
+            "low_baseline_count_mask": output_paths["low_baseline_count_mask"].name,
+            "low_baseline_std_mask": output_paths["low_baseline_std_mask"].name,
             "current_median": output_paths["current_median"].name,
+            "current_valid_count": output_paths["current_valid_count"].name,
+            "low_current_count_mask": output_paths["low_current_count_mask"].name,
             "anomaly_zscore": output_paths["anomaly_zscore"].name,
             "baseline_netcdf": baseline_netcdf,
         },

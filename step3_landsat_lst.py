@@ -208,7 +208,15 @@ def get_current_period_median(
     
     log.info(f"  Current period sahne sayısı: {scene_count}")
     
-    # Tüm sahnelerin median'ını al
+    current_valid_count = (
+        collection
+        .count()
+        .rename("Current_Period_Valid_Count")
+        .toFloat()
+        .clip(region)
+    )
+
+    # QA-temiz sahnelerin median'ını al; ikinci bant geçerli gözlem sayısıdır.
     current_median = (
         collection
         .median()
@@ -216,6 +224,7 @@ def get_current_period_median(
         .add(LANDSAT_OFFSET)
         .subtract(273.15)
         .rename("Current_Period_LST_Celsius")
+        .addBands(current_valid_count)
         .clip(region)
     )
     
@@ -232,8 +241,23 @@ def get_current_period_median(
         "months_filter": "6-9",
         "composite_method": "median",
         "qa_mask_applied": True,
-        "qa_masked_bits": ["fill", "dilated_cloud", "cirrus", "cloud", "cloud_shadow", "snow"],
-        "resolution": "30m",
+        "output_bands": [
+            "Current_Period_LST_Celsius",
+            "Current_Period_Valid_Count",
+        ],
+        "qa_masked_bits": [
+            "fill",
+            "dilated_cloud",
+            "cirrus",
+            "cloud",
+            "cloud_shadow",
+            "snow",
+            "medium_high_cloud_confidence",
+            "medium_high_cloud_shadow_confidence",
+            "medium_high_snow_ice_confidence",
+            "medium_high_cirrus_confidence",
+        ],
+        "qa_water_bit_preserved": True,
         "created_at": datetime.now().isoformat(),
         "status": "current_period_median_prepared"
     }
