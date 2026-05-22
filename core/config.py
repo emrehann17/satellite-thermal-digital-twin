@@ -1,8 +1,5 @@
 import os
-from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
 
 GEE_PROJECT = "b7-thermal-digital-twin"
 
@@ -22,8 +19,8 @@ DRIVE_TASK_TIMEOUT_SECONDS = 6 * 60 * 60
 # Export görevleri tamamlandıktan sonra Drive klasörünü geemap/gdown ile indir.
 # Google Drive klasörünün paylaşılabilir URL'si veya klasör ID'si gerekir.
 DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT = True
-GOOGLE_DRIVE_EXPORT_FOLDER_URL = os.getenv("GOOGLE_DRIVE_EXPORT_FOLDER_URL")
-GOOGLE_DRIVE_EXPORT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_EXPORT_FOLDER_ID")
+GOOGLE_DRIVE_EXPORT_FOLDER_URL = os.getenv("GOOGLE_DRIVE_EXPORT_FOLDER_URL", "")
+GOOGLE_DRIVE_EXPORT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_EXPORT_FOLDER_ID", "")
 DRIVE_DOWNLOAD_STAGING_SUBDIR = "drive_exports"
 DRIVE_DOWNLOAD_OVERWRITE = True
 
@@ -55,17 +52,18 @@ MODIS_FILE_PREFIX = "modis_lst_dogu_akdeniz_5y_summer_mean"
 SUMMER_MONTH_START = 6
 SUMMER_MONTH_END = 9
 
-MAX_LANDSAT_DAILY_EXPORTS = 15  
+# Test çalıştırmalarında export sayısını sınırlı tut. Production için None yapılabilir.
+MAX_LANDSAT_DAILY_EXPORTS = 12
 
 EXPORT_CRS = "EPSG:4326"
 
-# Anomali pencere ayarları (TEST İÇİN KÜÇÜK PENCERELER)
-BASELINE_START_DATE = "2019-06-01"  
+# Anomali baseline ayarları: 5 yıllık yaz dönemi
+BASELINE_START_DATE = "2019-06-01"
 BASELINE_END_DATE = "2023-09-30"
 
 # Current period - anomali hesabı için kullanılacak güncel pencere
-CURRENT_PERIOD_DAYS = 45  # 45 gün test için yeterli
-CURRENT_PERIOD_END_DATE = "2023-08-31"  # 2023 yaz sonu
+CURRENT_PERIOD_DAYS = 45
+CURRENT_PERIOD_END_DATE = "2023-08-31"
 
 # Step5 bellek kullanımı ayarları
 # Her seferinde okunacak raster pencere kenarı (piksel).
@@ -73,8 +71,8 @@ CURRENT_PERIOD_END_DATE = "2023-08-31"  # 2023 yaz sonu
 STEP5_WINDOW_SIZE = 512
 
 # Standart sapma bu eşiğin altındaysa z-score anomali NaN yazılır.
-# Bu, sabit piksellerde sonsuz/yanıltıcı z-score üretimini engeller.
-STEP5_STD_EPSILON = 1e-6
+# Bu, düşük örnek sayısı veya yapay sabit piksellerde z-score patlamasını engeller.
+STEP5_MIN_BASELINE_STD_CELSIUS = 1.0
 
 # Bu eşiğin altında geçerli baseline gözlemi olan piksellerde mean/std/z-score
 # hesaplanmaz; piksel NaN bırakılır.
@@ -87,5 +85,3 @@ STEP5_MIN_CURRENT_VALID_COUNT = 2
 # Windowed akış ana raster çıktıları üretir. Interpolated full NetCDF çıktısı
 # büyük veri için tekrar yüksek bellek/disk baskısı yaratabileceği için kapalıdır.
 STEP5_WRITE_INTERPOLATED_NETCDF = False
-
-STEP5_MIN_BASELINE_STD_CELSIUS = 1.0

@@ -32,6 +32,7 @@ BASELINE_INPUT_DIR = BASE_DIR / "data" / "landsat_timeseries"
 QA_DIR = BASE_DIR / "data" / "landsat_qa"
 CURRENT_PERIOD_DIR = BASE_DIR / "data" / "current_period"
 OUTPUT_DIR = BASE_DIR / "outputs" / "step5"
+STEP4_METADATA_PATH = BASE_DIR / "outputs" / "step4" / "step4_metadata.json"
 
 BASELINE_INPUT_DIR.mkdir(parents=True, exist_ok=True)
 QA_DIR.mkdir(parents=True, exist_ok=True)
@@ -88,8 +89,21 @@ def build_cloud_mask_from_qa(qa_array: np.ndarray) -> np.ndarray:
     cloud_shadow = 1 << 4
     snow = 1 << 5
 
+    qa = qa_array.astype(np.uint16)
     bad_pixels = fill | dilated_cloud | cirrus | cloud | cloud_shadow | snow
-    return (qa_array.astype(np.uint16) & bad_pixels) == 0
+
+    cloud_confidence = (qa >> 8) & 3
+    cloud_shadow_confidence = (qa >> 10) & 3
+    snow_ice_confidence = (qa >> 12) & 3
+    cirrus_confidence = (qa >> 14) & 3
+
+    return (
+        ((qa & bad_pixels) == 0)
+        & (cloud_confidence < 2)
+        & (cloud_shadow_confidence < 2)
+        & (snow_ice_confidence < 2)
+        & (cirrus_confidence < 2)
+    )
 
 
 def list_baseline_tifs() -> list[Path]:
@@ -99,10 +113,22 @@ def list_baseline_tifs() -> list[Path]:
     QA dosyaları aynı klasöre yanlışlıkla konmuşsa `_qa` ile bitenleri
     baseline görüntüsü olarak kullanmaz.
     """
+    metadata_files = list_baseline_tifs_from_step4_metadata()
+    if metadata_files:
+        return metadata_files
+
+    log.warning(
+        "Step4 metadata'dan baseline dosya listesi okunamadı; klasördeki tüm "
+        "uygun Landsat LST tifleri kullanılacak. Eski export kalıntıları varsa "
+        "baseline'a karışabilir."
+    )
+
     tif_files = sorted(
         path
         for path in BASELINE_INPUT_DIR.glob("*.tif")
-        if not path.stem.lower().endswith("_qa")
+        if not is_qa_tif_name(path.name)
+        and path.name.lower().startswith(LANDSAT_EXPORT["file_name_prefix"].lower())
+        and BASELINE_START_DATE <= str(extract_date_from_filename(path)) <= BASELINE_END_DATE
     )
 
     if not tif_files:
@@ -112,6 +138,46 @@ def list_baseline_tifs() -> list[Path]:
         )
 
     return tif_files
+
+
+def list_baseline_tifs_from_step4_metadata() -> list[Path]:
+    """
+    Step4 metadata varsa yalnız son export edilen baseline LST dosyalarını seçer.
+
+    Böylece data/landsat_timeseries içinde önceki denemelerden kalan dosyalar
+    yeni Step5 baseline yığınına sessizce karışmaz.
+    """
+    if not STEP4_METADATA_PATH.exists():
+        return []
+
+    try:
+        metadata = json.loads(STEP4_METADATA_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        log.warning("Step4 metadata JSON okunamadı: %s", STEP4_METADATA_PATH)
+        return []
+
+    exports = (
+        metadata
+        .get("exports", {})
+        .get("landsat_baseline_timeseries", [])
+    )
+    selected_files: list[Path] = []
+
+    for export_record in exports:
+        lst_prefix = export_record.get("lst", {}).get("file_name_prefix")
+        if not lst_prefix:
+            continue
+
+        matches = sorted(BASELINE_INPUT_DIR.glob(f"{lst_prefix}*.tif"))
+        matches = [path for path in matches if not is_qa_tif_name(path.name)]
+
+        if not matches:
+            log.warning("Step4 metadata'daki LST dosyası bulunamadı: %s", lst_prefix)
+            continue
+
+        selected_files.extend(matches)
+
+    return sorted(set(selected_files))
 
 
 def list_current_period_tifs() -> list[Path]:
@@ -129,6 +195,22 @@ def list_current_period_tifs() -> list[Path]:
             "Step4 landsat_current_period_XXdays.tif export dosyasını buraya koymalısın."
         )
 
+    expected_prefix = f"landsat_current_period_{CURRENT_PERIOD_DAYS}days"
+    matching_files = [
+        path
+        for path in current_files
+        if path.name.lower().startswith(expected_prefix.lower())
+    ]
+
+    if matching_files:
+        current_files = matching_files
+    elif len(current_files) > 1:
+        log.warning(
+            "CURRENT_PERIOD_DAYS=%s ile eşleşen current raster bulunamadı; "
+            "klasördeki ilk dosya kullanılacak.",
+            CURRENT_PERIOD_DAYS,
+        )
+
     if len(current_files) > 1:
         log.warning(
             "Birden fazla current period dosyası bulundu; ilki kullanılıyor: %s",
@@ -136,6 +218,52 @@ def list_current_period_tifs() -> list[Path]:
         )
 
     return current_files
+
+
+def is_qa_tif_name(filename: str) -> bool:
+    """
+    Landsat QA GeoTIFF adını tek parça ve GEE parçalı export adlarında yakalar.
+
+    Örnekler:
+        landsat_lst_dogu_akdeniz_2020-06-01_qa.tif
+        landsat_lst_dogu_akdeniz_2020-06-01_qa-0000000000-0000000000.tif
+    """
+    stem = Path(filename).stem.lower()
+    return bool(re.search(r"_qa($|[-_])", stem))
+
+
+def find_qa_path_for_landsat_tif(tif_path: Path) -> Path | None:
+    """
+    LST GeoTIFF için eşleşen QA dosyasını bulur.
+
+    Tek parça export:
+        landsat_lst_..._2020-06-01.tif -> landsat_lst_..._2020-06-01_qa.tif
+
+    Parçalı GEE export:
+        landsat_lst_..._2020-06-01-0000000000-0000000000.tif
+        landsat_lst_..._2020-06-01_qa-0000000000-0000000000.tif
+    """
+    exact_path = QA_DIR / f"{tif_path.stem}_qa{tif_path.suffix}"
+    if exact_path.exists():
+        return exact_path
+
+    date_match = re.search(r"(\d{4}-\d{2}-\d{2}|\d{8})", tif_path.stem)
+    if not date_match:
+        return None
+
+    base_stem = tif_path.stem[: date_match.end()]
+    suffix_after_date = tif_path.stem[date_match.end() :]
+
+    candidates = []
+    if suffix_after_date:
+        candidates.append(QA_DIR / f"{base_stem}_qa{suffix_after_date}{tif_path.suffix}")
+    candidates.extend(sorted(QA_DIR.glob(f"{base_stem}_qa*.tif")))
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return None
 
 
 def read_window(src: rasterio.io.DatasetReader, window: Window) -> np.ndarray:
@@ -469,8 +597,8 @@ def process_step5_windowed(
 
     validate_same_grid(profile, current_path)
     for tif_path in tif_files:
-        qa_path = QA_DIR / tif_path.name.replace(".tif", "_qa.tif")
-        if qa_path.exists():
+        qa_path = find_qa_path_for_landsat_tif(tif_path)
+        if qa_path is not None:
             validate_same_grid(profile, qa_path)
 
     width = profile["width"]
@@ -507,14 +635,14 @@ def process_step5_windowed(
         "anomaly_zscore": OUTPUT_DIR / "anomaly_zscore.tif",
     }
 
-    qa_paths = [QA_DIR / path.name.replace(".tif", "_qa.tif") for path in tif_files]
+    qa_paths = [find_qa_path_for_landsat_tif(path) for path in tif_files]
 
     with ExitStack() as stack_context:
         baseline_datasets = [
             stack_context.enter_context(rasterio.open(path)) for path in tif_files
         ]
         qa_datasets = [
-            stack_context.enter_context(rasterio.open(path)) if path.exists() else None
+            stack_context.enter_context(rasterio.open(path)) if path is not None else None
             for path in qa_paths
         ]
 

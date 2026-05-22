@@ -231,7 +231,7 @@ collection: ee.ImageCollection,
     file_prefix: str,
     scale: int = LANDSAT_EXPORT["scale"],
     crs: str = EXPORT_CRS,
-    max_exports: int = 20,
+    max_exports: int | None = 20,
 ) -> list[dict]:
     """
     Landsat günlük composite collection'ındaki her görüntü için
@@ -241,7 +241,7 @@ collection: ee.ImageCollection,
         log.warning("date_list boş geldi. Landsat export başlatılmadı.")
         return []
 
-    export_count = min(len(date_list), max_exports)
+    export_count = len(date_list) if max_exports is None else min(len(date_list), max_exports)
 
     if export_count == 0:
         log.warning("export_count = 0. Landsat export başlatılmadı.")
@@ -475,6 +475,18 @@ def copy_with_overwrite_control(source_path: Path, target_path: Path) -> None:
     shutil.copy2(source_path, target_path)
 
 
+def is_landsat_qa_export_name(filename: str) -> bool:
+    """
+    Landsat QA export adını tek parça ve GEE parçalı dosya adlarında tanır.
+
+    Örnekler:
+        landsat_lst_dogu_akdeniz_2020-06-01_qa.tif
+        landsat_lst_dogu_akdeniz_2020-06-01_qa-0000000000-0000000000.tif
+    """
+    stem = Path(filename).stem.lower()
+    return bool(re.search(r"_qa($|[-_])", stem))
+
+
 def place_downloaded_drive_tifs(staging_dir: Path) -> dict:
     """
     geemap ile indirilen Drive GeoTIFF dosyalarını yerel veri klasörlerine dağıtır.
@@ -498,7 +510,7 @@ def place_downloaded_drive_tifs(staging_dir: Path) -> dict:
         name = source_path.name
         lower_name = name.lower()
 
-        if lower_name.endswith("_qa.tif"):
+        if is_landsat_qa_export_name(name):
             target_path = qa_dir / name
             copied["baseline_qa"].append(str(target_path))
         elif lower_name.startswith("landsat_current_period_"):
