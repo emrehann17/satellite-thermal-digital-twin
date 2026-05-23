@@ -1,5 +1,8 @@
 import os
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
 
 GEE_PROJECT = "b7-thermal-digital-twin"
 
@@ -52,12 +55,17 @@ MODIS_FILE_PREFIX = "modis_lst_dogu_akdeniz_5y_summer_mean"
 SUMMER_MONTH_START = 6
 SUMMER_MONTH_END = 9
 
-# Test çalıştırmalarında export sayısını sınırlı tut. Production için None yapılabilir.
+# Landsat baseline export üst sınırı. Bu değer hedef sayı değildir.
+# Pencere-simetrik baseline'da gerçek export sayısı current yılından önceki
+# baseline yıl sayısına bağlıdır; örn. 2019-2023 aralığı ve current=2023 ise 4.
+# Production için None yapılabilir.
 MAX_LANDSAT_DAILY_EXPORTS = 12
 
 EXPORT_CRS = "EPSG:4326"
 
-# Anomali baseline ayarları: 5 yıllık yaz dönemi
+# Anomali baseline yıl aralığı.
+# Step3, current period penceresinin aynı ay-gün aralığını bu yıllara taşır.
+# Current yılı baseline'dan hariç tutulur.
 BASELINE_START_DATE = "2019-06-01"
 BASELINE_END_DATE = "2023-09-30"
 

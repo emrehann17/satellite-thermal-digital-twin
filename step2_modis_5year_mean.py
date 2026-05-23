@@ -42,8 +42,8 @@ log, log_file = setup_logger("step2")
 def process_summer_mean(
     region: ee.Geometry,
     region_name: str,
-    start_date: str,
-    end_date: str,
+    start: str,
+    end: str,
     month_start: int = SUMMER_MONTH_START,
     month_end: int = SUMMER_MONTH_END,
     ) -> tuple[ee.Image, dict]:
@@ -54,8 +54,8 @@ def process_summer_mean(
     log.info(
         "Processing MODIS summer baseline for region: %s (%s -> %s, months %s-%s)",
         region_name,
-        start_date,
-        end_date,
+        start,
+        end,
         month_start,
         month_end,
     )
@@ -63,7 +63,7 @@ def process_summer_mean(
     raw_collection = (
         ee.ImageCollection(MODIS_COLLECTION)
         .filterBounds(region)
-        .filterDate(start_date, end_date)
+        .filterDate(start, end)
         .filter(ee.Filter.calendarRange(month_start, month_end, "month"))
         .select("LST_Day_1km")
     )
@@ -159,8 +159,8 @@ def main():
     baseline_image, metadata = process_summer_mean(
         region=regions[REGION_NAME],
         region_name=REGION_NAME,
-        start_date=START_DATE,
-        end_date=END_DATE,
+        start=START_DATE,
+        end=END_DATE,
         month_start=SUMMER_MONTH_START,
         month_end=SUMMER_MONTH_END
     )

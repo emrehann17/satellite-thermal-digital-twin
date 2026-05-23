@@ -15,7 +15,7 @@ NOT:
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import ee
@@ -56,6 +56,7 @@ def apply_qa_mask(image: ee.Image) -> ee.Image:
 
     Bu maske current period median için özellikle gereklidir; aksi halde soğuk
     bulut pikselleri güncel LST gibi median'a girip mavi anomali blokları üretir.
+    QA_PIXEL water biti özellikle maskelenmez; su kütleleri LST ürününde korunur.
     """
     qa = image.select("QA_PIXEL")
     bad_bits = (
@@ -66,7 +67,20 @@ def apply_qa_mask(image: ee.Image) -> ee.Image:
         | (1 << 4)  # cloud shadow
         | (1 << 5)  # snow
     )
-    clean_mask = qa.bitwiseAnd(bad_bits).eq(0)
+
+    cloud_confidence = qa.rightShift(8).bitwiseAnd(3)
+    cloud_shadow_confidence = qa.rightShift(10).bitwiseAnd(3)
+    snow_ice_confidence = qa.rightShift(12).bitwiseAnd(3)
+    cirrus_confidence = qa.rightShift(14).bitwiseAnd(3)
+
+    clean_mask = (
+        qa.bitwiseAnd(bad_bits)
+        .eq(0)
+        .And(cloud_confidence.lt(2))
+        .And(cloud_shadow_confidence.lt(2))
+        .And(snow_ice_confidence.lt(2))
+        .And(cirrus_confidence.lt(2))
+    )
     return image.updateMask(clean_mask)
 
 # =============================================================================
@@ -116,8 +130,9 @@ def get_landsat_daily_median_collection(
 
     def build_daily_composite(date_value: ee.String) -> ee.Image:
         daily_collection = filtered_collection.filter(ee.Filter.eq("export_date", date_value))
+        masked_daily_collection = daily_collection.map(apply_qa_mask)
 
-        lst_median = daily_collection.select("ST_B10").median().rename("ST_B10")
+        lst_median = masked_daily_collection.select("ST_B10").median().rename("ST_B10")
         qa_mode = daily_collection.select("QA_PIXEL").mode().rename("QA_PIXEL").toUint16()
         first_image = ee.Image(daily_collection.sort("system:time_start").first())
 
@@ -142,8 +157,22 @@ def get_landsat_daily_median_collection(
         "months_filter": "6-9",
         "daily_dates": daily_dates,
         "daily_composite_count": unique_date_count,
-        "lst_composite_method": "daily_median",
+        "lst_composite_method": "qa_masked_daily_median",
         "qa_composite_method": "daily_mode",
+        "qa_mask_applied_to_lst": True,
+        "qa_masked_bits": [
+            "fill",
+            "dilated_cloud",
+            "cirrus",
+            "cloud",
+            "cloud_shadow",
+            "snow",
+            "medium_high_cloud_confidence",
+            "medium_high_cloud_shadow_confidence",
+            "medium_high_snow_ice_confidence",
+            "medium_high_cirrus_confidence",
+        ],
+        "qa_water_bit_preserved": True,
         "resolution": "30m",
         "created_at": datetime.now().isoformat(),
         "status": "daily_median_collection_prepared",
@@ -152,6 +181,139 @@ def get_landsat_daily_median_collection(
     log.info(f"Gunluk composite sayisi: {unique_date_count}")
 
     return daily_collection, metadata
+
+
+def get_landsat_baseline_window_median_collection(
+    region: ee.Geometry,
+    region_name: str,
+    current_end_date: str,
+    window_days: int,
+    baseline_start: str = BASELINE_START_DATE,
+    baseline_end: str = BASELINE_END_DATE,
+) -> tuple[ee.ImageCollection, dict]:
+    """
+    Current period ile simetrik geçmiş yıl pencere medianları üretir.
+
+    Örnek:
+        current = 2023-07-17 -> 2023-08-31
+        baseline = 2019/2020/2021/2022 aynı ay-gün pencereleri
+
+    Her yıl için tek QA-maskeli ST_B10 median composite export edilir. Step5 bu
+    yıllık pencere medianları üzerinden baseline mean/std hesaplar.
+    """
+    current_end_dt = datetime.strptime(current_end_date, "%Y-%m-%d")
+    current_start_dt = current_end_dt - timedelta(days=window_days)
+    current_year = current_end_dt.year
+    baseline_start_year = datetime.strptime(baseline_start, "%Y-%m-%d").year
+    baseline_end_year = datetime.strptime(baseline_end, "%Y-%m-%d").year
+    baseline_years = [
+        year
+        for year in range(baseline_start_year, baseline_end_year + 1)
+        if year < current_year
+    ]
+
+    if not baseline_years:
+        raise ValueError(
+            "Pencere-simetrik baseline için current yılından önce en az bir baseline yılı gerekir."
+        )
+
+    log.info("Pencere-simetrik Landsat baseline hazırlanıyor. Bölge: %s", region_name)
+    log.info(
+        "Current pencere referansı: %s -> %s (%s gün)",
+        current_start_dt.strftime("%m-%d"),
+        current_end_dt.strftime("%m-%d"),
+        window_days,
+    )
+    log.info("Baseline yılları: %s", baseline_years)
+
+    image_list = []
+    window_records = []
+
+    for year in baseline_years:
+        window_start = current_start_dt.replace(year=year)
+        window_end = current_end_dt.replace(year=year)
+        start_text = window_start.strftime("%Y-%m-%d")
+        end_text = window_end.strftime("%Y-%m-%d")
+
+        raw_collection = (
+            ee.ImageCollection(LANDSAT_COLLECTION)
+            .filterBounds(region)
+            .filterDate(start_text, end_text)
+            .select(["ST_B10", "QA_PIXEL"])
+            .map(lambda image: image.clip(region))
+        )
+        scene_count = raw_collection.size().getInfo()
+
+        if scene_count == 0:
+            log.warning(
+                "%s yılı için %s -> %s penceresinde Landsat sahnesi bulunamadı.",
+                year,
+                start_text,
+                end_text,
+            )
+            continue
+
+        masked_collection = raw_collection.map(apply_qa_mask)
+        lst_median = masked_collection.select("ST_B10").median().rename("ST_B10")
+        qa_mode = raw_collection.select("QA_PIXEL").mode().rename("QA_PIXEL").toUint16()
+        valid_count = (
+            masked_collection
+            .select("ST_B10")
+            .count()
+            .rename("Baseline_Window_Valid_Count")
+            .toFloat()
+        )
+
+        window_image = (
+            lst_median
+            .addBands(qa_mode)
+            .addBands(valid_count)
+            .clip(region)
+            .set("export_date", end_text)
+            .set("window_start", start_text)
+            .set("window_end", end_text)
+            .set("baseline_year", year)
+            .set("source_image_count", scene_count)
+        )
+        image_list.append(window_image)
+        window_records.append(
+            {
+                "year": year,
+                "window_start": start_text,
+                "window_end": end_text,
+                "scene_count": scene_count,
+            }
+        )
+
+    if not image_list:
+        raise ValueError("Hiçbir baseline yılı için pencere medianı üretilemedi.")
+
+    baseline_collection = ee.ImageCollection(image_list)
+    export_dates = [record["window_end"] for record in window_records]
+
+    metadata = {
+        "gee_project": GEE_PROJECT,
+        "region_name": region_name,
+        "collection": LANDSAT_COLLECTION,
+        "bands": ["ST_B10", "QA_PIXEL", "Baseline_Window_Valid_Count"],
+        "method": "window_symmetric_baseline",
+        "current_reference_end_date": current_end_date,
+        "window_days": window_days,
+        "baseline_years": baseline_years,
+        "windows": window_records,
+        "daily_dates": export_dates,
+        "daily_composite_count": len(export_dates),
+        "lst_composite_method": "qa_masked_window_median_per_year",
+        "qa_composite_method": "window_mode_per_year",
+        "qa_mask_applied_to_lst": True,
+        "qa_water_bit_preserved": True,
+        "resolution": "30m",
+        "created_at": datetime.now().isoformat(),
+        "status": "window_symmetric_baseline_collection_prepared",
+    }
+
+    log.info("Pencere-simetrik baseline pencere sayısı: %s", len(export_dates))
+    return baseline_collection, metadata
 
 # =============================================================================
 # 2. CURRENT PERIOD MEDIAN (ANOMALY IÇIN)
@@ -177,8 +339,6 @@ def get_current_period_median(
     Returns:
         (current_median_image, metadata_dict)
     """
-    from datetime import datetime, timedelta
-    
     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
     start_dt = end_dt - timedelta(days=window_days)
     start_date = start_dt.strftime("%Y-%m-%d")
@@ -217,14 +377,20 @@ def get_current_period_median(
     )
 
     # QA-temiz sahnelerin median'ını al; ikinci bant geçerli gözlem sayısıdır.
-    current_median = (
+    current_median_lst = (
         collection
         .median()
         .multiply(LANDSAT_SCALE)
         .add(LANDSAT_OFFSET)
         .subtract(273.15)
         .rename("Current_Period_LST_Celsius")
-        .addBands(current_valid_count)
+        .toFloat()
+    )
+
+    current_median = (
+        current_median_lst
+        .addBands(current_valid_count.toFloat())
+        .toFloat()
         .clip(region)
     )
     
@@ -258,6 +424,7 @@ def get_current_period_median(
             "medium_high_cirrus_confidence",
         ],
         "qa_water_bit_preserved": True,
+        "resolution": "30m",
         "created_at": datetime.now().isoformat(),
         "status": "current_period_median_prepared"
     }
@@ -294,13 +461,15 @@ def main() -> None:
     init_gee()
     regions = build_regions()
 
-    # Baseline için zaman serisi collection
-    log.info("\n1) Baseline zaman serisi hazırlanıyor...")
-    landsat_timeseries, ts_metadata = get_landsat_daily_median_collection(
+    # Baseline için current period ile simetrik geçmiş yıl pencere medianları
+    log.info("\n1) Pencere-simetrik baseline hazırlanıyor...")
+    landsat_timeseries, ts_metadata = get_landsat_baseline_window_median_collection(
         region=regions[REGION_NAME],
         region_name=REGION_NAME,
-        start=BASELINE_START_DATE,
-        end=BASELINE_END_DATE
+        current_end_date=CURRENT_PERIOD_END_DATE,
+        window_days=CURRENT_PERIOD_DAYS,
+        baseline_start=BASELINE_START_DATE,
+        baseline_end=BASELINE_END_DATE,
     )
 
     #Current period median (anomali için)

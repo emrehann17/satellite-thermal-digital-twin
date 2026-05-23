@@ -14,8 +14,6 @@ NOT:
     Sadece Step2 ve Step3 çıktılarını dışa aktarır.
 """
 import json
-import re
-import shutil
 import time
 from datetime import datetime
 from pathlib import Path
@@ -35,13 +33,9 @@ from core.config import (
     ENABLE_MODIS_EXPORT,
     ENABLE_LANDSAT_EXPORT,
     DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT,
-    DRIVE_DOWNLOAD_OVERWRITE,
-    DRIVE_DOWNLOAD_STAGING_SUBDIR,
     DRIVE_TASK_POLLING_ENABLED,
     DRIVE_TASK_POLL_INTERVAL_SECONDS,
     DRIVE_TASK_TIMEOUT_SECONDS,
-    GOOGLE_DRIVE_EXPORT_FOLDER_ID,
-    GOOGLE_DRIVE_EXPORT_FOLDER_URL,
     BASELINE_START_DATE,
     BASELINE_END_DATE,
     CURRENT_PERIOD_DAYS,
@@ -104,52 +98,17 @@ def log_drive_download_configuration() -> None:
     legacy_download_mode = get_legacy_download_mode()
 
     log.info(
-        "Drive download config: polling=%s, auto_download=%s, folder_url=%s, folder_id=%s",
+        "Drive export config: polling=%s, step4b_auto_download=%s",
         DRIVE_TASK_POLLING_ENABLED,
         DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT,
-        bool(GOOGLE_DRIVE_EXPORT_FOLDER_URL),
-        bool(GOOGLE_DRIVE_EXPORT_FOLDER_ID),
     )
 
     if legacy_download_mode is not None:
         log.warning(
             "Legacy DOWNLOAD_MODE=%s bulundu. Step4 artik bu alanla davranis secmiyor; "
-            "otomatik indirme icin DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT=True ve "
-            "GOOGLE_DRIVE_EXPORT_FOLDER_URL veya GOOGLE_DRIVE_EXPORT_FOLDER_ID kullanilmali.",
+            "Drive indirme Step4b tarafindan yonetilir.",
             legacy_download_mode,
         )
-
-
-def extract_google_drive_folder_id(url_or_id: str | None) -> str | None:
-    if not url_or_id:
-        return None
-
-    value = str(url_or_id).strip()
-    if not value:
-        return None
-
-    match = re.search(r"/folders/([a-zA-Z0-9_-]+)", value)
-    if match:
-        return match.group(1)
-
-    if re.fullmatch(r"[a-zA-Z0-9_-]{10,}", value):
-        return value
-
-    return None
-
-
-def resolve_drive_folder_reference() -> tuple[str | None, str | None]:
-    folder_id = extract_google_drive_folder_id(GOOGLE_DRIVE_EXPORT_FOLDER_ID)
-    if folder_id is None:
-        folder_id = extract_google_drive_folder_id(GOOGLE_DRIVE_EXPORT_FOLDER_URL)
-
-    folder_url = None
-    if folder_id is not None:
-        folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
-    elif GOOGLE_DRIVE_EXPORT_FOLDER_URL:
-        folder_url = str(GOOGLE_DRIVE_EXPORT_FOLDER_URL).strip()
-
-    return folder_url, folder_id
 
 # =============================================================================
 # 1. GOOGLE DRIVE EXPORT
@@ -450,166 +409,6 @@ def poll_drive_export_tasks(
     }
 
 
-def ensure_step5_data_dirs() -> tuple[Path, Path, Path, Path]:
-    """İndirilen rasterlar için yerel veri klasörlerini hazırlar."""
-    lst_dir = BASE_DIR / "data" / "landsat_timeseries"
-    qa_dir = BASE_DIR / "data" / "landsat_qa"
-    current_dir = BASE_DIR / "data" / "current_period"
-    modis_dir = BASE_DIR / "data" / "modis"
-
-    lst_dir.mkdir(parents=True, exist_ok=True)
-    qa_dir.mkdir(parents=True, exist_ok=True)
-    current_dir.mkdir(parents=True, exist_ok=True)
-    modis_dir.mkdir(parents=True, exist_ok=True)
-
-    return lst_dir, qa_dir, current_dir, modis_dir
-
-
-def copy_with_overwrite_control(source_path: Path, target_path: Path) -> None:
-    """Dosyayı hedefe kopyalar; overwrite ayarı kapalıysa mevcut dosyayı korur."""
-    if target_path.exists() and not DRIVE_DOWNLOAD_OVERWRITE:
-        log.info("Dosya zaten var, atlandı: %s", target_path)
-        return
-
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_path, target_path)
-
-
-def is_landsat_qa_export_name(filename: str) -> bool:
-    """
-    Landsat QA export adını tek parça ve GEE parçalı dosya adlarında tanır.
-
-    Örnekler:
-        landsat_lst_dogu_akdeniz_2020-06-01_qa.tif
-        landsat_lst_dogu_akdeniz_2020-06-01_qa-0000000000-0000000000.tif
-    """
-    stem = Path(filename).stem.lower()
-    return bool(re.search(r"_qa($|[-_])", stem))
-
-
-def place_downloaded_drive_tifs(staging_dir: Path) -> dict:
-    """
-    geemap ile indirilen Drive GeoTIFF dosyalarını yerel veri klasörlerine dağıtır.
-
-    Dosya adı eşleşmeleri:
-        *_qa.tif                         -> data/landsat_qa
-        landsat_current_period_*.tif     -> data/current_period
-        landsat_lst_*.tif                -> data/landsat_timeseries
-        modis_*.tif                      -> data/modis
-    """
-    lst_dir, qa_dir, current_dir, modis_dir = ensure_step5_data_dirs()
-    copied = {
-        "baseline_lst": [],
-        "baseline_qa": [],
-        "current_period": [],
-        "modis": [],
-        "unmatched": [],
-    }
-
-    for source_path in sorted(staging_dir.rglob("*.tif")):
-        name = source_path.name
-        lower_name = name.lower()
-
-        if is_landsat_qa_export_name(name):
-            target_path = qa_dir / name
-            copied["baseline_qa"].append(str(target_path))
-        elif lower_name.startswith("landsat_current_period_"):
-            target_path = current_dir / name
-            copied["current_period"].append(str(target_path))
-        elif lower_name.startswith(MODIS_EXPORT["file_name_prefix"].lower()):
-            target_path = modis_dir / name
-            copied["modis"].append(str(target_path))
-        elif lower_name.startswith(LANDSAT_EXPORT["file_name_prefix"].lower()):
-            target_path = lst_dir / name
-            copied["baseline_lst"].append(str(target_path))
-        else:
-            copied["unmatched"].append(str(source_path))
-            continue
-
-        copy_with_overwrite_control(source_path, target_path)
-        log.info("Drive çıktısı Step5 klasörüne kopyalandı: %s", target_path)
-
-    return copied
-
-
-def download_drive_exports_with_geemap() -> dict:
-    """
-    Google Drive export klasörünü geemap.download_folder ile yerel staging alanına indirir.
-
-    Not: geemap/gdown tarafı Drive klasör URL'si veya klasör ID'si ister. Export
-    folder adı tek başına indirme için yeterli değildir.
-    """
-    if not DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT:
-        log.warning("Drive otomatik indirme kapali: DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT=False")
-        return {
-            "enabled": False,
-            "attempted": False,
-            "downloaded": False,
-            "reason": "DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT=False",
-            "message": (
-                "Otomatik Drive indirme devre disi. "
-                "DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT=True yapilmadi."
-            ),
-        }
-
-    folder_url, folder_id = resolve_drive_folder_reference()
-
-    if not folder_url and not folder_id:
-        log.error(
-            "Drive otomatik indirme istendi ama GOOGLE_DRIVE_EXPORT_FOLDER_URL/ID bos."
-        )
-        return {
-            "enabled": True,
-            "attempted": False,
-            "downloaded": False,
-            "reason": "missing_google_drive_folder_url_or_id",
-            "message": (
-                "Otomatik indirme acik ama Drive klasor URL/ID verilmemis. "
-                "GOOGLE_DRIVE_EXPORT_FOLDER_URL veya GOOGLE_DRIVE_EXPORT_FOLDER_ID ayarlanmali."
-            ),
-        }
-
-    try:
-        import geemap
-    except ImportError as exc:
-        raise ImportError(
-            "Drive klasörü indirmek için geemap gerekli. "
-            "Kurulum: pip install geemap"
-        ) from exc
-
-    staging_dir = BASE_DIR / "data" / DRIVE_DOWNLOAD_STAGING_SUBDIR
-    staging_dir.mkdir(parents=True, exist_ok=True)
-
-    log.info("Drive klasoru indiriliyor: %s", staging_dir)
-    log.info("Drive referansi cozuldu: folder_id=%s, folder_url=%s", folder_id, folder_url)
-
-    download_kwargs = {
-        "output": str(staging_dir),
-        "remaining_ok": True,
-        "quiet": False,
-    }
-    if folder_id:
-        download_kwargs["id"] = folder_id
-    elif folder_url:
-        download_kwargs["url"] = folder_url
-
-    downloaded_files = geemap.download_folder(**download_kwargs)
-
-    copied = place_downloaded_drive_tifs(staging_dir)
-
-    return {
-        "enabled": True,
-        "attempted": True,
-        "downloaded": True,
-        "staging_dir": str(staging_dir),
-        "downloaded_files": downloaded_files,
-        "copied": copied,
-        "downloaded_at": datetime.now().isoformat(),
-        "message": "Drive klasoru indirildi ve GeoTIFF dosyalari Step5 klasorlerine kopyalandi.",
-        "resolved_folder_id": folder_id,
-        "resolved_folder_url": folder_url,
-    }
-
 # =============================================================================
 # 4. METADATA KAYDETME
 # =============================================================================
@@ -647,8 +446,8 @@ def main(step3_result: dict | None = None) -> None:
         modis_image, modis_processing_metadata = process_summer_mean(
             region=region,
             region_name=REGION_NAME,
-            start_date=START_DATE,
-            end_date=END_DATE,
+            start=START_DATE,
+            end=END_DATE,
             month_start=SUMMER_MONTH_START,
             month_end=SUMMER_MONTH_END,
         )
@@ -729,7 +528,16 @@ def main(step3_result: dict | None = None) -> None:
 
     if DRIVE_TASK_POLLING_ENABLED and DRIVE_EXPORT_TASKS:
         drive_task_polling_metadata = poll_drive_export_tasks(DRIVE_EXPORT_TASKS)
-        drive_download_metadata = download_drive_exports_with_geemap()
+        drive_download_metadata = {
+            "enabled": DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT,
+            "attempted": False,
+            "downloaded": False,
+            "deferred_to": "step4b_download_drive_exports",
+            "message": (
+                "Drive indirme ve yerel klasörlere dağıtma Step4b aşamasına "
+                "ayrıldı."
+            ),
+        }
     elif DRIVE_EXPORT_TASKS:
         log.info("Drive task polling kapalı; export görevleri başlatıldıktan sonra çıkılıyor.")
         drive_task_polling_metadata = {
@@ -741,10 +549,7 @@ def main(step3_result: dict | None = None) -> None:
         log.info("Polling gerektiren Drive export task'ı yok.")
 
     drive_files_downloaded = bool(drive_download_metadata.get("downloaded"))
-    manual_download_required = (
-        bool(DRIVE_EXPORT_TASKS)
-        and not drive_files_downloaded
-    )
+    download_required_before_step5 = bool(DRIVE_EXPORT_TASKS)
     drive_download_message = drive_download_metadata.get("message")
         
     metadata = {
@@ -758,7 +563,7 @@ def main(step3_result: dict | None = None) -> None:
         "export_folder": EXPORT_FOLDER,
         "created_at": datetime.now().isoformat(),
         "log_file": str(log_file),
-        "manual_download_required": manual_download_required,
+        "download_required_before_step5": download_required_before_step5,
         "enabled_exports": {
             "modis": ENABLE_MODIS_EXPORT,
             "landsat": ENABLE_LANDSAT_EXPORT
@@ -776,14 +581,12 @@ def main(step3_result: dict | None = None) -> None:
         "drive_task_polling": drive_task_polling_metadata,
         "drive_download": drive_download_metadata,
         "notes": {
-            "modis_download_mode": "drive_only_for_now",
-            "landsat_download_mode": "drive_export_with_task_polling",
+            "modis_download_mode": "drive_export_then_step4b_download",
+            "landsat_download_mode": "drive_export_with_task_polling_then_step4b_download",
             "anomaly_method": "z_score_window_based"
         },
         "status": (
-            "drive_download_completed"
-            if drive_files_downloaded
-            else "export_tasks_completed"
+            "export_tasks_completed_download_pending"
             if drive_task_polling_metadata.get("completed") == len(DRIVE_EXPORT_TASKS)
             else "export_tasks_started"
         )
@@ -794,32 +597,24 @@ def main(step3_result: dict | None = None) -> None:
     log.info("STEP 4 TAMAMLANDI")
     log.info(f"Export metadata dosyası: {metadata_path}")
 
-    if drive_files_downloaded:
-        log.info("Drive export dosyaları indirildi ve Step5 klasörlerine yerleştirildi.")
-        log.info("Step5 çalıştırılabilir.")
+    if DRIVE_TASK_POLLING_ENABLED:
+        log.info("Google Drive export görevleri tamamlandı.")
     else:
-        if DRIVE_TASK_POLLING_ENABLED:
-            log.info("Google Drive export görevleri tamamlandı.")
-        else:
-            log.info("Google Drive export görevleri başlatıldı.")
-        if drive_download_message:
-            log.warning("Otomatik indirme durumu: %s", drive_download_message)
-        log.info("Dosyaları manuel indirip Step5 klasörlerine yerleştirmen gerekiyor.")
-        log.info("\nExport edilen dosyalar:")
-        log.info("  1. Baseline zaman serisi (ST_B10 + QA_PIXEL)")
-        log.info("  2. Current period median (LST Celsius)")
+        log.info("Google Drive export görevleri başlatıldı.")
+    if drive_download_message:
+        log.info("Drive indirme durumu: %s", drive_download_message)
+    log.info("Sonraki adım: Step4b Drive çıktıları indirip Step5 klasörlerine yerleştirir.")
+    log.info("\nExport edilen dosyalar:")
+    log.info("  1. Baseline zaman serisi (ST_B10 + QA_PIXEL)")
+    log.info("  2. Current period median (LST Celsius + valid count)")
 
     log.info("=" * 60)
 
-    if drive_files_downloaded:
-        print("\nSTEP 4 tamamlandı. Drive çıktıları indirildi ve Step5 klasörlerine yerleştirildi.")
-        print("Şimdi Step5'i çalıştırabilirsin:")
-        print("python step5_preprocess_timeseries.py\n")
-    else:
-        print("\nSTEP 4 tamamlandı. Export görevleri Drive'da tamamlandı.")
-        if drive_download_message:
-            print(f"Otomatik indirme notu: {drive_download_message}")
-        print("Drive'dan dosyaları indirip Step5 klasörlerine yerleştirmen gerekiyor.\n")
+    print("\nSTEP 4 tamamlandı. Export görevleri Drive'da tamamlandı veya başlatıldı.")
+    if drive_download_message:
+        print(f"Drive indirme notu: {drive_download_message}")
+    print("Sonraki adım:")
+    print("python step4b_download_drive_exports.py\n")
 
 if __name__ == "__main__":
     main()

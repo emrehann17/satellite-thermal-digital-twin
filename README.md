@@ -54,11 +54,12 @@ Projede şu adımlar yer almaktadır:
 * MODIS için 5 yıllık yaz dönemi **standart sapma** üretimi
 * Landsat veri sorgulama
 * Landsat zaman serisi koleksiyonunun hazırlanması
-* aynı tarihe ait çoklu Landsat sahnelerinin **daily median composite** mantığıyla birleştirilmesi
+* current period ile aynı takvim penceresine sahip geçmiş yıl Landsat median composite'lerinin hazırlanması
 * current period için QA-maskeli temporal window tabanlı median composite üretimi
 * current period için geçerli gözlem sayısı bandı üretimi
 * Step4'te MODIS ve Landsat exportlarının aç/kapa mantığıyla kontrol edilmesi
-* Step4'te Drive export task polling, otomatik Drive klasörü indirme ve dosyaların yerel veri klasörlerine yerleştirilmesi
+* Step4'te Drive export task polling
+* Step4b'de Google Drive klasörü indirme ve dosyaların yerel veri klasörlerine yerleştirilmesi
 * `main.py` üzerinden Step1 -> Step5 akışının uçtan uca çalıştırılabilmesi
 * Step5'in otomatik akış içinde çalıştırılması
 * baseline mean raster, baseline std raster, baseline valid count raster, current period median raster, current period valid count raster ve z-score anomaly raster çıktılarının üretilmesi
@@ -76,13 +77,13 @@ Proje çalışıyor olsa da şu anda bazı önemli teknik sınırlılıklar bulu
 * Google Drive klasör URL/ID değerleri repoda hardcode edilmez; `GOOGLE_DRIVE_EXPORT_FOLDER_URL` veya `GOOGLE_DRIVE_EXPORT_FOLDER_ID` environment variable olarak verilmelidir.
 * Drive indirme akışı `geemap/gdown` davranışına bağlıdır; klasör URL/ID, paylaşım yetkisi ve Drive erişimi yanlış ise indirme adımı durabilir.
 * Doğrudan `ee.Image.getDownloadURL()` indirme yolu kaldırılmıştır; büyük rasterlar için ana akış Drive export, task polling ve geemap/gdown klasör indirmedir.
-* Step5 şu ana kadar sınırlı sayıda sahne ve daha küçük bir bölge ile test edilmiştir. Güncel test ayarında `MAX_LANDSAT_DAILY_EXPORTS=12` kullanılır; production denemesinde bu değer `None` yapılabilir.
+* Step5 şu ana kadar sınırlı sayıda pencere composite'i ve daha küçük bir bölge ile test edilmiştir. Güncel simetrik baseline ayarında 2019-2022 yılları için aynı current penceresi export edilir.
 * Bu nedenle anomaly ve diğer raster çıktılarında veri bulunmayan beyaz alanlar oluşabilmektedir.
 * Anomaly üretimi artık tek sahne yaklaşımı yerine belirli bir zaman penceresi içerisindeki QA-maskeli Landsat sahnelerinin median composite çıktısı üzerinden yapılmaktadır.
 * Ancak küçük test pencerelerinde veya sınırlı sahne sayısında hala veri boşlukları oluşabilmektedir.
 * Bu boşlukların temel nedeni yetersiz zamansal kapsama, bulut/QA maskelemesi ve Landsat sahnelerinin doğal mekansal kapsama farklılıklarıdır.
 * MODIS (~1 km) ve Landsat (~30 m) çözünürlük farkı nedeniyle anomaly üretimi hala geliştirme aşamasındadır.
-* Baseline ile current period tanımı hâlâ tam simetrik değildir: baseline günlük Landsat composite yığını üzerinden mean/std üretirken current state 45 günlük median composite olarak hesaplanmaktadır. Bu konu sonraki metodolojik iyileştirme başlığıdır.
+* Baseline-current simetrisi Landsat tarafında pencere bazlı hale getirilmiştir; yine de bu yaklaşımın büyük bölge ve daha fazla tarih penceresi ile doğrulanması gerekir.
 * Step5 çıktıları henüz büyük ölçekli veri ile tam doğrulanmış değildir.
 
 ---
@@ -161,10 +162,10 @@ Projede genel akış şu şekildedir:
 2. MODIS verisi kullanılarak 5 yıllık yaz dönemi baseline katmanları hazırlanır.
 3. Bu baseline için ortalama ve standart sapma hesaplanır.
 4. Landsat verisi aynı bölge için filtrelenir.
-5. Aynı tarihe ait çoklu Landsat sahneleri daily median composite ile tek çıktıya indirilir.
-6. Current period için belirli bir temporal window tanımlanır.
-7. Bu pencereye düşen Landsat sahneleri QA maskesi uygulanarak median composite ile tek current state rasterına dönüştürülür.
-8. Current period rasterına ikinci bant olarak QA-temiz geçerli gözlem sayısı eklenir.
+5. Current period için belirli bir temporal window tanımlanır.
+6. Bu pencerenin aynı ay-gün aralığı geçmiş baseline yıllarına taşınır.
+7. Her baseline yılı için QA-maskeli pencere median composite üretilir.
+8. Current period için QA-maskeli median composite ve geçerli gözlem sayısı bandı üretilir.
 9. MODIS ve Landsat rasterları GeoTIFF olarak Google Drive'a export edilir.
 10. Export task'ları polling ile tamamlanana kadar izlenir.
 11. Drive klasörü otomatik indirilir ve dosyalar yerel veri klasörlerine dağıtılır.
@@ -188,6 +189,7 @@ step1_fetch_modis.py
 step2_modis_5year_mean.py
 step3_landsat_lst.py
 step4_export_geotiff.py
+step4b_download_drive_exports.py
 step5_preprocess_timeseries.py
 main.py
 
@@ -207,7 +209,19 @@ MODIS verisini kullanarak 5 yıllık yaz dönemi baseline katmanlarını üretir
 
 ## Step 3
 
-Landsat zaman serisi koleksiyonunu hazırlar. Aynı tarihe ait çoklu görüntüler QA maskesi uygulandıktan sonra daily median composite ile tek çıktıya indirgenir. Ayrıca current period için temporal window tabanlı QA-maskeli median composite oluşturulur.
+Landsat baseline ve current period koleksiyonlarını hazırlar. Güncel yöntemde baseline, tüm yaz günlük composite yığını değildir; current period ile aynı ay-gün aralığındaki geçmiş yıl pencerelerinin QA-maskeli median composite'lerinden oluşur.
+
+Örnek:
+
+```text
+current  = 2023-07-17 -> 2023-08-31 median
+baseline = 2019-07-17 -> 2019-08-31 median
+baseline = 2020-07-17 -> 2020-08-31 median
+baseline = 2021-07-17 -> 2021-08-31 median
+baseline = 2022-07-17 -> 2022-08-31 median
+```
+
+Step5 bu geçmiş yıl pencere medianları üzerinden baseline mean/std üretir.
 
 Current period çıktısı iki bantlıdır:
 
@@ -218,7 +232,11 @@ Current period çıktısı iki bantlıdır:
 
 ## Step 4
 
-Online export ve otomatik indirme katmanıdır. MODIS ve Landsat rasterlarını GeoTIFF olarak Google Drive'a export eder, export task'larını polling ile izler, ardından Drive klasörünü indirip dosyaları uygun yerel klasörlere yerleştirir.
+Online export katmanıdır. MODIS ve Landsat rasterlarını GeoTIFF olarak Google Drive'a export eder ve export task'larını polling ile izler. Bu adım artık Drive klasörünü indirmez; indirme ve yerel klasörlere dağıtma sorumluluğu Step4b'ye ayrılmıştır.
+
+## Step 4B
+
+Drive download ve yerel dosya yerleştirme katmanıdır. Step4 tarafından tamamlanan Drive export dosyalarını indirir ve GeoTIFF dosyalarını Step5'in beklediği yerel klasörlere dağıtır.
 
 Yerel klasör yerleştirmesi şu şekildedir:
 
@@ -229,7 +247,7 @@ Yerel klasör yerleştirmesi şu şekildedir:
 
 ## Step 5
 
-Offline raster işleme katmanıdır. Step4 tarafından yerleştirilen GeoTIFF dosyaları okunur, QA tabanlı maskeleme uygulanır ve aşağıdaki çıktılar üretilir:
+Offline raster işleme katmanıdır. Step4b tarafından yerleştirilen GeoTIFF dosyaları okunur, QA tabanlı maskeleme uygulanır ve aşağıdaki çıktılar üretilir:
 
 * baseline mean raster
 * baseline standard deviation raster
@@ -244,7 +262,7 @@ Step5 artık tüm zamanı bellekte tutan `xarray + full stack` yolu yerine windo
 
 ## main.py
 
-`main.py`, Step1'den Step5'e kadar olan akışı organize biçimde çalıştırır. Güncel akışta Step4 export + indirme sürecini tamamladıktan sonra Step5 otomatik olarak devreye girer ve uçtan uca otomasyon tamamlanır.
+`main.py`, Step1'den Step5'e kadar olan akışı organize biçimde çalıştırır. Güncel akışta Step4 export/polling sürecini tamamlar, Step4b ile Drive çıktılarını indirip yerel klasörlere dağıtır, ardından Step5 otomatik olarak devreye girer.
 
 ---
 
@@ -366,13 +384,13 @@ STEP5_MIN_CURRENT_VALID_COUNT = 2
 
 Bu ayarla beklenen GEE export task sayısı yaklaşık olarak:
 
-* 12 Landsat LST
-* 12 Landsat QA
+* 4 Landsat baseline window LST
+* 4 Landsat baseline window QA
 * 1 current period raster
 * 1 MODIS raster
-* toplam 26 task
+* toplam yaklaşık 10 task
 
-Production veya daha kapsamlı denemelerde `MAX_LANDSAT_DAILY_EXPORTS = None` yapılabilir. Bu durumda 5 yıllık yaz baseline için çok daha fazla export task oluşacağı için önce küçük bölge ve kontrollü test önerilir.
+Production veya daha kapsamlı denemelerde baseline yıl aralığı ve pencere sayısı artırılabilir. Büyük bölgeye geçmeden önce küçük bölge ve kontrollü test önerilir.
 
 ---
 
@@ -390,7 +408,8 @@ Bu komut güncel akışta sırasıyla şunları yürütür:
 * Step1: GEE bağlantısı ve temel veri sorguları
 * Step2: MODIS baseline üretimi
 * Step3: Landsat günlük composite ve current period hazırlığı
-* Step4: Drive export, task polling, klasör indirme ve dosya yerleştirme
+* Step4: Drive export ve task polling
+* Step4b: Drive klasörü indirme ve dosya yerleştirme
 * Step5: windowed/chunked raster ön işleme ve anomaly üretimi
 
 ## Adım Adım Çalıştırma
@@ -400,13 +419,16 @@ python step1_fetch_modis.py
 python step2_modis_5year_mean.py
 python step3_landsat_lst.py
 python step4_export_geotiff.py
+python step4b_download_drive_exports.py
 python step5_preprocess_timeseries.py
 
 ```
 
-## Step4 -> Step5 Geçişi
+## Step4 -> Step4b -> Step5 Geçişi
 
-Step4, Drive export task'larını polling ile tamamlanana kadar bekler. `DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT=True` yapılır ve `GOOGLE_DRIVE_EXPORT_FOLDER_URL` veya `GOOGLE_DRIVE_EXPORT_FOLDER_ID` girilirse Drive klasörü geemap/gdown ile indirilir. Bu aşamada config ayarları ve Google Drive dosya erişim izinlerini kullanıcının manuel olarak yapması beklenir. 
+Step4, Drive export task'larını polling ile tamamlanana kadar bekler ve `outputs/step4/step4_metadata.json` dosyasına export listesini yazar. Step4 artık Drive klasörü indirme veya yerel klasörlere dosya dağıtma yapmaz.
+
+Step4b, `DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT=True` yapılır ve `GOOGLE_DRIVE_EXPORT_FOLDER_URL` veya `GOOGLE_DRIVE_EXPORT_FOLDER_ID` verilirse Drive klasörünü geemap/gdown ile indirir. Bu aşamada config ayarları ve Google Drive dosya erişim izinlerini kullanıcının manuel olarak yapması beklenir.
 
 İndirilen GeoTIFF dosyaları otomatik olarak şu klasörlere yerleştirilir:
 
@@ -465,7 +487,7 @@ Bu görseller, projenin mevcut geliştirme aşamasını temsil eden erken protot
 # Planlanan İyileştirmeler
 
 * Daha fazla Landsat sahnesi kullanılarak veri boşluklarının azaltılması
-* Baseline ve current period tanımlarının daha simetrik hale getirilmesi
+* Pencere-simetrik baseline yaklaşımının farklı pencereler ve büyük bölge üzerinde doğrulanması
 * Temporal window ve composite stratejisinin daha güçlü anomaly kapsaması sağlayacak şekilde geliştirilmesi
 * MODIS baseline ile Landsat anomaly ilişkisinin daha sağlam kurulması
 * Büyük bölgelerde parçalı GeoTIFF exportları için mosaic/VRT tabanlı daha sağlam okuma akışının kurulması
@@ -483,7 +505,7 @@ Bu repo şu anda tamamlanmış bir 3B termal dijital ikiz sistemi değildir. Mev
 * anomaly'nin tüm bölgeyi temsil edecek şekilde güçlendirilmesi
 * daha fazla Landsat sahnesi ile Step5'in yeniden test edilmesi
 * veri boşluklarının azaltılması
-* baseline/current simetrisinin iyileştirilmesi
+* pencere-simetrik baseline yaklaşımının daha fazla test edilmesi
 * büyük bölge tiling/parçalı GeoTIFF akışının tam çözülmesi
 * Step5 çıktılarının büyük veri ile daha güçlü doğrulanması
 
