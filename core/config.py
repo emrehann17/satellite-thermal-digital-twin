@@ -80,7 +80,7 @@ STEP5_WINDOW_SIZE = 512
 
 # Standart sapma bu eşiğin altındaysa z-score anomali NaN yazılır.
 # Bu, düşük örnek sayısı veya yapay sabit piksellerde z-score patlamasını engeller.
-STEP5_MIN_BASELINE_STD_CELSIUS = 1.0
+STEP5_MIN_BASELINE_STD_CELSIUS = 1.5
 
 # Bu eşiğin altında geçerli baseline gözlemi olan piksellerde mean/std/z-score
 # hesaplanmaz; piksel NaN bırakılır.
@@ -88,7 +88,16 @@ STEP5_MIN_BASELINE_VALID_COUNT = 3
 
 # Current period median en az bu kadar QA-temiz gözlemden oluşmalıdır.
 # Aksi halde tek bulut kaçağı veya tek sahne kaynaklı soğuk pikseller anomaliye girmez.
-STEP5_MIN_CURRENT_VALID_COUNT = 2
+STEP5_MIN_CURRENT_VALID_COUNT = 3
+
+# Komşu pikseller arasında valid-count farkı bu eşikleri aşıyorsa coverage
+# süreksizliği/dikiş riski var kabul edilir ve anomaly güven dışı bırakılır.
+STEP5_CURRENT_COUNT_DISCONTINUITY_THRESHOLD = 1
+STEP5_BASELINE_COUNT_DISCONTINUITY_THRESHOLD = 1
+
+# Baseline std katmanında komşu pikseller arasında bu eşik kadar ani sıçrama
+# varsa z-score paydasında dikiş riski var kabul edilir.
+STEP5_BASELINE_STD_DISCONTINUITY_THRESHOLD = 0.5
 
 # Windowed akış ana raster çıktıları üretir. Interpolated full NetCDF çıktısı
 # büyük veri için tekrar yüksek bellek/disk baskısı yaratabileceği için kapalıdır.

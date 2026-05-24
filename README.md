@@ -262,7 +262,7 @@ Step5 artık tüm zamanı bellekte tutan `xarray + full stack` yolu yerine windo
 
 ## main.py
 
-`main.py`, Step1'den Step5'e kadar olan akışı organize biçimde çalıştırır. Güncel akışta Step4 export/polling sürecini tamamlar, Step4b ile Drive çıktılarını indirip yerel klasörlere dağıtır, ardından Step5 otomatik olarak devreye girer.
+`main.py`, Step1'den Step5b'ye kadar olan akışı organize biçimde çalıştırır. Güncel akışta Step4 export/polling sürecini tamamlar, Step4b ile Drive çıktılarını indirip yerel klasörlere dağıtır, Step5 ile raster anomali ürünlerini üretir ve Step5b ile tanı raporlarını yazar.
 
 ---
 
@@ -278,14 +278,38 @@ Step5 sonunda aşağıdaki raster ve metadata çıktıları üretilmektedir:
 * `current_period_median_celsius.tif`
 * `current_period_valid_count.tif`
 * `low_current_count_mask.tif`
+* `baseline_count_discontinuity_mask.tif`
+* `current_count_discontinuity_mask.tif`
+* `coverage_discontinuity_mask.tif`
 * `anomaly_zscore.tif`
 * `step5_metadata.json`
+
+Step5'ten sonra `step5b_diagnostic_report.py` çalıştırılır ve şu tanı çıktılarını üretir:
+
+* `outputs/step5/diagnostics/summary.json`
+* `outputs/step5/diagnostics/summary.md`
+* `outputs/step5/diagnostics/*_hist.png`
+
+Bu rapor; z-score dağılımını, `|z| > 2` ve `|z| > 3` piksel sayılarını, baseline/current valid-count dağılımlarını, baseline standard deviation dağılımını ve düşük güven maskelerinin kapladığı piksel oranlarını özetler.
+
+Ardından `step5c_seam_diagnostic.py` path/row dikişini teşhis etmek için anomaly rasterındaki keskin geçişleri dikiş adayı olarak seçer ve aynı piksellerde current, baseline, std ve valid-count katmanlarının gradyanlarını karşılaştırır. Ürettiği başlıca çıktılar:
+
+* `outputs/step5/diagnostics/seam_summary.json`
+* `outputs/step5/diagnostics/seam_summary.md`
+* `outputs/step5/diagnostics/seam_candidate_mask.tif`
+* `outputs/step5/diagnostics/anomaly_gradient_strength.tif`
+* `outputs/step5/diagnostics/seam_gradient_ratio.png`
+
+Bu rapor, dikişin en olası kaynağını current coverage, baseline coverage, baseline standard deviation veya LST mozaiği farkı olarak ayırmaya yardım eder. Otomatik seçilen dikiş adayları QGIS üzerinde ayrıca görsel olarak kontrol edilmelidir.
 
 Tanı maskelerinde `1` değeri ilgili pikselin o nedenle güven dışı kaldığını gösterir. Bu katmanlar özellikle anomaly rasterındaki doygun mavi alanların kaynağını ayırmak için kullanılır:
 
 * `low_baseline_count_mask.tif`: baseline döneminde yeterli geçerli Landsat gözlemi yoktur.
 * `low_baseline_std_mask.tif`: baseline standart sapması z-score için çok düşüktür.
 * `low_current_count_mask.tif`: current period median yeterli QA-temiz gözlemden oluşmamıştır.
+* `baseline_count_discontinuity_mask.tif`: baseline valid-count katmanında komşu pikseller arasında ani coverage sıçraması vardır.
+* `current_count_discontinuity_mask.tif`: current valid-count katmanında komşu pikseller arasında ani coverage sıçraması vardır.
+* `coverage_discontinuity_mask.tif`: baseline veya current valid-count katmanında dikiş riski taşıyan coverage süreksizliği vardır.
 
 Güncel z-score formülü:
 
@@ -298,6 +322,7 @@ Bu hesap yalnızca şu koşullar sağlandığında yapılır:
 * baseline geçerli gözlem sayısı `STEP5_MIN_BASELINE_VALID_COUNT` eşiğini geçmelidir.
 * baseline standard deviation `STEP5_MIN_BASELINE_STD_CELSIUS` eşiğini geçmelidir.
 * current period geçerli gözlem sayısı `STEP5_MIN_CURRENT_VALID_COUNT` eşiğini geçmelidir.
+* current veya baseline valid-count katmanında coverage süreksizliği varsa anomaly güven dışı bırakılır.
 
 ---
 

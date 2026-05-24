@@ -511,6 +511,32 @@ def nanstd_float32(stack: np.ndarray) -> np.ndarray:
         return np.nanstd(stack, axis=0).astype("float32")
 
 
+def neighbor_discontinuity_mask(
+    values: np.ndarray,
+    threshold: float,
+) -> np.ndarray:
+    """
+    Komşu pikseller arasındaki en büyük mutlak farkı kullanarak süreksizlik maskesi üretir.
+
+    Valid-count rasterlarında coverage dikişi, std rasterında ise z-score
+    paydasındaki mekansal sıçrama bu yolla yakalanabilir.
+    """
+    mask = np.zeros(values.shape, dtype=bool)
+    finite = np.isfinite(values)
+
+    diff_x = np.abs(values[:, 1:] - values[:, :-1])
+    valid_x = finite[:, 1:] & finite[:, :-1] & (diff_x >= threshold)
+    mask[:, 1:] |= valid_x
+    mask[:, :-1] |= valid_x
+
+    diff_y = np.abs(values[1:, :] - values[:-1, :])
+    valid_y = finite[1:, :] & finite[:-1, :] & (diff_y >= threshold)
+    mask[1:, :] |= valid_y
+    mask[:-1, :] |= valid_y
+
+    return mask.astype("float32")
+
+
 class RunningStats:
     """
     Pencere pencere üretilen rasterlar için global özet istatistik tutar.
@@ -632,6 +658,10 @@ def process_step5_windowed(
         "current_median": OUTPUT_DIR / "current_period_median_celsius.tif",
         "current_valid_count": OUTPUT_DIR / "current_period_valid_count.tif",
         "low_current_count_mask": OUTPUT_DIR / "low_current_count_mask.tif",
+        "baseline_count_discontinuity_mask": OUTPUT_DIR / "baseline_count_discontinuity_mask.tif",
+        "current_count_discontinuity_mask": OUTPUT_DIR / "current_count_discontinuity_mask.tif",
+        "baseline_std_discontinuity_mask": OUTPUT_DIR / "baseline_std_discontinuity_mask.tif",
+        "coverage_discontinuity_mask": OUTPUT_DIR / "coverage_discontinuity_mask.tif",
         "anomaly_zscore": OUTPUT_DIR / "anomaly_zscore.tif",
     }
 
@@ -656,6 +686,10 @@ def process_step5_windowed(
             open_output(output_paths["current_median"], profile) as current_dst,
             open_output(output_paths["current_valid_count"], profile) as current_count_dst,
             open_output(output_paths["low_current_count_mask"], profile) as low_current_count_dst,
+            open_output(output_paths["baseline_count_discontinuity_mask"], profile) as baseline_count_disc_dst,
+            open_output(output_paths["current_count_discontinuity_mask"], profile) as current_count_disc_dst,
+            open_output(output_paths["baseline_std_discontinuity_mask"], profile) as baseline_std_disc_dst,
+            open_output(output_paths["coverage_discontinuity_mask"], profile) as coverage_disc_dst,
             open_output(output_paths["anomaly_zscore"], profile) as anomaly_dst,
         ):
             current_has_valid_count = current_src.count >= 2
@@ -728,6 +762,26 @@ def process_step5_windowed(
                     np.isfinite(current_valid_count)
                     & (current_valid_count < STEP5_MIN_CURRENT_VALID_COUNT)
                 ).astype("float32")
+                baseline_count_discontinuity_mask = neighbor_discontinuity_mask(
+                    valid_count,
+                    STEP5_BASELINE_COUNT_DISCONTINUITY_THRESHOLD,
+                )
+                current_count_discontinuity_mask = neighbor_discontinuity_mask(
+                    current_valid_count,
+                    STEP5_CURRENT_COUNT_DISCONTINUITY_THRESHOLD,
+                )
+                baseline_std_discontinuity_mask = neighbor_discontinuity_mask(
+                    baseline_std,
+                    STEP5_BASELINE_STD_DISCONTINUITY_THRESHOLD,
+                )
+                coverage_discontinuity_mask = np.maximum(
+                    baseline_count_discontinuity_mask,
+                    current_count_discontinuity_mask,
+                ).astype("float32")
+                combined_discontinuity_mask = np.maximum(
+                    coverage_discontinuity_mask,
+                    baseline_std_discontinuity_mask,
+                ).astype("float32")
 
                 with np.errstate(invalid="ignore", divide="ignore"):
                     anomaly_zscore = np.where(
@@ -736,6 +790,11 @@ def process_step5_windowed(
                         (current_median - baseline_mean) / baseline_std,
                         np.nan,
                     ).astype("float32")
+                anomaly_zscore = np.where(
+                    combined_discontinuity_mask < 0.5,
+                    anomaly_zscore,
+                    np.nan,
+                ).astype("float32")
                 anomaly_zscore = np.where(
                     np.isfinite(anomaly_zscore),
                     anomaly_zscore,
@@ -750,6 +809,26 @@ def process_step5_windowed(
                 current_dst.write(current_median, 1, window=window)
                 current_count_dst.write(current_valid_count, 1, window=window)
                 low_current_count_dst.write(low_current_count_mask, 1, window=window)
+                baseline_count_disc_dst.write(
+                    baseline_count_discontinuity_mask,
+                    1,
+                    window=window,
+                )
+                current_count_disc_dst.write(
+                    current_count_discontinuity_mask,
+                    1,
+                    window=window,
+                )
+                baseline_std_disc_dst.write(
+                    baseline_std_discontinuity_mask,
+                    1,
+                    window=window,
+                )
+                coverage_disc_dst.write(
+                    coverage_discontinuity_mask,
+                    1,
+                    window=window,
+                )
                 anomaly_dst.write(anomaly_zscore, 1, window=window)
 
                 baseline_mean_stats.update(baseline_mean)
@@ -818,6 +897,9 @@ def write_metadata(
             "min_baseline_std_celsius": STEP5_MIN_BASELINE_STD_CELSIUS,
             "min_baseline_valid_count": STEP5_MIN_BASELINE_VALID_COUNT,
             "min_current_valid_count": STEP5_MIN_CURRENT_VALID_COUNT,
+            "baseline_count_discontinuity_threshold": STEP5_BASELINE_COUNT_DISCONTINUITY_THRESHOLD,
+            "current_count_discontinuity_threshold": STEP5_CURRENT_COUNT_DISCONTINUITY_THRESHOLD,
+            "baseline_std_discontinuity_threshold": STEP5_BASELINE_STD_DISCONTINUITY_THRESHOLD,
             "estimated_stack_memory_mb": result["estimated_stack_memory_mb"],
             "netcdf_written": baseline_netcdf is not None,
         },
@@ -861,6 +943,10 @@ def write_metadata(
             "current_median": output_paths["current_median"].name,
             "current_valid_count": output_paths["current_valid_count"].name,
             "low_current_count_mask": output_paths["low_current_count_mask"].name,
+            "baseline_count_discontinuity_mask": output_paths["baseline_count_discontinuity_mask"].name,
+            "current_count_discontinuity_mask": output_paths["current_count_discontinuity_mask"].name,
+            "baseline_std_discontinuity_mask": output_paths["baseline_std_discontinuity_mask"].name,
+            "coverage_discontinuity_mask": output_paths["coverage_discontinuity_mask"].name,
             "anomaly_zscore": output_paths["anomaly_zscore"].name,
             "baseline_netcdf": baseline_netcdf,
         },
