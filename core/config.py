@@ -22,8 +22,8 @@ DRIVE_TASK_TIMEOUT_SECONDS = 6 * 60 * 60
 # Export görevleri tamamlandıktan sonra Drive klasörünü geemap/gdown ile indir.
 # Google Drive klasörünün paylaşılabilir URL'si veya klasör ID'si gerekir.
 DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT = True
-GOOGLE_DRIVE_EXPORT_FOLDER_URL = os.getenv("GOOGLE_DRIVE_EXPORT_FOLDER_URL", "")
-GOOGLE_DRIVE_EXPORT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_EXPORT_FOLDER_ID", "")
+GOOGLE_DRIVE_EXPORT_FOLDER_URL = os.getenv("GOOGLE_DRIVE_EXPORT_FOLDER_URL")
+GOOGLE_DRIVE_EXPORT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_EXPORT_FOLDER_ID")
 DRIVE_DOWNLOAD_STAGING_SUBDIR = "drive_exports"
 DRIVE_DOWNLOAD_OVERWRITE = True
 
@@ -55,23 +55,17 @@ MODIS_FILE_PREFIX = "modis_lst_dogu_akdeniz_5y_summer_mean"
 SUMMER_MONTH_START = 6
 SUMMER_MONTH_END = 9
 
-# Landsat baseline export üst sınırı. Bu değer hedef sayı değildir.
-# Pencere-simetrik baseline'da gerçek export sayısı current yılından önceki
-# baseline yıl sayısına bağlıdır; örn. 2019-2023 aralığı ve current=2023 ise 4.
-# Production için None yapılabilir.
-MAX_LANDSAT_DAILY_EXPORTS = 12
+MAX_LANDSAT_DAILY_EXPORTS = 4  
 
 EXPORT_CRS = "EPSG:4326"
 
-# Anomali baseline yıl aralığı.
-# Step3, current period penceresinin aynı ay-gün aralığını bu yıllara taşır.
-# Current yılı baseline'dan hariç tutulur.
-BASELINE_START_DATE = "2019-06-01"
+# Anomali pencere ayarları (TEST İÇİN KÜÇÜK PENCERELER)
+BASELINE_START_DATE = "2019-06-01"  # Tek yaz sezonu
 BASELINE_END_DATE = "2023-09-30"
 
 # Current period - anomali hesabı için kullanılacak güncel pencere
-CURRENT_PERIOD_DAYS = 45
-CURRENT_PERIOD_END_DATE = "2023-08-31"
+CURRENT_PERIOD_DAYS = 30  # 30 gün test için yeterli
+CURRENT_PERIOD_END_DATE = "2023-08-31"  # 2023 yaz sonu
 
 # Step5 bellek kullanımı ayarları
 # Her seferinde okunacak raster pencere kenarı (piksel).
@@ -79,27 +73,12 @@ CURRENT_PERIOD_END_DATE = "2023-08-31"
 STEP5_WINDOW_SIZE = 512
 
 # Standart sapma bu eşiğin altındaysa z-score anomali NaN yazılır.
-# Bu, düşük örnek sayısı veya yapay sabit piksellerde z-score patlamasını engeller.
-STEP5_MIN_BASELINE_STD_CELSIUS = 3.0
-STEP5_MAX_CURRENT_STD_CELSIUS = 3.0
-STEP5_MAX_CURRENT_RANGE_CELSIUS = 8.0
+# Bu, sabit piksellerde sonsuz/yanıltıcı z-score üretimini engeller.
+STEP5_STD_EPSILON = 1e-6
 
 # Bu eşiğin altında geçerli baseline gözlemi olan piksellerde mean/std/z-score
 # hesaplanmaz; piksel NaN bırakılır.
 STEP5_MIN_BASELINE_VALID_COUNT = 3
-
-# Current period median en az bu kadar QA-temiz gözlemden oluşmalıdır.
-# Aksi halde tek bulut kaçağı veya tek sahne kaynaklı soğuk pikseller anomaliye girmez.
-STEP5_MIN_CURRENT_VALID_COUNT = 3
-
-# Komşu pikseller arasında valid-count farkı bu eşikleri aşıyorsa coverage
-# süreksizliği/dikiş riski var kabul edilir ve anomaly güven dışı bırakılır.
-STEP5_CURRENT_COUNT_DISCONTINUITY_THRESHOLD = 1
-STEP5_BASELINE_COUNT_DISCONTINUITY_THRESHOLD = 1
-
-# Baseline std katmanında komşu pikseller arasında bu eşik kadar ani sıçrama
-# varsa z-score paydasında dikiş riski var kabul edilir.
-STEP5_BASELINE_STD_DISCONTINUITY_THRESHOLD = 0.5
 
 # Windowed akış ana raster çıktıları üretir. Interpolated full NetCDF çıktısı
 # büyük veri için tekrar yüksek bellek/disk baskısı yaratabileceği için kapalıdır.

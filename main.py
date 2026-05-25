@@ -16,10 +16,7 @@ import step1_fetch_modis
 import step2_modis_5year_mean
 import step3_landsat_lst
 import step4_export_geotiff
-import step4b_download_drive_export
 import step5_preprocess_timeseries
-import step5b_diagnostic_report
-import step5c_seam_diagnostic
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -55,10 +52,7 @@ def main() -> None:
             "STEP 4",
             lambda: step4_export_geotiff.main(step3_result=step3_result),
         )
-        run_step("STEP 4B", step4b_download_drive_export.main)
         run_step("STEP 5", step5_preprocess_timeseries.main)
-        run_step("STEP 5B", step5b_diagnostic_report.main)
-        run_step("STEP 5C", step5c_seam_diagnostic.main)
 
         end_time = datetime.now()
 

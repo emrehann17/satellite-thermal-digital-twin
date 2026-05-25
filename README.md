@@ -67,6 +67,7 @@ Projede şu adımlar yer almaktadır:
 * Step5B ile histogram/özet tanı raporlarının üretilmesi
 * Step5C ile path/row dikişi için katman-bazlı tanı raporlarının üretilmesi
 * Step5 raster çıktılarının windowed/chunked okuma ile düşük bellek kullanarak oluşturulması
+* Step5 ana sunum rasterlarında path/row dikiş hattının yerel medyan ile bastırılması
 * NetCDF yerine daha hafif raster + metadata odaklı Step5 çıktı yapısına geçilmesi
 
 ---
@@ -84,7 +85,7 @@ Proje çalışıyor olsa da şu anda bazı önemli teknik sınırlılıklar bulu
 * Anomaly üretimi artık tek sahne yaklaşımı yerine belirli bir zaman penceresi içerisindeki QA-maskeli Landsat sahnelerinin median composite çıktısı üzerinden yapılmaktadır.
 * Current yüzey artık tüm sahnelerin tek median'ı yerine QA-temiz günlük composite yığınının median'ı olarak üretilmektedir; buna rağmen küçük test pencerelerinde veya sınırlı sahne sayısında hala veri boşlukları oluşabilmektedir.
 * Bu boşlukların temel nedeni yetersiz zamansal kapsama, bulut/QA maskelemesi ve Landsat sahnelerinin doğal mekansal kapsama farklılıklarıdır.
-* Step5C dikiş tanısında Kozan test çalıştırmasında dikiş adayı oranı önemli ölçüde düşürülmüştür; ancak current median yüzeyi üzerinde küçük path/row kalıntıları tamamen ortadan kalkmış değildir.
+* Step5 ana rasterları artık coverage/std süreksizliklerinden yakalanan path/row dikiş hattını yerel medyan ile doldurur. Tanı maskeleri ise dikişin kaynağı incelenebilsin diye ham değerleriyle korunur.
 * MODIS (~1 km) ve Landsat (~30 m) çözünürlük farkı nedeniyle anomaly üretimi hala geliştirme aşamasındadır.
 * Baseline-current simetrisi Landsat tarafında pencere bazlı hale getirilmiştir; yine de bu yaklaşımın büyük bölge ve daha fazla tarih penceresi ile doğrulanması gerekir.
 * Step5 çıktıları henüz büyük ölçekli veri ile tam doğrulanmış değildir.
@@ -261,7 +262,7 @@ Offline raster işleme katmanıdır. Step4b tarafından yerleştirilen GeoTIFF d
 * düşük güven tanı maskeleri
 * metadata JSON çıktısı
 
-Step5 artık tüm zamanı bellekte tutan `xarray + full stack` yolu yerine windowed/chunked raster işleme ile çalışmaktadır. Baseline istatistiklerinde lineer zaman interpolasyonu kullanılmaz; yeterli geçerli gözlem olmayan pikseller `NaN` bırakılır.
+Step5 artık tüm zamanı bellekte tutan `xarray + full stack` yolu yerine windowed/chunked raster işleme ile çalışmaktadır. Baseline istatistiklerinde lineer zaman interpolasyonu kullanılmaz; yeterli geçerli gözlem olmayan pikseller `NaN` bırakılır. Ana sunum rasterları yazılmadan önce coverage ve baseline-std süreksizliklerinden türetilen ince path/row dikiş hattı küçük bir yerel medyan doldurma adımıyla bastırılır; düşük güven ve süreksizlik maskeleri tanı için ham bırakılır.
 
 ## main.py
 
@@ -290,6 +291,8 @@ Step5 sonunda aşağıdaki raster ve metadata çıktıları üretilmektedir:
 * `coverage_discontinuity_mask.tif`
 * `anomaly_zscore.tif`
 * `step5_metadata.json`
+
+Ana sıcaklık, geçerli gözlem sayısı, variability ve anomaly rasterları path/row dikiş izi sunumda görünmesin diye Step5 içinde seam smoothing adımından geçirilir. `low_*_mask.tif` ve `*_discontinuity_mask.tif` dosyaları tanı amaçlıdır; bu maskelerde dikiş adaylarının görünmesi beklenen davranıştır.
 
 Step5'ten sonra `step5b_diagnostic_report.py` çalıştırılır ve şu tanı çıktılarını üretir:
 
@@ -529,7 +532,7 @@ Bu görseller, projenin mevcut geliştirme aşamasını temsil eden erken protot
 * Bu nedenle anomaly raster üzerinde veri bulunmayan alanlar oluşabilmektedir.
 * Bu boşluklar çoğunlukla yetersiz zamansal kapsama, QA maskelemesi, düşük baseline gözlem sayısı veya düşük current gözlem sayısından kaynaklanmaktadır.
 * Current thermal state, QA-temiz günlük Landsat composite yığını üzerinden tanımlanmaktadır. Bu yaklaşım, sahne-bazlı current tanımına göre daha kararlı bir yöntemdir.
-* Step5C dikiş tanısı, Kozan test çalıştırmasında dikiş aday alanını yaklaşık `%0.03` düzeyine kadar indirmiştir; yine de current mosaic tarafında zayıf kalıntılar görülebilir.
+* Ana Step5 rasterlarında path/row dikiş hattı yerel medyanla bastırılır; geniş veri boşlukları, düşük güven alanları veya bulut kaynaklı eksikler yapay olarak doldurulmaz.
 * Anomaly rasterındaki mavi/kırmızı alanlar doğrudan fiziksel yorumlanmamalıdır; `valid_count`, `current std/range` ve dikiş maskeleri ile birlikte değerlendirilmelidir.
 
 ---
