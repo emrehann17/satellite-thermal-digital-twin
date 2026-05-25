@@ -24,6 +24,8 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
+from rasterio.enums import Resampling
+from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
 
 
@@ -31,12 +33,14 @@ BASE_DIR = Path(__file__).resolve().parent
 BASELINE_INPUT_DIR = BASE_DIR / "data" / "landsat_timeseries"
 QA_DIR = BASE_DIR / "data" / "landsat_qa"
 CURRENT_PERIOD_DIR = BASE_DIR / "data" / "current_period"
+MODIS_INPUT_DIR = BASE_DIR / "data" / "modis"
 OUTPUT_DIR = BASE_DIR / "outputs" / "step5"
 STEP4_METADATA_PATH = BASE_DIR / "outputs" / "step4" / "step4_metadata.json"
 
 BASELINE_INPUT_DIR.mkdir(parents=True, exist_ok=True)
 QA_DIR.mkdir(parents=True, exist_ok=True)
 CURRENT_PERIOD_DIR.mkdir(parents=True, exist_ok=True)
+MODIS_INPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 log, log_file = setup_logger("step5")
@@ -220,6 +224,39 @@ def list_current_period_tifs() -> list[Path]:
     return current_files
 
 
+def list_modis_context_tifs() -> list[Path]:
+    """
+    Step4b'nin data/modis klasörüne yerleştirdiği MODIS mean/std GeoTIFF'lerini listeler.
+
+    MODIS dosyası Step5 için zorunlu değildir; bulunursa düşük çözünürlüklü bağlam
+    z-score ürünü ve Landsat gridine yeniden örneklenmiş mean/std katmanları yazılır.
+    """
+    if not ENABLE_MODIS_STEP5_CONTEXT:
+        return []
+
+    expected_prefix = MODIS_EXPORT["file_name_prefix"].lower()
+    modis_files = sorted(
+        path
+        for path in MODIS_INPUT_DIR.glob("*.tif")
+        if path.name.lower().startswith(expected_prefix)
+    )
+
+    if not modis_files:
+        log.warning(
+            "MODIS Step5 bağlamı açık ama MODIS GeoTIFF bulunamadı: %s",
+            MODIS_INPUT_DIR,
+        )
+        return []
+
+    if len(modis_files) > 1:
+        log.warning(
+            "Birden fazla MODIS GeoTIFF bulundu; ilk dosya kullanılacak: %s",
+            modis_files[0].name,
+        )
+
+    return modis_files
+
+
 def is_qa_tif_name(filename: str) -> bool:
     """
     Landsat QA GeoTIFF adını tek parça ve GEE parçalı export adlarında yakalar.
@@ -372,6 +409,11 @@ def output_profile(profile: dict) -> dict:
     return profile
 
 
+def mask_physical_celsius(array: np.ndarray) -> np.ndarray:
+    """Fiziksel LST aralığı dışındaki değerleri NaN yapar."""
+    return np.where((array > -30) & (array < 80), array, np.nan).astype("float32")
+
+
 def open_output(path: Path, profile: dict):
     """Çıktı GeoTIFF dosyasını yazma modunda açar."""
     return rasterio.open(path, "w", **output_profile(profile))
@@ -476,11 +518,7 @@ def read_baseline_stack_window(
             clean_mask = build_cloud_mask_from_qa(qa_array)
             lst_celsius = np.where(clean_mask, lst_celsius, np.nan)
 
-        lst_celsius = np.where(
-            (lst_celsius > -30) & (lst_celsius < 80),
-            lst_celsius,
-            np.nan,
-        ).astype("float32")
+        lst_celsius = mask_physical_celsius(lst_celsius)
 
         stack[scene_index] = lst_celsius
 
@@ -522,8 +560,8 @@ class RunningStats:
     def __init__(self) -> None:
         """Boş istatistik biriktiricisini başlatır."""
         self.count = 0
-        self.sum = 0.0
-        self.sum_sq = 0.0
+        self._mean = 0.0
+        self._m2 = 0.0
         self.min = math.inf
         self.max = -math.inf
 
@@ -536,16 +574,28 @@ class RunningStats:
             return
 
         values = array[valid].astype("float64")
-        self.count += count
-        self.sum += float(np.sum(values))
-        self.sum_sq += float(np.sum(values * values))
+        batch_mean = float(np.mean(values))
+        batch_m2 = float(np.sum((values - batch_mean) ** 2))
+
+        if self.count == 0:
+            self.count = count
+            self._mean = batch_mean
+            self._m2 = batch_m2
+        else:
+            old_count = self.count
+            new_count = old_count + count
+            delta = batch_mean - self._mean
+            self._mean += delta * count / new_count
+            self._m2 += batch_m2 + delta * delta * old_count * count / new_count
+            self.count = new_count
+
         self.min = min(self.min, float(np.min(values)))
         self.max = max(self.max, float(np.max(values)))
 
     @property
     def mean(self) -> float:
         """Biriktirilen tüm geçerli piksellerin ortalamasını döndürür."""
-        return float("nan") if self.count == 0 else self.sum / self.count
+        return float("nan") if self.count == 0 else self._mean
 
     @property
     def std(self) -> float:
@@ -553,7 +603,7 @@ class RunningStats:
         if self.count == 0:
             return float("nan")
 
-        variance = max((self.sum_sq / self.count) - (self.mean * self.mean), 0.0)
+        variance = max(self._m2 / self.count, 0.0)
         return math.sqrt(variance)
 
     def as_dict(self) -> dict:
@@ -570,6 +620,7 @@ class RunningStats:
 def process_step5_windowed(
     tif_files: list[Path],
     current_path: Path,
+    modis_path: Path | None = None,
 ) -> dict:
     """
     Step5 işlemini bellek dostu pencere tabanlı akışla çalıştırır.
@@ -619,9 +670,13 @@ def process_step5_windowed(
     baseline_std_stats = RunningStats()
     current_stats = RunningStats()
     anomaly_stats = RunningStats()
+    modis_mean_stats = RunningStats()
+    modis_std_stats = RunningStats()
+    modis_context_anomaly_stats = RunningStats()
 
     total_pixels = width * height
     valid_anomaly_pixels = 0
+    valid_modis_context_pixels = 0
 
     output_paths = {
         "baseline_mean": OUTPUT_DIR / "baseline_lst_mean_celsius.tif",
@@ -634,6 +689,14 @@ def process_step5_windowed(
         "low_current_count_mask": OUTPUT_DIR / "low_current_count_mask.tif",
         "anomaly_zscore": OUTPUT_DIR / "anomaly_zscore.tif",
     }
+    if modis_path is not None:
+        output_paths.update(
+            {
+                "modis_mean_resampled": OUTPUT_DIR / "modis_lst_mean_celsius_resampled.tif",
+                "modis_std_resampled": OUTPUT_DIR / "modis_lst_std_celsius_resampled.tif",
+                "modis_context_zscore": OUTPUT_DIR / "modis_context_zscore.tif",
+            }
+        )
 
     qa_paths = [find_qa_path_for_landsat_tif(path) for path in tif_files]
 
@@ -645,6 +708,24 @@ def process_step5_windowed(
             stack_context.enter_context(rasterio.open(path)) if path is not None else None
             for path in qa_paths
         ]
+        modis_vrt = None
+        if modis_path is not None:
+            modis_src = stack_context.enter_context(rasterio.open(modis_path))
+            if modis_src.count < 2:
+                raise ValueError(
+                    f"MODIS GeoTIFF en az iki bant içermeli (mean/std): {modis_path.name}"
+                )
+
+            modis_vrt = stack_context.enter_context(
+                WarpedVRT(
+                    modis_src,
+                    crs=profile["crs"],
+                    transform=profile["transform"],
+                    width=width,
+                    height=height,
+                    resampling=Resampling.bilinear,
+                )
+            )
 
         with (
             rasterio.open(current_path) as current_src,
@@ -658,6 +739,20 @@ def process_step5_windowed(
             open_output(output_paths["low_current_count_mask"], profile) as low_current_count_dst,
             open_output(output_paths["anomaly_zscore"], profile) as anomaly_dst,
         ):
+            modis_mean_dst = None
+            modis_std_dst = None
+            modis_context_dst = None
+            if modis_vrt is not None:
+                modis_mean_dst = stack_context.enter_context(
+                    open_output(output_paths["modis_mean_resampled"], profile)
+                )
+                modis_std_dst = stack_context.enter_context(
+                    open_output(output_paths["modis_std_resampled"], profile)
+                )
+                modis_context_dst = stack_context.enter_context(
+                    open_output(output_paths["modis_context_zscore"], profile)
+                )
+
             current_has_valid_count = current_src.count >= 2
             if not current_has_valid_count:
                 log.warning(
@@ -708,11 +803,7 @@ def process_step5_windowed(
                         np.nan,
                     ).astype("float32")
 
-                current_median = np.where(
-                    (current_median > -30) & (current_median < 80),
-                    current_median,
-                    np.nan,
-                ).astype("float32")
+                current_median = mask_physical_celsius(current_median)
                 enough_current = current_valid_count >= STEP5_MIN_CURRENT_VALID_COUNT
                 current_median = np.where(enough_current, current_median, np.nan).astype(
                     "float32"
@@ -742,6 +833,34 @@ def process_step5_windowed(
                     np.nan,
                 ).astype("float32")
 
+                if modis_vrt is not None:
+                    modis_mean = mask_physical_celsius(
+                        read_band_window(modis_vrt, window, band_index=1)
+                    )
+                    modis_std = read_band_window(modis_vrt, window, band_index=2)
+                    modis_std = np.where(
+                        np.isfinite(modis_std) & (modis_std >= 0),
+                        modis_std,
+                        np.nan,
+                    ).astype("float32")
+
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        modis_context_zscore = np.where(
+                            enough_current
+                            & (modis_std >= STEP5_MIN_MODIS_STD_CELSIUS),
+                            (current_median - modis_mean) / modis_std,
+                            np.nan,
+                        ).astype("float32")
+                    modis_context_zscore = np.where(
+                        np.isfinite(modis_context_zscore),
+                        modis_context_zscore,
+                        np.nan,
+                    ).astype("float32")
+                else:
+                    modis_mean = None
+                    modis_std = None
+                    modis_context_zscore = None
+
                 mean_dst.write(baseline_mean, 1, window=window)
                 std_dst.write(baseline_std, 1, window=window)
                 valid_count_dst.write(valid_count, 1, window=window)
@@ -751,17 +870,29 @@ def process_step5_windowed(
                 current_count_dst.write(current_valid_count, 1, window=window)
                 low_current_count_dst.write(low_current_count_mask, 1, window=window)
                 anomaly_dst.write(anomaly_zscore, 1, window=window)
+                if modis_context_zscore is not None:
+                    modis_mean_dst.write(modis_mean, 1, window=window)
+                    modis_std_dst.write(modis_std, 1, window=window)
+                    modis_context_dst.write(modis_context_zscore, 1, window=window)
 
                 baseline_mean_stats.update(baseline_mean)
                 baseline_std_stats.update(baseline_std)
                 current_stats.update(current_median)
                 anomaly_stats.update(anomaly_zscore)
                 valid_anomaly_pixels += int(np.sum(np.isfinite(anomaly_zscore)))
+                if modis_context_zscore is not None:
+                    modis_mean_stats.update(modis_mean)
+                    modis_std_stats.update(modis_std)
+                    modis_context_anomaly_stats.update(modis_context_zscore)
+                    valid_modis_context_pixels += int(
+                        np.sum(np.isfinite(modis_context_zscore))
+                    )
 
                 if index == 1 or index == window_count or index % 10 == 0:
                     log.info("Pencere işlendi: %s/%s", index, window_count)
 
     coverage_pct = 100 * valid_anomaly_pixels / total_pixels
+    modis_context_coverage_pct = 100 * valid_modis_context_pixels / total_pixels
 
     return {
         "profile": profile,
@@ -772,7 +903,12 @@ def process_step5_windowed(
         "baseline_std_stats": baseline_std_stats.as_dict(),
         "current_stats": current_stats.as_dict(),
         "anomaly_stats": anomaly_stats.as_dict(),
+        "modis_path": modis_path,
+        "modis_mean_stats": modis_mean_stats.as_dict(),
+        "modis_std_stats": modis_std_stats.as_dict(),
+        "modis_context_anomaly_stats": modis_context_anomaly_stats.as_dict(),
         "coverage_percent": coverage_pct,
+        "modis_context_coverage_percent": modis_context_coverage_pct,
         "window_count": window_count,
         "estimated_stack_memory_mb": memory_estimate_mb,
     }
@@ -809,6 +945,7 @@ def write_metadata(
             "baseline_timeseries": str(BASELINE_INPUT_DIR),
             "qa_masks": str(QA_DIR),
             "current_period": str(CURRENT_PERIOD_DIR),
+            "modis_context": str(MODIS_INPUT_DIR),
         },
         "log_file": str(log_file),
         "processing": {
@@ -818,6 +955,8 @@ def write_metadata(
             "min_baseline_std_celsius": STEP5_MIN_BASELINE_STD_CELSIUS,
             "min_baseline_valid_count": STEP5_MIN_BASELINE_VALID_COUNT,
             "min_current_valid_count": STEP5_MIN_CURRENT_VALID_COUNT,
+            "modis_context_enabled": ENABLE_MODIS_STEP5_CONTEXT,
+            "min_modis_std_celsius": STEP5_MIN_MODIS_STD_CELSIUS,
             "estimated_stack_memory_mb": result["estimated_stack_memory_mb"],
             "netcdf_written": baseline_netcdf is not None,
         },
@@ -839,6 +978,24 @@ def write_metadata(
             ),
             "min_valid_count": STEP5_MIN_CURRENT_VALID_COUNT,
             "mean_celsius": result["current_stats"]["mean"],
+        },
+        "modis_context": {
+            "enabled": ENABLE_MODIS_STEP5_CONTEXT,
+            "input_file": (
+                None if result["modis_path"] is None else result["modis_path"].name
+            ),
+            "role": (
+                "coarse_context_only; Landsat z-score remains the primary "
+                "high-resolution anomaly product"
+            ),
+            "resampling": "bilinear_to_landsat_grid",
+            "min_std_celsius": STEP5_MIN_MODIS_STD_CELSIUS,
+            "mean_celsius": result["modis_mean_stats"]["mean"],
+            "std_celsius": result["modis_std_stats"]["mean"],
+            "coverage_percent": result["modis_context_coverage_percent"],
+            "mean_zscore": result["modis_context_anomaly_stats"]["mean"],
+            "min_zscore": result["modis_context_anomaly_stats"]["min"],
+            "max_zscore": result["modis_context_anomaly_stats"]["max"],
         },
         "anomaly": {
             "method": "z_score",
@@ -862,6 +1019,21 @@ def write_metadata(
             "current_valid_count": output_paths["current_valid_count"].name,
             "low_current_count_mask": output_paths["low_current_count_mask"].name,
             "anomaly_zscore": output_paths["anomaly_zscore"].name,
+            "modis_mean_resampled": (
+                output_paths.get("modis_mean_resampled").name
+                if "modis_mean_resampled" in output_paths
+                else None
+            ),
+            "modis_std_resampled": (
+                output_paths.get("modis_std_resampled").name
+                if "modis_std_resampled" in output_paths
+                else None
+            ),
+            "modis_context_zscore": (
+                output_paths.get("modis_context_zscore").name
+                if "modis_context_zscore" in output_paths
+                else None
+            ),
             "baseline_netcdf": baseline_netcdf,
         },
         "status": "processed",
@@ -883,14 +1055,22 @@ def main() -> None:
 
     tif_files = list_baseline_tifs()
     current_path = list_current_period_tifs()[0]
+    modis_files = list_modis_context_tifs()
+    modis_path = modis_files[0] if modis_files else None
 
-    result = process_step5_windowed(tif_files, current_path)
+    result = process_step5_windowed(tif_files, current_path, modis_path=modis_path)
     metadata_path = write_metadata(result, tif_files, current_path)
 
     log.info("Baseline ortalaması: %.2f C", result["baseline_mean_stats"]["mean"])
     log.info("Baseline standart sapması: %.2f C", result["baseline_std_stats"]["mean"])
     log.info("Current period ortalaması: %.2f C", result["current_stats"]["mean"])
     log.info("Geçerli anomali kapsaması: %.1f%%", result["coverage_percent"])
+    if modis_path is not None:
+        log.info("MODIS bağlam dosyası: %s", modis_path.name)
+        log.info(
+            "MODIS bağlam z-score kapsaması: %.1f%%",
+            result["modis_context_coverage_percent"],
+        )
     log.info("Anomali ortalaması: %.2f sigma", result["anomaly_stats"]["mean"])
     log.info(
         "Anomali aralığı: [%.2f, %.2f] sigma",

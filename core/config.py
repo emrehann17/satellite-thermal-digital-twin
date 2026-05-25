@@ -40,6 +40,7 @@ LANDSAT_EXPORT = {
 
 ENABLE_MODIS_EXPORT = True
 ENABLE_LANDSAT_EXPORT = True
+ENABLE_MODIS_STEP5_CONTEXT = True
 
 LANDSAT_SCALE = 0.00341802
 LANDSAT_OFFSET = 149.0
@@ -81,6 +82,10 @@ STEP5_WINDOW_SIZE = 512
 # Standart sapma bu eşiğin altındaysa z-score anomali NaN yazılır.
 # Bu, düşük örnek sayısı veya yapay sabit piksellerde z-score patlamasını engeller.
 STEP5_MIN_BASELINE_STD_CELSIUS = 1.0
+
+# MODIS bağlam z-score hesabında standart sapma bu eşiğin altındaysa sonuç NaN bırakılır.
+# MODIS (~1 km) yalnız düşük çözünürlüklü bağlam ürünü olarak kullanılır.
+STEP5_MIN_MODIS_STD_CELSIUS = 1.0
 
 # Bu eşiğin altında geçerli baseline gözlemi olan piksellerde mean/std/z-score
 # hesaplanmaz; piksel NaN bırakılır.
