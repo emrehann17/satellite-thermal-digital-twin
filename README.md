@@ -36,6 +36,7 @@ Projede şu adımlar yer almaktadır:
 * QA tabanlı bulut maskeleme
 * Python ile zaman serisi ön işleme
 * baseline ve anomaly raster üretimi
+* geçerli gözlem sayısı ve düşük güven maskeleri ile anomaly teşhisi
 * ileride 2B/3B görselleştirme ve risk analizi
 
 ---
@@ -53,13 +54,18 @@ Projede şu adımlar yer almaktadır:
 * MODIS için 5 yıllık yaz dönemi **standart sapma** üretimi
 * Landsat veri sorgulama
 * Landsat zaman serisi koleksiyonunun hazırlanması
-* aynı tarihe ait çoklu Landsat sahnelerinin **daily median composite** mantığıyla birleştirilmesi
-* current period için temporal window tabanlı median composite üretimi
+* current period ile aynı takvim penceresine sahip geçmiş yıl Landsat median composite'lerinin hazırlanması
+* current period için QA-maskeli günlük composite yığını üzerinden temporal median üretimi
+* current period için geçerli günlük composite sayısı bandı üretimi
 * Step4'te MODIS ve Landsat exportlarının aç/kapa mantığıyla kontrol edilmesi
-* Step4'te Drive export task polling, otomatik Drive klasörü indirme ve dosyaların yerel veri klasörlerine yerleştirilmesi
+* Step4'te Drive export task polling
+* Step4b'de Google Drive klasörü indirme ve dosyaların yerel veri klasörlerine yerleştirilmesi
 * `main.py` üzerinden Step1 -> Step5 akışının uçtan uca çalıştırılabilmesi
 * Step5'in otomatik akış içinde çalıştırılması
-* baseline mean raster, baseline std raster, current period median raster ve z-score anomaly raster çıktılarının üretilmesi
+* baseline mean raster, baseline std raster, baseline valid count raster, current period median raster, current period valid count raster ve z-score anomaly raster çıktılarının üretilmesi
+* düşük baseline gözlem sayısı, düşük baseline standard deviation, düşük current gözlem sayısı ve yüksek current variability için tanı maskelerinin üretilmesi
+* Step5B ile histogram/özet tanı raporlarının üretilmesi
+* Step5C ile path/row dikişi için katman-bazlı tanı raporlarının üretilmesi
 * Step5 raster çıktılarının windowed/chunked okuma ile düşük bellek kullanarak oluşturulması
 * NetCDF yerine daha hafif raster + metadata odaklı Step5 çıktı yapısına geçilmesi
 
@@ -70,14 +76,17 @@ Projede şu adımlar yer almaktadır:
 Proje çalışıyor olsa da şu anda bazı önemli teknik sınırlılıklar bulunmaktadır:
 
 * Step4 otomatikleşmiş olsa da bunun sağlıklı çalışması için `DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT`, `GOOGLE_DRIVE_EXPORT_FOLDER_URL` veya `GOOGLE_DRIVE_EXPORT_FOLDER_ID` ayarlarının doğru verilmesi gerekir.
+* Google Drive klasör URL/ID değerleri repoda hardcode edilmez; `GOOGLE_DRIVE_EXPORT_FOLDER_URL` veya `GOOGLE_DRIVE_EXPORT_FOLDER_ID` environment variable olarak verilmelidir.
 * Drive indirme akışı `geemap/gdown` davranışına bağlıdır; klasör URL/ID, paylaşım yetkisi ve Drive erişimi yanlış ise indirme adımı durabilir.
 * Doğrudan `ee.Image.getDownloadURL()` indirme yolu kaldırılmıştır; büyük rasterlar için ana akış Drive export, task polling ve geemap/gdown klasör indirmedir.
-* Step5 şu ana kadar sınırlı sayıda sahne ve daha küçük bir bölge ile test edilmiştir.
+* Step5 şu ana kadar sınırlı sayıda pencere composite'i ve daha küçük bir bölge ile test edilmiştir. Güncel simetrik baseline ayarında 2019-2022 yılları için aynı current penceresi export edilir.
 * Bu nedenle anomaly ve diğer raster çıktılarında veri bulunmayan beyaz alanlar oluşabilmektedir.
-* Anomaly üretimi artık tek sahne yaklaşımı yerine belirli bir zaman penceresi içerisindeki Landsat sahnelerinin median composite çıktısı üzerinden yapılmaktadır.
-* Ancak küçük test pencerelerinde veya sınırlı sahne sayısında hala veri boşlukları oluşabilmektedir.
-* Bu boşlukların temel nedeni yetersiz zamansal kapsama ve Landsat sahnelerinin doğal mekansal kapsama farklılıklarıdır.
+* Anomaly üretimi artık tek sahne yaklaşımı yerine belirli bir zaman penceresi içerisindeki QA-maskeli Landsat sahnelerinin median composite çıktısı üzerinden yapılmaktadır.
+* Current yüzey artık tüm sahnelerin tek median'ı yerine QA-temiz günlük composite yığınının median'ı olarak üretilmektedir; buna rağmen küçük test pencerelerinde veya sınırlı sahne sayısında hala veri boşlukları oluşabilmektedir.
+* Bu boşlukların temel nedeni yetersiz zamansal kapsama, bulut/QA maskelemesi ve Landsat sahnelerinin doğal mekansal kapsama farklılıklarıdır.
+* Step5C dikiş tanısında Kozan test çalıştırmasında dikiş adayı oranı önemli ölçüde düşürülmüştür; ancak current median yüzeyi üzerinde küçük path/row kalıntıları tamamen ortadan kalkmış değildir.
 * MODIS (~1 km) ve Landsat (~30 m) çözünürlük farkı nedeniyle anomaly üretimi hala geliştirme aşamasındadır.
+* Baseline-current simetrisi Landsat tarafında pencere bazlı hale getirilmiştir; yine de bu yaklaşımın büyük bölge ve daha fazla tarih penceresi ile doğrulanması gerekir.
 * Step5 çıktıları henüz büyük ölçekli veri ile tam doğrulanmış değildir.
 
 ---
@@ -86,16 +95,12 @@ Proje çalışıyor olsa da şu anda bazı önemli teknik sınırlılıklar bulu
 
 Şu anda aktif olarak geliştirilen / iyileştirilen alanlar:
 
-* anomaly üretiminde temporal window yaklaşımının iyileştirilmesi
+* MODIS baseline'ın anomaly tarafına yöntemsel olarak bağlanması
 * daha geniş zaman pencereleri ile veri boşluklarının azaltılması
-* current period composite üretiminin daha kararlı hale getirilmesi
-* Step5 çıktılarının daha büyük veri kümeleri ile doğrulanması
-* çıktıların README'ye eklenebilecek düzeyde iyileştirilmesi
-* Step4 sonrası veri geçiş sürecinin daha kontrollü hale getirilmesi
-* config bağımlılığının zamanla azaltılması
-* step fonksiyonlarına parametre geçişinin artırılması
-* raster işleme sırasında bellek kullanımının optimize edilmesi
-* chunked/windowed raster processing yaklaşımının geliştirilmesi
+* current period composite üretiminin büyük bölge üzerinde doğrulanması
+* Step5 ve Step5C eşiklerinin daha geniş sahada test edilmesi
+* çıktıların sunulabilir görsel paket haline getirilmesi
+* büyük bölge için mosaic/VRT tabanlı raster okuma yaklaşımının eklenmesi
 
 ---
 
@@ -156,15 +161,16 @@ Projede genel akış şu şekildedir:
 2. MODIS verisi kullanılarak 5 yıllık yaz dönemi baseline katmanları hazırlanır.
 3. Bu baseline için ortalama ve standart sapma hesaplanır.
 4. Landsat verisi aynı bölge için filtrelenir.
-5. Aynı tarihe ait çoklu Landsat sahneleri daily median composite ile tek çıktıya indirilir.
-6. Current period için belirli bir temporal window tanımlanır.
-7. Bu pencereye düşen Landsat sahneleri median composite ile tek current state rasterına dönüştürülür.
-8. MODIS ve Landsat rasterları GeoTIFF olarak Google Drive'a export edilir.
-9. Export task'ları polling ile tamamlanana kadar izlenir.
-10. Drive klasörü otomatik indirilir ve dosyalar yerel veri klasörlerine dağıtılır.
-11. QA verisi kullanılarak bulut maskeleme yapılır.
-12. Python tarafında zaman serisi kurulup baseline mean/std rasterları, current period median rasterı ve z-score anomaly rasterı üretilir.
-13. Çıktılar görsel ve sayısal olarak kontrol edilir.
+5. Current period için belirli bir temporal window tanımlanır.
+6. Bu pencerenin aynı ay-gün aralığı geçmiş baseline yıllarına taşınır.
+7. Her baseline yılı için QA-maskeli pencere median composite üretilir.
+8. Current period için QA-maskeli günlük composite yığını üzerinden median yüzey, geçerli günlük composite sayısı ve variability bantları üretilir.
+9. MODIS ve Landsat rasterları GeoTIFF olarak Google Drive'a export edilir.
+10. Export task'ları polling ile tamamlanana kadar izlenir.
+11. Drive klasörü otomatik indirilir ve dosyalar yerel veri klasörlerine dağıtılır.
+12. QA verisi kullanılarak bulut, gölge, cirrus, kar ve düşük güvenli pikseller maskelenir.
+13. Python tarafında zaman serisi kurulup baseline mean/std, valid count, current median, current valid count, current std/range ve z-score anomaly rasterları üretilir.
+14. Düşük baseline gözlem sayısı, düşük baseline std, düşük current gözlem sayısı, yüksek current variability ve coverage/dikiş maskeleriyle anomaly çıktısı teşhis edilir.
 
 ---
 
@@ -182,6 +188,7 @@ step1_fetch_modis.py
 step2_modis_5year_mean.py
 step3_landsat_lst.py
 step4_export_geotiff.py
+step4b_download_drive_exports.py
 step5_preprocess_timeseries.py
 main.py
 
@@ -201,11 +208,38 @@ MODIS verisini kullanarak 5 yıllık yaz dönemi baseline katmanlarını üretir
 
 ## Step 3
 
-Landsat zaman serisi koleksiyonunu hazırlar. Aynı tarihe ait çoklu görüntüler daily median composite ile tek çıktıya indirgenir. Ayrıca current period için temporal window tabanlı median composite oluşturulur.
+Landsat baseline ve current period koleksiyonlarını hazırlar. Güncel yöntemde baseline, tüm yaz günlük composite yığını değildir; current period ile aynı ay-gün aralığındaki geçmiş yıl pencerelerinin QA-maskeli median composite'lerinden oluşur.
+
+Örnek:
+
+```text
+current  = 2023-07-17 -> 2023-08-31 median
+baseline = 2019-07-17 -> 2019-08-31 median
+baseline = 2020-07-17 -> 2020-08-31 median
+baseline = 2021-07-17 -> 2021-08-31 median
+baseline = 2022-07-17 -> 2022-08-31 median
+```
+
+Step5 bu geçmiş yıl pencere medianları üzerinden baseline mean/std üretir.
+
+Current period çıktısı dört bantlıdır:
+
+* `Current_Period_LST_Celsius`
+* `Current_Period_Valid_Count`
+* `Current_Period_STD_Celsius`
+* `Current_Period_Range_Celsius`
+
+`Current_Period_LST_Celsius`, QA-temiz günlük median composite yığını üzerinden üretilen current median yüzeydir.
+`Current_Period_Valid_Count`, pikselin kaç QA-temiz günlük composite tarafından desteklendiğini gösterir.
+`Current_Period_STD_Celsius` ve `Current_Period_Range_Celsius`, current pencere içindeki günlük composite oynaklığını gösterir. Step5 bu bantları current yüzeyi heterojen veya footprint etkisine açık olduğunda anomaly'yi güven dışı bırakmak için kullanır.
 
 ## Step 4
 
-Online export ve otomatik indirme katmanıdır. MODIS ve Landsat rasterlarını GeoTIFF olarak Google Drive'a export eder, export task'larını polling ile izler, ardından Drive klasörünü indirip dosyaları uygun yerel klasörlere yerleştirir.
+Online export katmanıdır. MODIS ve Landsat rasterlarını GeoTIFF olarak Google Drive'a export eder ve export task'larını polling ile izler. Bu adım artık Drive klasörünü indirmez; indirme ve yerel klasörlere dağıtma sorumluluğu Step4b'ye ayrılmıştır.
+
+## Step 4B
+
+Drive download ve yerel dosya yerleştirme katmanıdır. Step4 tarafından tamamlanan Drive export dosyalarını indirir ve GeoTIFF dosyalarını Step5'in beklediği yerel klasörlere dağıtır.
 
 Yerel klasör yerleştirmesi şu şekildedir:
 
@@ -216,19 +250,22 @@ Yerel klasör yerleştirmesi şu şekildedir:
 
 ## Step 5
 
-Offline raster işleme katmanıdır. Step4 tarafından yerleştirilen GeoTIFF dosyaları okunur, QA tabanlı maskeleme uygulanır ve aşağıdaki çıktılar üretilir:
+Offline raster işleme katmanıdır. Step4b tarafından yerleştirilen GeoTIFF dosyaları okunur, QA tabanlı maskeleme uygulanır ve aşağıdaki çıktılar üretilir:
 
 * baseline mean raster
 * baseline standard deviation raster
+* baseline valid count raster
 * current period median raster
+* current period valid count raster
 * z-score anomaly raster
+* düşük güven tanı maskeleri
 * metadata JSON çıktısı
 
-Step5 artık tüm zamanı bellekte tutan `xarray + full stack` yolu yerine windowed/chunked raster işleme ile çalışmaktadır.
+Step5 artık tüm zamanı bellekte tutan `xarray + full stack` yolu yerine windowed/chunked raster işleme ile çalışmaktadır. Baseline istatistiklerinde lineer zaman interpolasyonu kullanılmaz; yeterli geçerli gözlem olmayan pikseller `NaN` bırakılır.
 
 ## main.py
 
-`main.py`, Step1'den Step5'e kadar olan akışı organize biçimde çalıştırır. Güncel akışta Step4 export + indirme sürecini tamamladıktan sonra Step5 otomatik olarak devreye girer ve uçtan uca otomasyon tamamlanır.
+`main.py`, Step1'den Step5C'ye kadar olan akışı organize biçimde çalıştırır. Güncel akışta Step4 export/polling sürecini tamamlar, Step4b ile Drive çıktılarını indirip yerel klasörlere dağıtır, Step5 ile raster anomali ürünlerini üretir, Step5B ile tanı raporlarını yazar ve Step5C ile dikiş tanısını çalıştırır.
 
 ---
 
@@ -238,9 +275,66 @@ Step5 sonunda aşağıdaki raster ve metadata çıktıları üretilmektedir:
 
 * `baseline_lst_mean_celsius.tif`
 * `baseline_lst_std_celsius.tif`
+* `baseline_valid_count.tif`
+* `low_baseline_count_mask.tif`
+* `low_baseline_std_mask.tif`
 * `current_period_median_celsius.tif`
+* `current_period_valid_count.tif`
+* `current_period_std_celsius.tif`
+* `current_period_range_celsius.tif`
+* `low_current_count_mask.tif`
+* `low_current_variability_mask.tif`
+* `baseline_count_discontinuity_mask.tif`
+* `current_count_discontinuity_mask.tif`
+* `baseline_std_discontinuity_mask.tif`
+* `coverage_discontinuity_mask.tif`
 * `anomaly_zscore.tif`
 * `step5_metadata.json`
+
+Step5'ten sonra `step5b_diagnostic_report.py` çalıştırılır ve şu tanı çıktılarını üretir:
+
+* `outputs/step5/diagnostics/summary.json`
+* `outputs/step5/diagnostics/summary.md`
+* `outputs/step5/diagnostics/*_hist.png`
+
+Bu rapor; z-score dağılımını, `|z| > 2` ve `|z| > 3` piksel sayılarını, baseline/current valid-count dağılımlarını, baseline standard deviation dağılımını ve düşük güven maskelerinin kapladığı piksel oranlarını özetler.
+
+Ardından `step5c_seam_diagnostic.py` path/row dikişini teşhis etmek için anomaly rasterındaki keskin geçişleri dikiş adayı olarak seçer ve aynı piksellerde current, baseline, std ve valid-count katmanlarının gradyanlarını karşılaştırır. Ürettiği başlıca çıktılar:
+
+* `outputs/step5/diagnostics/seam_summary.json`
+* `outputs/step5/diagnostics/seam_summary.md`
+* `outputs/step5/diagnostics/seam_candidate_mask.tif`
+* `outputs/step5/diagnostics/anomaly_gradient_strength.tif`
+* `outputs/step5/diagnostics/seam_gradient_ratio.png`
+
+Bu rapor, dikişin en olası kaynağını current coverage, baseline coverage, baseline standard deviation veya LST mozaiği farkı olarak ayırmaya yardım eder. Otomatik seçilen dikiş adayları QGIS üzerinde ayrıca görsel olarak kontrol edilmelidir.
+
+Tanı maskelerinde `1` değeri ilgili pikselin o nedenle güven dışı kaldığını gösterir. Bu katmanlar özellikle anomaly rasterındaki doygun mavi alanların kaynağını ayırmak için kullanılır:
+
+* `low_baseline_count_mask.tif`: baseline döneminde yeterli geçerli Landsat gözlemi yoktur.
+* `low_baseline_std_mask.tif`: baseline standart sapması z-score için çok düşüktür.
+* `low_current_count_mask.tif`: current period median yeterli QA-temiz gözlemden oluşmamıştır.
+* `low_current_variability_mask.tif`: current composite pencere içindeki sahneler piksel-bazında aşırı değişkendir.
+* `baseline_count_discontinuity_mask.tif`: baseline valid-count katmanında komşu pikseller arasında ani coverage sıçraması vardır.
+* `current_count_discontinuity_mask.tif`: current valid-count katmanında komşu pikseller arasında ani coverage sıçraması vardır.
+* `baseline_std_discontinuity_mask.tif`: baseline std katmanında komşu pikseller arasında ani payda sıçraması vardır.
+* `coverage_discontinuity_mask.tif`: baseline veya current valid-count katmanında dikiş riski taşıyan coverage süreksizliği vardır.
+
+Güncel z-score formülü:
+
+```text
+z_score = (current_median - baseline_mean) / baseline_std
+```
+
+Bu hesap yalnızca şu koşullar sağlandığında yapılır:
+
+* baseline geçerli gözlem sayısı `STEP5_MIN_BASELINE_VALID_COUNT` eşiğini geçmelidir.
+* baseline standard deviation `STEP5_MIN_BASELINE_STD_CELSIUS` eşiğini geçmelidir.
+* current period geçerli gözlem sayısı `STEP5_MIN_CURRENT_VALID_COUNT` eşiğini geçmelidir.
+* current period pencere içi std `STEP5_MAX_CURRENT_STD_CELSIUS` eşiğini aşmamalıdır.
+* current period pencere içi range `STEP5_MAX_CURRENT_RANGE_CELSIUS` eşiğini aşmamalıdır.
+* current veya baseline valid-count katmanında coverage süreksizliği varsa anomaly güven dışı bırakılır.
+* baseline std katmanında ani payda süreksizliği varsa anomaly güven dışı bırakılır.
 
 ---
 
@@ -281,6 +375,64 @@ earthengine authenticate
 
 ```
 
+Google Drive otomatik indirme kullanılacaksa Drive klasör referansı environment variable olarak verilmelidir. Bu değerler güvenlik ve repo hijyeni nedeniyle `core/config.py` içine hardcode edilmez.
+
+Windows PowerShell:
+
+```powershell
+$env:GOOGLE_DRIVE_EXPORT_FOLDER_ID="DRIVE_KLASOR_ID"
+```
+
+Linux / macOS:
+
+```bash
+export GOOGLE_DRIVE_EXPORT_FOLDER_ID="DRIVE_KLASOR_ID"
+```
+
+Alternatif olarak klasör URL'si kullanılabilir:
+
+```bash
+export GOOGLE_DRIVE_EXPORT_FOLDER_URL="https://drive.google.com/drive/folders/DRIVE_KLASOR_ID"
+```
+
+---
+
+# Güncel Test Ayarları
+
+`core/config.py` içinde güncel test çalıştırması için öne çıkan ayarlar:
+
+```python
+REGION_NAME = "kozan_aoi"
+ENABLE_MODIS_EXPORT = True
+ENABLE_LANDSAT_EXPORT = True
+
+MAX_LANDSAT_DAILY_EXPORTS = 12
+
+BASELINE_START_DATE = "2019-06-01"
+BASELINE_END_DATE = "2023-09-30"
+
+CURRENT_PERIOD_DAYS = 45
+CURRENT_PERIOD_END_DATE = "2023-08-31"
+
+STEP5_MIN_BASELINE_STD_CELSIUS = 1.5
+STEP5_MIN_BASELINE_VALID_COUNT = 3
+STEP5_MIN_CURRENT_VALID_COUNT = 3
+STEP5_MAX_CURRENT_STD_CELSIUS = 3.0
+STEP5_MAX_CURRENT_RANGE_CELSIUS = 8.0
+STEP5_CURRENT_COUNT_DISCONTINUITY_THRESHOLD = 1
+STEP5_BASELINE_COUNT_DISCONTINUITY_THRESHOLD = 1
+```
+
+Bu ayarla beklenen GEE export task sayısı yaklaşık olarak:
+
+* 4 Landsat baseline window LST
+* 4 Landsat baseline window QA
+* 1 current period raster
+* 1 MODIS raster
+* toplam yaklaşık 10 task
+
+Production veya daha kapsamlı denemelerde baseline yıl aralığı ve pencere sayısı artırılabilir. Büyük bölgeye geçmeden önce küçük bölge ve kontrollü test önerilir.
+
 ---
 
 # Çalıştırma Sırası
@@ -297,8 +449,11 @@ Bu komut güncel akışta sırasıyla şunları yürütür:
 * Step1: GEE bağlantısı ve temel veri sorguları
 * Step2: MODIS baseline üretimi
 * Step3: Landsat günlük composite ve current period hazırlığı
-* Step4: Drive export, task polling, klasör indirme ve dosya yerleştirme
+* Step4: Drive export ve task polling
+* Step4b: Drive klasörü indirme ve dosya yerleştirme
 * Step5: windowed/chunked raster ön işleme ve anomaly üretimi
+* Step5B: histogram ve özet tanı raporu
+* Step5C: path/row dikişi için katman-bazlı tanı raporu
 
 ## Adım Adım Çalıştırma
 
@@ -307,13 +462,18 @@ python step1_fetch_modis.py
 python step2_modis_5year_mean.py
 python step3_landsat_lst.py
 python step4_export_geotiff.py
+python step4b_download_drive_exports.py
 python step5_preprocess_timeseries.py
+python step5b_diagnostic_report.py
+python step5c_seam_diagnostic.py
 
 ```
 
-## Step4 -> Step5 Geçişi
+## Step4 -> Step4b -> Step5 Geçişi
 
-Step4, Drive export task'larını polling ile tamamlanana kadar bekler. `DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT=True` yapılır ve `GOOGLE_DRIVE_EXPORT_FOLDER_URL` veya `GOOGLE_DRIVE_EXPORT_FOLDER_ID` girilirse Drive klasörü geemap/gdown ile indirilir. Bu aşamada config ayarları ve Google Drive dosya erişim izinlerini kullanıcının manuel olarak yapması beklenir. 
+Step4, Drive export task'larını polling ile tamamlanana kadar bekler ve `outputs/step4/step4_metadata.json` dosyasına export listesini yazar. Step4 artık Drive klasörü indirme veya yerel klasörlere dosya dağıtma yapmaz.
+
+Step4b, `DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT=True` yapılır ve `GOOGLE_DRIVE_EXPORT_FOLDER_URL` veya `GOOGLE_DRIVE_EXPORT_FOLDER_ID` verilirse Drive klasörünü geemap/gdown ile indirir. Bu aşamada config ayarları ve Google Drive dosya erişim izinlerini kullanıcının manuel olarak yapması beklenir.
 
 İndirilen GeoTIFF dosyaları otomatik olarak şu klasörlere yerleştirilir:
 
@@ -323,6 +483,10 @@ Step4, Drive export task'larını polling ile tamamlanana kadar bekler. `DRIVE_A
 * MODIS export dosyaları -> `data/modis`
 
 Bu yerleştirme tamamlandıktan sonra Step5 aynı veri akışı üzerinden çalışır.
+
+Step5 mümkünse `outputs/step4/step4_metadata.json` içindeki son export listesini kullanarak baseline dosyalarını seçer. Böylece `data/landsat_timeseries` içinde önceki denemelerden kalan GeoTIFF dosyalarının yeni baseline yığınına karışması engellenir. Metadata okunamazsa Step5 klasördeki uygun Landsat LST dosyalarını kullanır ve log'a uyarı yazar.
+
+Current period tarafında Step5, `CURRENT_PERIOD_DAYS` ile eşleşen dosya adını öncelikli seçer. Örneğin `CURRENT_PERIOD_DAYS=45` ise `landsat_current_period_45days*.tif` dosyası beklenir.
 
 ## Step5'i Tek Başına Çalıştırma
 
@@ -345,9 +509,15 @@ Bu raster, baseline dönemi boyunca hesaplanan ortalama yüzey sıcaklığını 
 
 ## Z-Score Anomaly Raster
 
-Bu raster, current period median sıcaklık değerlerinin baseline mean ve standard deviation kullanılarak hesaplanan z-score anomaly çıktısını göstermektedir.
+Bu raster, current period median sıcaklık değerlerinin baseline mean ve standard deviation kullanılarak hesaplanan z-score anomaly çıktısını göstermektedir. README'de kullanılan görsel, güncel Step5 çıktısından `-3 / +3` sabit ölçek mantığına uygun olarak yeniden dışa alınmıştır.
 
 ![Anomaly](docs/images/anomaly_zscore.png)
+
+## Dikiş Tanı Grafiği
+
+Bu grafik, Step5C tarafından anomaly rasterındaki kalan dikiş adaylarının hangi katmanla daha güçlü ilişkili olduğunu özetler. Bu rapor, coverage farkı, baseline std ve current mosaic etkisini birbirinden ayırmak için kullanılır.
+
+![Seam Diagnostic](docs/images/seam_gradient_ratio.png)
 
 ---
 
@@ -355,21 +525,21 @@ Bu raster, current period median sıcaklık değerlerinin baseline mean ve stand
 
 Bu görseller, projenin mevcut geliştirme aşamasını temsil eden erken prototip çıktılarıdır ve aşağıdaki sınırlamaları içermektedir:
 
-* Çıktılar, işlem süresini kısaltmak amacıyla sınırlı sayıda Landsat sahnesi kullanılarak üretilmiştir.
+* Çıktılar, işlem süresini kısaltmak amacıyla sınırlı sayıda Landsat pencere composite'i ile üretilmiştir.
 * Bu nedenle anomaly raster üzerinde veri bulunmayan alanlar oluşabilmektedir.
-* Bu boşluklar sistemsel bir hatadan değil, yetersiz zamansal kapsama probleminden kaynaklanmaktadır.
-* Current thermal state, belirli bir zaman penceresine düşen Landsat sahnelerinin median composite çıktısı olarak tanımlanmaktadır.
-* Bu yaklaşım, tek sahne kullanımına göre daha kararlı ve daha geniş kapsamlı anomaly üretimi sağlamayı hedeflemektedir.
-* Daha geniş temporal window ve daha fazla sahne kullanımı ile anomaly kapsamasının iyileştirilmesi hedeflenmektedir.
+* Bu boşluklar çoğunlukla yetersiz zamansal kapsama, QA maskelemesi, düşük baseline gözlem sayısı veya düşük current gözlem sayısından kaynaklanmaktadır.
+* Current thermal state, QA-temiz günlük Landsat composite yığını üzerinden tanımlanmaktadır. Bu yaklaşım, sahne-bazlı current tanımına göre daha kararlı bir yöntemdir.
+* Step5C dikiş tanısı, Kozan test çalıştırmasında dikiş aday alanını yaklaşık `%0.03` düzeyine kadar indirmiştir; yine de current mosaic tarafında zayıf kalıntılar görülebilir.
+* Anomaly rasterındaki mavi/kırmızı alanlar doğrudan fiziksel yorumlanmamalıdır; `valid_count`, `current std/range` ve dikiş maskeleri ile birlikte değerlendirilmelidir.
 
 ---
 
 # Planlanan İyileştirmeler
 
-* Daha fazla Landsat sahnesi kullanılarak veri boşluklarının azaltılması
-* Temporal window ve composite stratejisinin daha güçlü anomaly kapsaması sağlayacak şekilde geliştirilmesi
-* MODIS baseline ile Landsat anomaly ilişkisinin daha sağlam kurulması
-* Büyük rasterlar için daha verimli bellek yönetimi
+* MODIS baseline ile Landsat anomaly ilişkisinin yöntemsel olarak kurulması
+* Pencere-simetrik baseline yaklaşımının farklı pencereler ve büyük bölge üzerinde doğrulanması
+* Current composite stratejisinin daha geniş sahada test edilmesi
+* Büyük bölgelerde parçalı GeoTIFF exportları için mosaic/VRT tabanlı daha sağlam okuma akışının kurulması
 * Nihai, doğrulanmış ve daha temiz görsel çıktılarla bu bölümün güncellenmesi
 
 ---
@@ -383,6 +553,8 @@ Bu repo şu anda tamamlanmış bir 3B termal dijital ikiz sistemi değildir. Mev
 * anomaly'nin tüm bölgeyi temsil edecek şekilde güçlendirilmesi
 * daha fazla Landsat sahnesi ile Step5'in yeniden test edilmesi
 * veri boşluklarının azaltılması
+* pencere-simetrik baseline yaklaşımının daha fazla test edilmesi
+* büyük bölge tiling/parçalı GeoTIFF akışının tam çözülmesi
 * Step5 çıktılarının büyük veri ile daha güçlü doğrulanması
 
 Bu eksikler giderildikçe proje daha güçlü 2B/3B termal temsil ve risk analizi katmanlarına doğru genişletilecektir.
