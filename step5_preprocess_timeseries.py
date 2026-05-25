@@ -657,7 +657,10 @@ def process_step5_windowed(
         "low_baseline_std_mask": OUTPUT_DIR / "low_baseline_std_mask.tif",
         "current_median": OUTPUT_DIR / "current_period_median_celsius.tif",
         "current_valid_count": OUTPUT_DIR / "current_period_valid_count.tif",
+        "current_std": OUTPUT_DIR / "current_period_std_celsius.tif",
+        "current_range": OUTPUT_DIR / "current_period_range_celsius.tif",
         "low_current_count_mask": OUTPUT_DIR / "low_current_count_mask.tif",
+        "low_current_variability_mask": OUTPUT_DIR / "low_current_variability_mask.tif",
         "baseline_count_discontinuity_mask": OUTPUT_DIR / "baseline_count_discontinuity_mask.tif",
         "current_count_discontinuity_mask": OUTPUT_DIR / "current_count_discontinuity_mask.tif",
         "baseline_std_discontinuity_mask": OUTPUT_DIR / "baseline_std_discontinuity_mask.tif",
@@ -685,7 +688,10 @@ def process_step5_windowed(
             open_output(output_paths["low_baseline_std_mask"], profile) as low_baseline_std_dst,
             open_output(output_paths["current_median"], profile) as current_dst,
             open_output(output_paths["current_valid_count"], profile) as current_count_dst,
+            open_output(output_paths["current_std"], profile) as current_std_dst,
+            open_output(output_paths["current_range"], profile) as current_range_dst,
             open_output(output_paths["low_current_count_mask"], profile) as low_current_count_dst,
+            open_output(output_paths["low_current_variability_mask"], profile) as low_current_variability_dst,
             open_output(output_paths["baseline_count_discontinuity_mask"], profile) as baseline_count_disc_dst,
             open_output(output_paths["current_count_discontinuity_mask"], profile) as current_count_disc_dst,
             open_output(output_paths["baseline_std_discontinuity_mask"], profile) as baseline_std_disc_dst,
@@ -693,11 +699,18 @@ def process_step5_windowed(
             open_output(output_paths["anomaly_zscore"], profile) as anomaly_dst,
         ):
             current_has_valid_count = current_src.count >= 2
+            current_has_variability_bands = current_src.count >= 4
             if not current_has_valid_count:
                 log.warning(
                     "Current period rasterında valid-count bandı yok. "
                     "STEP5_MIN_CURRENT_VALID_COUNT uygulanmayacak; current export'u "
                     "Step3/Step4 ile yeniden üretmek gerekir."
+                )
+            if not current_has_variability_bands:
+                log.warning(
+                    "Current period rasterında variability bantları yok. "
+                    "STEP5_MAX_CURRENT_STD_CELSIUS ve STEP5_MAX_CURRENT_RANGE_CELSIUS "
+                    "uygulanmayacak; current export'u Step3/Step4 ile yeniden üretmek gerekir."
                 )
 
             for index, window in enumerate(
@@ -741,10 +754,35 @@ def process_step5_windowed(
                         float(STEP5_MIN_CURRENT_VALID_COUNT),
                         np.nan,
                     ).astype("float32")
+                current_std = read_band_window(
+                    current_src,
+                    window,
+                    band_index=3,
+                    default=np.nan,
+                )
+                current_range = read_band_window(
+                    current_src,
+                    window,
+                    band_index=4,
+                    default=np.nan,
+                )
+                if current_src.count < 4:
+                    current_std = np.full(current_median.shape, np.nan, dtype="float32")
+                    current_range = np.full(current_median.shape, np.nan, dtype="float32")
 
                 current_median = np.where(
                     (current_median > -30) & (current_median < 80),
                     current_median,
+                    np.nan,
+                ).astype("float32")
+                current_std = np.where(
+                    np.isfinite(current_std) & (current_std >= 0),
+                    current_std,
+                    np.nan,
+                ).astype("float32")
+                current_range = np.where(
+                    np.isfinite(current_range) & (current_range >= 0),
+                    current_range,
                     np.nan,
                 ).astype("float32")
                 enough_current = current_valid_count >= STEP5_MIN_CURRENT_VALID_COUNT
@@ -761,6 +799,14 @@ def process_step5_windowed(
                 low_current_count_mask = (
                     np.isfinite(current_valid_count)
                     & (current_valid_count < STEP5_MIN_CURRENT_VALID_COUNT)
+                ).astype("float32")
+                low_current_variability_mask = (
+                    np.isfinite(current_std)
+                    & np.isfinite(current_range)
+                    & (
+                        (current_std > STEP5_MAX_CURRENT_STD_CELSIUS)
+                        | (current_range > STEP5_MAX_CURRENT_RANGE_CELSIUS)
+                    )
                 ).astype("float32")
                 baseline_count_discontinuity_mask = neighbor_discontinuity_mask(
                     valid_count,
@@ -782,6 +828,10 @@ def process_step5_windowed(
                     coverage_discontinuity_mask,
                     baseline_std_discontinuity_mask,
                 ).astype("float32")
+                current_reliability_mask = np.maximum(
+                    low_current_count_mask,
+                    low_current_variability_mask,
+                ).astype("float32")
 
                 with np.errstate(invalid="ignore", divide="ignore"):
                     anomaly_zscore = np.where(
@@ -792,6 +842,11 @@ def process_step5_windowed(
                     ).astype("float32")
                 anomaly_zscore = np.where(
                     combined_discontinuity_mask < 0.5,
+                    anomaly_zscore,
+                    np.nan,
+                ).astype("float32")
+                anomaly_zscore = np.where(
+                    current_reliability_mask < 0.5,
                     anomaly_zscore,
                     np.nan,
                 ).astype("float32")
@@ -808,7 +863,14 @@ def process_step5_windowed(
                 low_baseline_std_dst.write(low_baseline_std_mask, 1, window=window)
                 current_dst.write(current_median, 1, window=window)
                 current_count_dst.write(current_valid_count, 1, window=window)
+                current_std_dst.write(current_std, 1, window=window)
+                current_range_dst.write(current_range, 1, window=window)
                 low_current_count_dst.write(low_current_count_mask, 1, window=window)
+                low_current_variability_dst.write(
+                    low_current_variability_mask,
+                    1,
+                    window=window,
+                )
                 baseline_count_disc_dst.write(
                     baseline_count_discontinuity_mask,
                     1,
@@ -900,6 +962,8 @@ def write_metadata(
             "baseline_count_discontinuity_threshold": STEP5_BASELINE_COUNT_DISCONTINUITY_THRESHOLD,
             "current_count_discontinuity_threshold": STEP5_CURRENT_COUNT_DISCONTINUITY_THRESHOLD,
             "baseline_std_discontinuity_threshold": STEP5_BASELINE_STD_DISCONTINUITY_THRESHOLD,
+            "max_current_std_celsius": STEP5_MAX_CURRENT_STD_CELSIUS,
+            "max_current_range_celsius": STEP5_MAX_CURRENT_RANGE_CELSIUS,
             "estimated_stack_memory_mb": result["estimated_stack_memory_mb"],
             "netcdf_written": baseline_netcdf is not None,
         },
@@ -919,7 +983,15 @@ def write_metadata(
             "valid_count_band": (
                 "Current_Period_Valid_Count if present; otherwise legacy fallback"
             ),
+            "std_band": (
+                "Current_Period_STD_Celsius if present; otherwise variability mask uygulanmaz"
+            ),
+            "range_band": (
+                "Current_Period_Range_Celsius if present; otherwise variability mask uygulanmaz"
+            ),
             "min_valid_count": STEP5_MIN_CURRENT_VALID_COUNT,
+            "max_std_celsius": STEP5_MAX_CURRENT_STD_CELSIUS,
+            "max_range_celsius": STEP5_MAX_CURRENT_RANGE_CELSIUS,
             "mean_celsius": result["current_stats"]["mean"],
         },
         "anomaly": {
@@ -942,7 +1014,10 @@ def write_metadata(
             "low_baseline_std_mask": output_paths["low_baseline_std_mask"].name,
             "current_median": output_paths["current_median"].name,
             "current_valid_count": output_paths["current_valid_count"].name,
+            "current_std": output_paths["current_std"].name,
+            "current_range": output_paths["current_range"].name,
             "low_current_count_mask": output_paths["low_current_count_mask"].name,
+            "low_current_variability_mask": output_paths["low_current_variability_mask"].name,
             "baseline_count_discontinuity_mask": output_paths["baseline_count_discontinuity_mask"].name,
             "current_count_discontinuity_mask": output_paths["current_count_discontinuity_mask"].name,
             "baseline_std_discontinuity_mask": output_paths["baseline_std_discontinuity_mask"].name,

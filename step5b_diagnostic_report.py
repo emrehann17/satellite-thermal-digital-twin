@@ -27,15 +27,15 @@ from core.config import (
     STEP5_MIN_BASELINE_STD_CELSIUS,
     STEP5_MIN_BASELINE_VALID_COUNT,
     STEP5_MIN_CURRENT_VALID_COUNT,
+    STEP5_MAX_CURRENT_STD_CELSIUS,
+    STEP5_MAX_CURRENT_RANGE_CELSIUS,
 )
 from core.io_utils import setup_logger
 
 
 BASE_DIR = Path(__file__).resolve().parent
 STEP5_OUTPUT_DIR = BASE_DIR / "outputs" / "step5"
-DIAGNOSTICS_DIR = STEP5_OUTPUT_DIR / "diagnostics" / "step5b_diagnostic_report"
-
-DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+DIAGNOSTICS_DIR = STEP5_OUTPUT_DIR / "diagnostics"
 
 log, log_file = setup_logger("step5b_diagnostics")
 
@@ -207,6 +207,24 @@ def build_specs() -> list[RasterSpec]:
             integer_bar=True,
         ),
         RasterSpec(
+            key="current_period_std_celsius",
+            filename="current_period_std_celsius.tif",
+            title="Güncel dönem pencere içi standart sapma",
+            xlabel="Celsius derece",
+            bins=np.linspace(0, 10, 101),
+            color="#e7298a",
+            threshold_lines=(STEP5_MAX_CURRENT_STD_CELSIUS,),
+        ),
+        RasterSpec(
+            key="current_period_range_celsius",
+            filename="current_period_range_celsius.tif",
+            title="Güncel dönem pencere içi max-min aralığı",
+            xlabel="Celsius derece",
+            bins=np.linspace(0, 20, 101),
+            color="#66a61e",
+            threshold_lines=(STEP5_MAX_CURRENT_RANGE_CELSIUS,),
+        ),
+        RasterSpec(
             key="low_baseline_count_mask",
             filename="low_baseline_count_mask.tif",
             title="Düşük baseline gözlem sayısı maskesi",
@@ -230,6 +248,16 @@ def build_specs() -> list[RasterSpec]:
             key="low_current_count_mask",
             filename="low_current_count_mask.tif",
             title="Düşük güncel dönem gözlem sayısı maskesi",
+            xlabel="maske değeri",
+            bins=np.array([-0.5, 0.5, 1.5]),
+            color="#c51b7d",
+            integer_bar=True,
+            mask_layer=True,
+        ),
+        RasterSpec(
+            key="low_current_variability_mask",
+            filename="low_current_variability_mask.tif",
+            title="Yüksek güncel dönem variability maskesi",
             xlabel="maske değeri",
             bins=np.array([-0.5, 0.5, 1.5]),
             color="#c51b7d",
@@ -311,6 +339,9 @@ def write_summary_markdown(summary: dict, path: Path) -> None:
     low_baseline_count = summary["rasters"]["low_baseline_count_mask"]
     low_baseline_std = summary["rasters"]["low_baseline_std_mask"]
     low_current_count = summary["rasters"]["low_current_count_mask"]
+    low_current_variability = summary["rasters"]["low_current_variability_mask"]
+    current_std = summary["rasters"]["current_period_std_celsius"]
+    current_range = summary["rasters"]["current_period_range_celsius"]
 
     lines = [
         "# Step5 Tanı Özeti",
@@ -336,12 +367,21 @@ def write_summary_markdown(summary: dict, path: Path) -> None:
         f"(geçerli piksellerin {format_percent(low_baseline_std['flagged_pixel_percent_of_valid'])})",
         f"- Düşük güncel dönem gözlem sayısı olan piksel sayısı: `{low_current_count['flagged_pixel_count']}` "
         f"(geçerli piksellerin {format_percent(low_current_count['flagged_pixel_percent_of_valid'])})",
+        f"- Yüksek güncel dönem variability taşıyan piksel sayısı: `{low_current_variability['flagged_pixel_count']}` "
+        f"(geçerli piksellerin {format_percent(low_current_variability['flagged_pixel_percent_of_valid'])})",
         "",
         "## Baseline Standart Sapması",
         "",
         f"- Ortalama baseline standart sapması: `{baseline_std['mean']}` Celsius",
         f"- Minimum / maksimum baseline standart sapması: `{baseline_std['min']}` / `{baseline_std['max']}` Celsius",
         f"- Kabul edilen minimum baseline standart sapması: `{STEP5_MIN_BASELINE_STD_CELSIUS}` Celsius",
+        "",
+        "## Güncel Dönem Variability",
+        "",
+        f"- Ortalama current std: `{current_std['mean']}` Celsius",
+        f"- Ortalama current range: `{current_range['mean']}` Celsius",
+        f"- İzin verilen maksimum current std: `{STEP5_MAX_CURRENT_STD_CELSIUS}` Celsius",
+        f"- İzin verilen maksimum current range: `{STEP5_MAX_CURRENT_RANGE_CELSIUS}` Celsius",
         "",
         "## Çıktı Dosyaları",
         "",
@@ -363,7 +403,7 @@ def main() -> dict:
 
     summary = {
         "step": "step5b_diagnostic_report",
-        "description": "Step5 sonrası histogram ve özet tanı raporu",
+        "description_tr": "Step5 sonrası histogram ve özet tanı raporu",
         "created_at": datetime.now().isoformat(),
         "log_file": str(log_file),
         "config": {

@@ -55,8 +55,8 @@ Projede şu adımlar yer almaktadır:
 * Landsat veri sorgulama
 * Landsat zaman serisi koleksiyonunun hazırlanması
 * current period ile aynı takvim penceresine sahip geçmiş yıl Landsat median composite'lerinin hazırlanması
-* current period için QA-maskeli temporal window tabanlı median composite üretimi
-* current period için geçerli gözlem sayısı bandı üretimi
+* current period için QA-maskeli günlük composite yığını üzerinden temporal median üretimi
+* current period için geçerli günlük composite sayısı bandı üretimi
 * Step4'te MODIS ve Landsat exportlarının aç/kapa mantığıyla kontrol edilmesi
 * Step4'te Drive export task polling
 * Step4b'de Google Drive klasörü indirme ve dosyaların yerel veri klasörlerine yerleştirilmesi
@@ -223,12 +223,16 @@ baseline = 2022-07-17 -> 2022-08-31 median
 
 Step5 bu geçmiş yıl pencere medianları üzerinden baseline mean/std üretir.
 
-Current period çıktısı iki bantlıdır:
+Current period çıktısı dört bantlıdır:
 
 * `Current_Period_LST_Celsius`
 * `Current_Period_Valid_Count`
+* `Current_Period_STD_Celsius`
+* `Current_Period_Range_Celsius`
 
-İkinci bant, current period median değerinin kaç QA-temiz Landsat gözleminden üretildiğini gösterir. Step5 bu bandı düşük güvenli current piksellerini elemek için kullanır.
+`Current_Period_LST_Celsius`, QA-temiz günlük median composite yığını üzerinden üretilen current median yüzeydir.
+`Current_Period_Valid_Count`, pikselin kaç QA-temiz günlük composite tarafından desteklendiğini gösterir.
+`Current_Period_STD_Celsius` ve `Current_Period_Range_Celsius`, current pencere içindeki günlük composite oynaklığını gösterir. Step5 bu bantları current yüzeyi heterojen veya footprint etkisine açık olduğunda anomaly'yi güven dışı bırakmak için kullanır.
 
 ## Step 4
 
@@ -277,9 +281,13 @@ Step5 sonunda aşağıdaki raster ve metadata çıktıları üretilmektedir:
 * `low_baseline_std_mask.tif`
 * `current_period_median_celsius.tif`
 * `current_period_valid_count.tif`
+* `current_period_std_celsius.tif`
+* `current_period_range_celsius.tif`
 * `low_current_count_mask.tif`
+* `low_current_variability_mask.tif`
 * `baseline_count_discontinuity_mask.tif`
 * `current_count_discontinuity_mask.tif`
+* `baseline_std_discontinuity_mask.tif`
 * `coverage_discontinuity_mask.tif`
 * `anomaly_zscore.tif`
 * `step5_metadata.json`
@@ -307,8 +315,10 @@ Tanı maskelerinde `1` değeri ilgili pikselin o nedenle güven dışı kaldığ
 * `low_baseline_count_mask.tif`: baseline döneminde yeterli geçerli Landsat gözlemi yoktur.
 * `low_baseline_std_mask.tif`: baseline standart sapması z-score için çok düşüktür.
 * `low_current_count_mask.tif`: current period median yeterli QA-temiz gözlemden oluşmamıştır.
+* `low_current_variability_mask.tif`: current composite pencere içindeki sahneler piksel-bazında aşırı değişkendir.
 * `baseline_count_discontinuity_mask.tif`: baseline valid-count katmanında komşu pikseller arasında ani coverage sıçraması vardır.
 * `current_count_discontinuity_mask.tif`: current valid-count katmanında komşu pikseller arasında ani coverage sıçraması vardır.
+* `baseline_std_discontinuity_mask.tif`: baseline std katmanında komşu pikseller arasında ani payda sıçraması vardır.
 * `coverage_discontinuity_mask.tif`: baseline veya current valid-count katmanında dikiş riski taşıyan coverage süreksizliği vardır.
 
 Güncel z-score formülü:
@@ -322,7 +332,10 @@ Bu hesap yalnızca şu koşullar sağlandığında yapılır:
 * baseline geçerli gözlem sayısı `STEP5_MIN_BASELINE_VALID_COUNT` eşiğini geçmelidir.
 * baseline standard deviation `STEP5_MIN_BASELINE_STD_CELSIUS` eşiğini geçmelidir.
 * current period geçerli gözlem sayısı `STEP5_MIN_CURRENT_VALID_COUNT` eşiğini geçmelidir.
+* current period pencere içi std `STEP5_MAX_CURRENT_STD_CELSIUS` eşiğini aşmamalıdır.
+* current period pencere içi range `STEP5_MAX_CURRENT_RANGE_CELSIUS` eşiğini aşmamalıdır.
 * current veya baseline valid-count katmanında coverage süreksizliği varsa anomaly güven dışı bırakılır.
+* baseline std katmanında ani payda süreksizliği varsa anomaly güven dışı bırakılır.
 
 ---
 
@@ -402,9 +415,13 @@ BASELINE_END_DATE = "2023-09-30"
 CURRENT_PERIOD_DAYS = 45
 CURRENT_PERIOD_END_DATE = "2023-08-31"
 
-STEP5_MIN_BASELINE_STD_CELSIUS = 1.0
+STEP5_MIN_BASELINE_STD_CELSIUS = 1.5
 STEP5_MIN_BASELINE_VALID_COUNT = 3
-STEP5_MIN_CURRENT_VALID_COUNT = 2
+STEP5_MIN_CURRENT_VALID_COUNT = 3
+STEP5_MAX_CURRENT_STD_CELSIUS = 3.0
+STEP5_MAX_CURRENT_RANGE_CELSIUS = 8.0
+STEP5_CURRENT_COUNT_DISCONTINUITY_THRESHOLD = 1
+STEP5_BASELINE_COUNT_DISCONTINUITY_THRESHOLD = 1
 ```
 
 Bu ayarla beklenen GEE export task sayısı yaklaşık olarak:

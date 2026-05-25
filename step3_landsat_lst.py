@@ -347,42 +347,102 @@ def get_current_period_median(
     log.info(f"  Bölge: {region_name}")
     log.info(f"  Pencere: {start_date} -> {end_date} ({window_days} gün)")
     
-    collection = (
+    raw_collection = (
         ee.ImageCollection(LANDSAT_COLLECTION)
         .filterBounds(region)
         .filterDate(start_date, end_date)
         .filter(ee.Filter.calendarRange(6, 9, "month"))  # Yaz ayları
         .select(["ST_B10", "QA_PIXEL"])
         .map(lambda img: img.clip(region))
-        .map(apply_qa_mask)
-        .select("ST_B10")
+        .map(_set_export_date)
     )
-    
-    scene_count = collection.size().getInfo()
-    
+
+    scene_count = raw_collection.size().getInfo()
+
     if scene_count == 0:
         raise ValueError(
             f"{region_name} için {start_date} - {end_date} arasında yaz aylarında "
             f"Landsat sahnesi bulunamadı."
         )
-    
+
+    unique_dates = raw_collection.aggregate_array("export_date").distinct().sort()
+    daily_dates = unique_dates.getInfo()
+    daily_composite_count = len(daily_dates)
+
+    def build_daily_current_composite(date_value: ee.String) -> ee.Image:
+        daily_collection = raw_collection.filter(ee.Filter.eq("export_date", date_value))
+        masked_daily_collection = daily_collection.map(apply_qa_mask)
+        lst_median = masked_daily_collection.select("ST_B10").median().rename("ST_B10")
+        first_image = ee.Image(daily_collection.sort("system:time_start").first())
+
+        return (
+            lst_median
+            .clip(region)
+            .set("export_date", date_value)
+            .set("system:time_start", first_image.get("system:time_start"))
+            .set("source_image_count", daily_collection.size())
+        )
+
+    daily_collection = ee.ImageCollection(unique_dates.map(build_daily_current_composite))
+
+    collection_celsius = daily_collection.map(
+        lambda img: (
+            img.multiply(LANDSAT_SCALE)
+            .add(LANDSAT_OFFSET)
+            .subtract(273.15)
+            .rename("Current_Period_LST_Celsius")
+            .toFloat()
+        )
+    )
+
     log.info(f"  Current period sahne sayısı: {scene_count}")
+    log.info(f"  Current period günlük composite sayısı: {daily_composite_count}")
     
     current_valid_count = (
-        collection
+        collection_celsius
         .count()
         .rename("Current_Period_Valid_Count")
         .toFloat()
         .clip(region)
     )
 
-    # QA-temiz sahnelerin median'ını al; ikinci bant geçerli gözlem sayısıdır.
+    current_std_lst = (
+        collection_celsius
+        .reduce(ee.Reducer.stdDev())
+        .rename("Current_Period_STD_Celsius")
+        .toFloat()
+        .clip(region)
+    )
+
+    current_min_lst = (
+        collection_celsius
+        .min()
+        .rename("Current_Period_Min_Celsius")
+        .toFloat()
+        .clip(region)
+    )
+
+    current_max_lst = (
+        collection_celsius
+        .max()
+        .rename("Current_Period_Max_Celsius")
+        .toFloat()
+        .clip(region)
+    )
+
+    current_range_lst = (
+        current_max_lst
+        .subtract(current_min_lst)
+        .rename("Current_Period_Range_Celsius")
+        .toFloat()
+        .clip(region)
+    )
+
+    # QA-temiz sahnelerin median'ını al; ek bantlar gözlem sayısı ve pencere içi
+    # variability tanılarıdır.
     current_median_lst = (
-        collection
+        collection_celsius
         .median()
-        .multiply(LANDSAT_SCALE)
-        .add(LANDSAT_OFFSET)
-        .subtract(273.15)
         .rename("Current_Period_LST_Celsius")
         .toFloat()
     )
@@ -390,6 +450,8 @@ def get_current_period_median(
     current_median = (
         current_median_lst
         .addBands(current_valid_count.toFloat())
+        .addBands(current_std_lst.toFloat())
+        .addBands(current_range_lst.toFloat())
         .toFloat()
         .clip(region)
     )
@@ -404,13 +466,22 @@ def get_current_period_median(
         "window_end": end_date,
         "window_days": window_days,
         "scene_count": scene_count,
+        "daily_composite_count": daily_composite_count,
+        "daily_dates": daily_dates,
         "months_filter": "6-9",
-        "composite_method": "median",
+        "composite_method": "median_of_qa_masked_daily_medians",
         "qa_mask_applied": True,
         "output_bands": [
             "Current_Period_LST_Celsius",
             "Current_Period_Valid_Count",
+            "Current_Period_STD_Celsius",
+            "Current_Period_Range_Celsius",
         ],
+        "valid_count_description": "QA-temiz günlük median composite sayısı",
+        "variability_bands_description": {
+            "Current_Period_STD_Celsius": "QA-temiz günlük composite yığını üzerindeki piksel-bazlı standart sapma",
+            "Current_Period_Range_Celsius": "QA-temiz günlük composite yığını üzerindeki piksel-bazlı max-min aralığı",
+        },
         "qa_masked_bits": [
             "fill",
             "dilated_cloud",
@@ -426,7 +497,7 @@ def get_current_period_median(
         "qa_water_bit_preserved": True,
         "resolution": "30m",
         "created_at": datetime.now().isoformat(),
-        "status": "current_period_median_prepared"
+        "status": "current_period_daily_composite_median_prepared"
     }
     
     log.info("Current period median başarıyla oluşturuldu.")

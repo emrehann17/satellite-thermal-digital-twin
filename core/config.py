@@ -80,7 +80,9 @@ STEP5_WINDOW_SIZE = 512
 
 # Standart sapma bu eşiğin altındaysa z-score anomali NaN yazılır.
 # Bu, düşük örnek sayısı veya yapay sabit piksellerde z-score patlamasını engeller.
-STEP5_MIN_BASELINE_STD_CELSIUS = 1.5
+STEP5_MIN_BASELINE_STD_CELSIUS = 3.0
+STEP5_MAX_CURRENT_STD_CELSIUS = 3.0
+STEP5_MAX_CURRENT_RANGE_CELSIUS = 8.0
 
 # Bu eşiğin altında geçerli baseline gözlemi olan piksellerde mean/std/z-score
 # hesaplanmaz; piksel NaN bırakılır.
