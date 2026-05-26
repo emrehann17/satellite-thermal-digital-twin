@@ -450,6 +450,55 @@ def save_metadata(metadata: dict, filename: str = "step3_metadata.json") -> Path
     return output_path
 
 
+def prepare_landsat_anomaly_inputs(
+    region: ee.Geometry,
+    region_name: str,
+    current_end_date: str = CURRENT_PERIOD_END_DATE,
+    window_days: int = CURRENT_PERIOD_DAYS,
+    baseline_start: str = BASELINE_START_DATE,
+    baseline_end: str = BASELINE_END_DATE,
+) -> dict:
+    """
+    Landsat anomaly pipeline girdilerini tek yerde hazırlar.
+
+    Bu helper Step3 ana akışı ve Step4 standalone yolu tarafından ortak kullanılır.
+    Böylece baseline yılları, current period penceresi ve bölge seçimi config ile
+    aynı kalır; Step4 tek başına çalıştığında eski daily-baseline yoluna düşmez.
+    """
+    log.info("Pencere-simetrik Landsat anomaly girdileri hazırlanıyor.")
+    log.info(
+        "Config: region=%s, current_end=%s, window_days=%s, baseline=%s -> %s",
+        region_name,
+        current_end_date,
+        window_days,
+        baseline_start,
+        baseline_end,
+    )
+
+    landsat_timeseries, ts_metadata = get_landsat_baseline_window_median_collection(
+        region=region,
+        region_name=region_name,
+        current_end_date=current_end_date,
+        window_days=window_days,
+        baseline_start=baseline_start,
+        baseline_end=baseline_end,
+    )
+
+    current_median, current_metadata = get_current_period_median(
+        region=region,
+        region_name=region_name,
+        end_date=current_end_date,
+        window_days=window_days,
+    )
+
+    return {
+        "landsat_timeseries": landsat_timeseries,
+        "landsat_metadata": ts_metadata,
+        "current_median": current_median,
+        "current_metadata": current_metadata,
+    }
+
+
 # =============================================================================
 # ANA AKIŞ
 # =============================================================================
@@ -461,9 +510,7 @@ def main() -> None:
     init_gee()
     regions = build_regions()
 
-    # Baseline için current period ile simetrik geçmiş yıl pencere medianları
-    log.info("\n1) Pencere-simetrik baseline hazırlanıyor...")
-    landsat_timeseries, ts_metadata = get_landsat_baseline_window_median_collection(
+    step3_result = prepare_landsat_anomaly_inputs(
         region=regions[REGION_NAME],
         region_name=REGION_NAME,
         current_end_date=CURRENT_PERIOD_END_DATE,
@@ -472,19 +519,10 @@ def main() -> None:
         baseline_end=BASELINE_END_DATE,
     )
 
-    #Current period median (anomali için)
-    log.info("\n2) Current period median hazırlanıyor...")
-    current_median, current_metadata = get_current_period_median(
-        region=regions[REGION_NAME],
-        region_name=REGION_NAME,
-        end_date=CURRENT_PERIOD_END_DATE,
-        window_days=CURRENT_PERIOD_DAYS
-    )
-
     # Metadata kaydetme
     combined_metadata = {
-        "baseline_timeseries": ts_metadata,
-        "current_period": current_metadata
+        "baseline_timeseries": step3_result["landsat_metadata"],
+        "current_period": step3_result["current_metadata"],
     }
     
     metadata_path = save_metadata(combined_metadata)
@@ -498,12 +536,7 @@ def main() -> None:
     log.info("Sonraki adım: step4 (export)")
     log.info("=" * 60)
 
-    return {
-        "landsat_timeseries": landsat_timeseries,
-        "landsat_metadata": ts_metadata,
-        "current_median": current_median,
-        "current_metadata": current_metadata,
-    }
+    return step3_result
 
 if __name__ == "__main__":
     main()

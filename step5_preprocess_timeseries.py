@@ -419,20 +419,6 @@ def open_output(path: Path, profile: dict):
     return rasterio.open(path, "w", **output_profile(profile))
 
 
-def time_offsets_days(times: list[np.datetime64]) -> np.ndarray:
-    """
-    Tarih listesini ilk tarihten itibaren gün cinsinden sayısal eksene çevirir.
-
-    Bu eksen, düzensiz tarih aralıklarında lineer interpolasyonun gerçek gün
-    farklarına göre yapılmasını sağlar.
-    """
-    start = times[0]
-    return np.array(
-        [(time - start) / np.timedelta64(1, "D") for time in times],
-        dtype="float32",
-    )
-
-
 def estimated_stack_memory_mb(time_count: int, window_size: int) -> float:
     """
     Bir baseline pencere yığınının yaklaşık bellek kullanımını MB cinsinden hesaplar.
@@ -442,49 +428,6 @@ def estimated_stack_memory_mb(time_count: int, window_size: int) -> float:
     """
     bytes_per_float32 = np.dtype("float32").itemsize
     return time_count * window_size * window_size * bytes_per_float32 / (1024**2)
-
-
-def interpolate_stack_along_time(
-    stack: np.ndarray,
-    time_axis: np.ndarray,
-) -> np.ndarray:
-    """
-    Her pikselin zaman serisindeki iç boşlukları lineer interpolasyonla doldurur.
-
-    İşlem in-place yapılır; yani bellek kullanımını düşük tutmak için yeni bir
-    stack kopyası oluşturulmaz. Başta ve sonda kalan NaN değerleri doldurulmaz.
-    Bu davranış, xarray.interpolate_na'nın varsayılan ekstrapolasyon yapmayan
-    davranışıyla uyumludur.
-    """
-    if stack.shape[0] < 3:
-        return stack
-
-    interpolated = stack
-    if len(time_axis) != interpolated.shape[0]:
-        raise ValueError("Zaman ekseni uzunluğu stack zaman boyutuyla uyuşmuyor")
-
-    flat = interpolated.reshape(interpolated.shape[0], -1)
-    valid_counts = np.sum(np.isfinite(flat), axis=0)
-
-    for pixel_index in np.where(valid_counts > 1)[0]:
-        series = flat[:, pixel_index]
-        valid = np.isfinite(series)
-        first_valid = int(np.argmax(valid))
-        last_valid = len(valid) - int(np.argmax(valid[::-1])) - 1
-        fill_mask = (
-            (~valid)
-            & (time_axis >= time_axis[first_valid])
-            & (time_axis <= time_axis[last_valid])
-        )
-
-        if np.any(fill_mask):
-            flat[fill_mask, pixel_index] = np.interp(
-                time_axis[fill_mask],
-                time_axis[valid],
-                series[valid],
-            )
-
-    return interpolated
 
 
 def read_baseline_stack_window(
@@ -732,7 +675,10 @@ def process_step5_windowed(
             open_output(output_paths["baseline_mean"], profile) as mean_dst,
             open_output(output_paths["baseline_std"], profile) as std_dst,
             open_output(output_paths["baseline_valid_count"], profile) as valid_count_dst,
-            open_output(output_paths["low_baseline_count_mask"], profile) as low_baseline_count_dst,
+            open_output(
+                output_paths["low_baseline_count_mask"],
+                profile,
+            ) as low_baseline_count_dst,
             open_output(output_paths["low_baseline_std_mask"], profile) as low_baseline_std_dst,
             open_output(output_paths["current_median"], profile) as current_dst,
             open_output(output_paths["current_valid_count"], profile) as current_count_dst,
@@ -955,7 +901,13 @@ def write_metadata(
             "min_baseline_std_celsius": STEP5_MIN_BASELINE_STD_CELSIUS,
             "min_baseline_valid_count": STEP5_MIN_BASELINE_VALID_COUNT,
             "min_current_valid_count": STEP5_MIN_CURRENT_VALID_COUNT,
+            "landsat_baseline_temporal_interpolation": False,
+            "temporal_interpolation_used": False,
+            "baseline_statistics_source": "observed_qa_clean_landsat_pixels_only",
+            "insufficient_observations_policy": "mask_as_nan",
             "modis_context_enabled": ENABLE_MODIS_STEP5_CONTEXT,
+            "modis_spatial_resampling": "bilinear_to_landsat_grid_for_context_only",
+            "modis_used_as_primary_baseline": False,
             "min_modis_std_celsius": STEP5_MIN_MODIS_STD_CELSIUS,
             "estimated_stack_memory_mb": result["estimated_stack_memory_mb"],
             "netcdf_written": baseline_netcdf is not None,
@@ -964,6 +916,11 @@ def write_metadata(
             "time_count": len(tif_files),
             "date_range": f"{times[0]} to {times[-1]}",
             "interpolation_method": "none",
+            "temporal_interpolation_used": False,
+            "landsat_baseline_temporal_interpolation": False,
+            "statistics_source": "observed_qa_clean_landsat_pixels_only",
+            "statistics": "np.nanmean/np.nanstd over QA-clean observations only",
+            "insufficient_observations_policy": "mask_as_nan",
             "min_valid_count": STEP5_MIN_BASELINE_VALID_COUNT,
             "mean_celsius": result["baseline_mean_stats"]["mean"],
             "std_celsius": result["baseline_std_stats"]["mean"],
@@ -988,7 +945,11 @@ def write_metadata(
                 "coarse_context_only; Landsat z-score remains the primary "
                 "high-resolution anomaly product"
             ),
-            "resampling": "bilinear_to_landsat_grid",
+            "resampling": "spatial_resampling_for_modis_context_only",
+            "resampling_method": "bilinear_to_landsat_grid",
+            "spatial_resampling": "bilinear_to_landsat_grid_for_context_only",
+            "used_to_fill_landsat_baseline_gaps": False,
+            "used_as_primary_baseline": False,
             "min_std_celsius": STEP5_MIN_MODIS_STD_CELSIUS,
             "mean_celsius": result["modis_mean_stats"]["mean"],
             "std_celsius": result["modis_std_stats"]["mean"],

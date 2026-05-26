@@ -171,6 +171,16 @@ Projede genel akış şu şekildedir:
 14. MODIS mean/std rasterı Landsat gridine bilinear yeniden örneklenir ve current median ile düşük çözünürlüklü bağlam z-score rasterı üretilir.
 15. Düşük baseline gözlem sayısı, düşük baseline std ve düşük current gözlem sayısı maskeleriyle anomaly çıktısı teşhis edilir.
 
+Landsat temel istatistiklerinde zamansal interpolasyon kullanılmaz. Temel ortalama ve standart sapma değerleri yalnızca kalite kontrolünden geçmiş gerçek gözlemlerden hesaplanır; geçerli gözlem eşiğinin altındaki pikseller NaN olarak kalır veya maskelenir.
+
+---
+
+## İnterpolasyon Politikası
+
+Landsat baseline istatistiklerinde zamansal interpolasyon kullanılmaz. Eksik veya yetersiz geçerli gözleme sahip pikseller doldurulmaz; `NaN` olarak bırakılır veya maskelenir. Bu karar, yapay mekansal kapsama üretmemek ve baseline standart sapmasını interpolasyonla yapay olarak düşürmemek için uygulanmıştır.
+
+MODIS rasterları yalnızca düşük çözünürlüklü bağlamsal karşılaştırma için Landsat gridine mekansal olarak yeniden örneklenir. Bu işlem temporal interpolation değildir. MODIS, Landsat baseline boşluklarını doldurmak için kullanılmaz ve ana anomaly baseline olarak yorumlanmaz.
+
 ---
 
 # Proje Yapısı
@@ -189,6 +199,7 @@ step3_landsat_lst.py
 step4_export_geotiff.py
 step4b_download_drive_export.py
 step5_preprocess_timeseries.py
+step5b_diagnostic_report.py
 main.py
 
 ```
@@ -233,6 +244,8 @@ Current period çıktısı iki bantlıdır:
 
 Online export katmanıdır. MODIS ve Landsat rasterlarını GeoTIFF olarak Google Drive'a export eder ve export task'larını polling ile izler. Bu adım artık Drive klasörünü indirmez; indirme ve yerel klasörlere dağıtma sorumluluğu Step4b'ye ayrılmıştır.
 
+Step4 tek başına çalıştırıldığında da Step3 ile aynı pencere-simetrik baseline/current helper'ını kullanır. Böylece standalone export yolu eski günlük baseline mantığına düşmez; `REGION_NAME`, baseline yıl aralığı ve current period ayarları `core/config.py` üzerinden gelir.
+
 ## Step 4B
 
 Drive download ve yerel dosya yerleştirme katmanıdır. Step4 tarafından tamamlanan Drive export dosyalarını indirir ve GeoTIFF dosyalarını Step5'in beklediği yerel klasörlere dağıtır.
@@ -260,6 +273,10 @@ Offline raster işleme katmanıdır. Step4b tarafından yerleştirilen GeoTIFF d
 * metadata JSON çıktısı
 
 Step5 artık tüm zamanı bellekte tutan `xarray + full stack` yolu yerine windowed/chunked raster işleme ile çalışmaktadır. Baseline istatistiklerinde lineer zaman interpolasyonu kullanılmaz; yeterli geçerli gözlem olmayan pikseller `NaN` bırakılır. MODIS çıktıları yalnız bağlam ürünü olarak kullanılır; Landsat z-score ürününün yerine geçmez.
+
+## Step 5B
+
+Mevcut Step5 çıktıları üzerinde tanı raporu üretir. Yeni preprocessing yapmaz, anomaly değerlerini değiştirmez ve smoothing/blur uygulamaz. `outputs/diagnostics/summary.md`, `outputs/diagnostics/diagnostic_stats.json` ve PNG görseller üretir.
 
 ## main.py
 
@@ -435,6 +452,7 @@ python step3_landsat_lst.py
 python step4_export_geotiff.py
 python step4b_download_drive_export.py
 python step5_preprocess_timeseries.py
+python step5b_diagnostic_report.py
 
 ```
 
@@ -466,21 +484,20 @@ python step5_preprocess_timeseries.py
 
 Bu komut, Step5'i tek başına yeniden çalıştırmak istediğinde kullanılabilir. Normal kullanımda `main.py` akışı içinde otomatik tetiklenir.
 
+## Step5B Tanı Raporu
+
+```bash
+python step5b_diagnostic_report.py
+
+```
+
+Bu komut mevcut Step5 rasterlarını okuyarak anomaly histogramı, `|z| > 2` ve `|z| > 3` oranları, valid-count/std maskeleriyle extreme anomaly çakışmaları ve varsa MODIS context agreement özetini üretir. Raster gridleri uyuşmuyorsa karşılaştırmayı atlar ve raporda belirtir.
+
 ---
 
 # Örnek Çıktılar
 
-## Baseline Mean Raster
-
-Bu raster, baseline dönemi boyunca hesaplanan ortalama yüzey sıcaklığını temsil etmektedir.
-
-![Baseline Mean](docs/images/baseline_lst_mean_celsius.png)
-
-## Z-Score Anomaly Raster
-
-Bu raster, current period median sıcaklık değerlerinin baseline mean ve standard deviation kullanılarak hesaplanan z-score anomaly çıktısını göstermektedir. README'de kullanılan görsel, güncel Step5 çıktısından `-3 / +3` sabit ölçek mantığına uygun olarak yeniden dışa alınmıştır.
-
-![Anomaly](docs/images/anomaly_zscore.png)
+Bu bölümdeki örnek çıktılar geçici olarak devre dışı bırakılmıştır. Mevcut anomaly haritalarında dikiş/artefact doğrulaması ve legend, CRS, ölçek, quality-mask gibi final harita bileşenleri tamamlandığında örnek çıktılar tekrardan eklenecektir.
 
 ---
 

@@ -50,7 +50,7 @@ from core.io_utils import setup_logger
 
 
 from step2_modis_5year_mean import process_summer_mean
-from step3_landsat_lst import get_landsat_daily_median_collection, get_current_period_median
+from step3_landsat_lst import prepare_landsat_anomaly_inputs
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -433,6 +433,7 @@ def main(step3_result: dict | None = None) -> None:
     log.info("STEP 4 BAŞLIYOR")
     log.info("=" * 60)
 
+    DRIVE_EXPORT_TASKS.clear()
     log_drive_download_configuration()
     init_gee()
     regions = build_regions()
@@ -475,20 +476,32 @@ def main(step3_result: dict | None = None) -> None:
     drive_download_metadata = {
         "enabled": DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT,
     }
+    used_external_step3_result = step3_result is not None
 
     if ENABLE_LANDSAT_EXPORT:
         if step3_result is not None:
             log.info("\nStep3 çıktıları kullanılıyor; Landsat collection tekrar hesaplanmayacak.")
             landsat_daily_collection = step3_result["landsat_timeseries"]
             landsat_processing_metadata = step3_result["landsat_metadata"]
+            current_median_image = step3_result["current_median"]
+            current_period_metadata = step3_result["current_metadata"]
         else:
-            log.info("\nStep3 çıktısı verilmedi; baseline zaman serisi Step4 içinde hazırlanıyor.")
-            landsat_daily_collection, landsat_processing_metadata = get_landsat_daily_median_collection(
+            log.info(
+                "\nStep3 çıktısı verilmedi; Step4 standalone aynı "
+                "pencere-simetrik Step3 helper'ını kullanacak."
+            )
+            step3_result = prepare_landsat_anomaly_inputs(
                 region=region,
                 region_name=REGION_NAME,
-                start=BASELINE_START_DATE,
-                end=BASELINE_END_DATE
+                current_end_date=CURRENT_PERIOD_END_DATE,
+                window_days=CURRENT_PERIOD_DAYS,
+                baseline_start=BASELINE_START_DATE,
+                baseline_end=BASELINE_END_DATE,
             )
+            landsat_daily_collection = step3_result["landsat_timeseries"]
+            landsat_processing_metadata = step3_result["landsat_metadata"]
+            current_median_image = step3_result["current_median"]
+            current_period_metadata = step3_result["current_metadata"]
 
         landsat_timeseries_exports = export_landsat_timeseries_lst_and_qa_to_drive(
             collection=landsat_daily_collection,
@@ -499,20 +512,7 @@ def main(step3_result: dict | None = None) -> None:
             scale=LANDSAT_EXPORT["scale"],
             max_exports=MAX_LANDSAT_DAILY_EXPORTS
         )
-        
-        if step3_result is not None:
-            log.info("\nStep3 current period median çıktısı kullanılıyor.")
-            current_median_image = step3_result["current_median"]
-            current_period_metadata = step3_result["current_metadata"]
-        else:
-            log.info("\nStep3 çıktısı verilmedi; current period median Step4 içinde hazırlanıyor.")
-            current_median_image, current_period_metadata = get_current_period_median(
-                region=region,
-                region_name=REGION_NAME,
-                end_date=CURRENT_PERIOD_END_DATE,
-                window_days=CURRENT_PERIOD_DAYS
-            )
-        
+
         # Current period median'ı export et
         current_period_export = export_image_to_drive(
             image=current_median_image,
@@ -532,7 +532,7 @@ def main(step3_result: dict | None = None) -> None:
             "enabled": DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT,
             "attempted": False,
             "downloaded": False,
-            "deferred_to": "step4b_download_drive_exports",
+            "deferred_to": "step4b_download_drive_export",
             "message": (
                 "Drive indirme ve yerel klasörlere dağıtma Step4b aşamasına "
                 "ayrıldı."
@@ -583,7 +583,10 @@ def main(step3_result: dict | None = None) -> None:
         "notes": {
             "modis_download_mode": "drive_export_then_step4b_download",
             "landsat_download_mode": "drive_export_with_task_polling_then_step4b_download",
-            "anomaly_method": "z_score_window_based"
+            "anomaly_method": "window_symmetric_landsat_z_score",
+            "landsat_generation_source": (
+                "step3_result" if used_external_step3_result else "step4_standalone"
+            ),
         },
         "status": (
             "export_tasks_completed_download_pending"
@@ -614,7 +617,7 @@ def main(step3_result: dict | None = None) -> None:
     if drive_download_message:
         print(f"Drive indirme notu: {drive_download_message}")
     print("Sonraki adım:")
-    print("python step4b_download_drive_exports.py\n")
+    print("python step4b_download_drive_export.py\n")
 
 if __name__ == "__main__":
     main()
