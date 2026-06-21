@@ -136,8 +136,17 @@ TVDI_MIN_PIXELS_PER_BIN = 30
 # dry_edge - wet_edge bu eşiğin altındaysa TVDI NaN bırakılır (sıfıra bölme koruması).
 TVDI_MIN_EDGE_SPAN_CELSIUS = 0.5
 
-# Baseline TVDI std bu eşiğin altındaysa tvdi z-score NaN bırakılır.
-TVDI_MIN_BASELINE_STD = 0.02
+# Baseline TVDI std bu eşiğin altındaysa tvdi_anomaly_zscore NaN/maskeli bırakılır.
+# Çok küçük baseline std, z-score'u yapay olarak şişirir (küçük paydaya bölme).
+# Bu yüzden epsilon eklemek yerine düşük-std piksellerini maskeliyoruz.
+MIN_TVDI_BASELINE_STD = 0.05
+
+# Geriye dönük uyumluluk için eski isim; MIN_TVDI_BASELINE_STD ile aynı değer.
+TVDI_MIN_BASELINE_STD = MIN_TVDI_BASELINE_STD
+
+# Sıfıra bölme koruması için yalnız sayısal güvenlik amacıyla kullanılan çok küçük
+# epsilon. Std'yi yapay şişirmek için DEĞİL; maskeleme bundan bağımsız yapılır.
+TVDI_ZSCORE_NUMERICAL_EPSILON = 1e-9
 
 # Bu eşiğin altında geçerli baseline TVDI gözlemi olan piksellerde z-score hesaplanmaz.
 TVDI_MIN_BASELINE_VALID_COUNT = 3
@@ -162,3 +171,58 @@ FIRECCI51_BURNDATE_BAND = "BurnDate"
 # FIRMS aktif yangın (MODIS/MCD14ML türevi, günlük)
 FIRMS_COLLECTION = "FIRMS"
 FIRMS_FIRE_BAND = "T21"
+
+
+# =============================================================================
+# Step6: burned-area association testing (ilk doğrulama)
+# =============================================================================
+# Step6, predictor rasterlarını (LST anomaly, current TVDI, TVDI difference,
+# TVDI z-score) aynı sezon/AOI yanmış alan etiketlerine karşı test eder.
+# Bu bir RF/XGBoost modeli DEĞİL; ilk burned-area ilişki (association) testidir.
+
+# Yanmış alan etiketleri için sezon penceresi. Boş bırakılırsa current period
+# baseline ile aynı sezon kullanılır. Yangın sezonu genelde current period'dan
+# daha geniştir; bu yüzden ayrı tanımlanabilir.
+VALIDATION_SEASON_START = "2023-06-01"
+VALIDATION_SEASON_END = "2023-10-31"
+
+# FIRMS aktif yangını da bir etiket kaynağı olarak dahil et (opsiyonel).
+VALIDATION_INCLUDE_FIRMS = False
+
+# Sınıf dengesizliği: yanmış pikseller genelde çok azdır. Dengeli metrikler için
+# yanmayan pikseller bu oranda (burned_count * ratio) rastgele alt-örneklenir.
+VALIDATION_BALANCED_UNBURNED_RATIO = 1.0
+
+# Alt-örnekleme tekrarlanabilirliği için sabit seed.
+VALIDATION_RANDOM_SEED = 42
+
+# FIRMS aktif yangın parlaklık eşiği (T21, Kelvin). Bu değerin üzerindeki pikseller
+# aktif yangın kabul edilir.
+VALIDATION_FIRMS_BRIGHTNESS_THRESHOLD = 330.0
+
+# Step6 etiket export çözünürlüğü (predictor grid'ine resample edilmeden önce GEE
+# export ölçeği). Predictor 30 m olduğu için etiketler de 30 m'ye resample edilir.
+VALIDATION_LABEL_EXPORT_SCALE = 30
+
+# JSON çıktısında tutulacak ROC önizleme noktası üst sınırı. Full ROC array'leri
+# (milyonlarca nokta olabilir) JSON'a YAZILMAZ; sadece bu kadar noktaya downsample
+# edilmiş bir önizleme tutulur. ROC PNG'si full array'lerle bellekte üretilir.
+VALIDATION_MAX_ROC_PREVIEW_POINTS = 500
+
+# --- Validation modu ---
+# "same_season": predictor ve label aynı sezon penceresinden (ilk association testi).
+# "pre_fire":    predictor window ve label window ayrı (yangın öncesi kuruluk sinyali).
+VALIDATION_MODE = "same_season"
+
+# pre_fire modunda predictor ve label pencereleri ayrı tanımlanır.
+# Predictor window: yangından ÖNCEKi kuruluk durumu.
+# Label window:     sonraki yanmış alan kayıtları.
+VALIDATION_PREFIRE_PREDICTOR_START = "2023-06-01"
+VALIDATION_PREFIRE_PREDICTOR_END = "2023-07-31"
+VALIDATION_PREFIRE_LABEL_START = "2023-08-01"
+VALIDATION_PREFIRE_LABEL_END = "2023-10-31"
+
+# FireCCI51 veri kapsamı (yaklaşık). Bu aralık dışındaki label window'ları için
+# FireCCI51 Earth Engine'e SORULMADAN skip edilir (2023 verisi yoktur).
+FIRECCI51_AVAILABLE_START = "2001-01-01"
+FIRECCI51_AVAILABLE_END = "2020-12-31"

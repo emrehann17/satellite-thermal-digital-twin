@@ -68,6 +68,10 @@ def get_firecci51_burned_area(
     FireCCI51 (250 m) yanmış alan maskesi taslağı.
 
     BurnDate > 0 olan pikseller yanmış kabul edilir.
+
+    NOT: Bu fonksiyon collection'ın boş olabileceğini varsaymaz. Boş/bandsiz
+    image riskine karşı güvenli kullanım için get_firecci51_burned_area_safe()
+    tercih edilmelidir.
     """
     collection = (
         ee.ImageCollection(FIRECCI51_COLLECTION)
@@ -77,6 +81,116 @@ def get_firecci51_burned_area(
     )
     burned = collection.max().gt(0).rename("FireCCI51_burned").clip(region)
     return burned
+
+
+def get_firecci51_burned_area_safe(
+    region: ee.Geometry,
+    start: str,
+    end: str,
+) -> tuple[ee.Image | None, str]:
+    """
+    FireCCI51 yanmış alan maskesini GÜVENLİ şekilde kurar.
+
+    Boş collection veya bandsiz image durumunda .gt(0) çağrılmaz; (None, sebep)
+    döndürülür. Başarılıysa (image, "ok") döndürülür.
+
+    Kontrol sırası:
+        1. collection.size() == 0  -> skip
+        2. mevcut bandNames loglanır
+        3. beklenen burn-date bandı yoksa -> skip
+        4. mosaic image'inin bandNames().size() == 0 -> skip
+    """
+    collection = (
+        ee.ImageCollection(FIRECCI51_COLLECTION)
+        .filterBounds(region)
+        .filterDate(start, end)
+    )
+
+    size = collection.size().getInfo()
+    if size == 0:
+        return (
+            None,
+            "FireCCI51 returned no images for selected AOI/season; "
+            "skipping FireCCI51.",
+        )
+
+    # Mevcut bant adlarını logla (collection'ın ilk image'inden).
+    try:
+        available_bands = (
+            ee.Image(collection.first()).bandNames().getInfo()
+        )
+    except Exception:  # noqa: BLE001
+        available_bands = []
+    log.info("FireCCI51 mevcut bantlar: %s", available_bands)
+
+    if FIRECCI51_BURNDATE_BAND not in available_bands:
+        return (
+            None,
+            f"FireCCI51 expected burn-date band '{FIRECCI51_BURNDATE_BAND}' "
+            f"not found (available: {available_bands}); skipping FireCCI51.",
+        )
+
+    selected = collection.select(FIRECCI51_BURNDATE_BAND)
+    mosaic = selected.max()
+
+    band_count = mosaic.bandNames().size().getInfo()
+    if band_count == 0:
+        return (
+            None,
+            "FireCCI51 image has no bands after filtering; skipping FireCCI51.",
+        )
+
+    burned = mosaic.gt(0).rename("FireCCI51_burned").clip(region)
+    return burned, "ok"
+
+
+def get_mcd64a1_burned_area_safe(
+    region: ee.Geometry,
+    start: str,
+    end: str,
+) -> tuple[ee.Image | None, str]:
+    """
+    MCD64A1 yanmış alan maskesini GÜVENLİ şekilde kurar (aynı boş/bandsiz koruması).
+    """
+    collection = (
+        ee.ImageCollection(MCD64A1_COLLECTION)
+        .filterBounds(region)
+        .filterDate(start, end)
+    )
+
+    size = collection.size().getInfo()
+    if size == 0:
+        return (
+            None,
+            "MCD64A1 returned no images for selected AOI/season; "
+            "skipping MCD64A1.",
+        )
+
+    try:
+        available_bands = ee.Image(collection.first()).bandNames().getInfo()
+    except Exception:  # noqa: BLE001
+        available_bands = []
+    log.info("MCD64A1 mevcut bantlar: %s", available_bands)
+
+    if MCD64A1_BURNDATE_BAND not in available_bands:
+        return (
+            None,
+            f"MCD64A1 expected burn-date band '{MCD64A1_BURNDATE_BAND}' not "
+            f"found (available: {available_bands}); skipping MCD64A1.",
+        )
+
+    selected = collection.select(MCD64A1_BURNDATE_BAND)
+    mosaic = selected.max()
+
+    band_count = mosaic.bandNames().size().getInfo()
+    if band_count == 0:
+        return (
+            None,
+            "MCD64A1 image has no bands after filtering; skipping MCD64A1.",
+        )
+
+    burned = mosaic.gt(0).rename("MCD64A1_burned").clip(region)
+    return burned, "ok"
 
 
 def get_firms_active_fire(

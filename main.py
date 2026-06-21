@@ -20,6 +20,7 @@ import step4b_download_drive_export
 import step5_preprocess_timeseries
 import step5b_diagnostic_report
 import step5c_tvdi
+import step6_validate_fire_relation
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -57,8 +58,18 @@ def main() -> None:
         )
         run_step("STEP 4B", step4b_download_drive_export.main)
         run_step("STEP 5", step5_preprocess_timeseries.main)
-        run_step("STEP 5B", step5b_diagnostic_report.main)
         run_step("STEP 5C", step5c_tvdi.main)
+        run_step("STEP 5B", step5b_diagnostic_report.main)
+
+        # Step6 burned-area association testi. Yangın etiketleri GEE'den çekilir;
+        # veri yoksa veya GEE erişimi başarısızsa pipeline'ın geri kalanı
+        # etkilenmesin diye hata-toleranslı çağrılır.
+        try:
+            run_step("STEP 6", step6_validate_fire_relation.main)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "STEP 6 atlandı (burned-area validation başarısız): %s", exc
+            )
 
         end_time = datetime.now()
 

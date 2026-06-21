@@ -40,8 +40,8 @@ import rasterio
 from core.config import (
     CURRENT_PERIOD_DAYS,
     ENABLE_TVDI_STEP5,
+    MIN_TVDI_BASELINE_STD,
     TVDI_DRY_EDGE_PERCENTILE,
-    TVDI_MIN_BASELINE_STD,
     TVDI_MIN_BASELINE_VALID_COUNT,
     TVDI_MIN_EDGE_SPAN_CELSIUS,
     TVDI_MIN_PIXELS_PER_BIN,
@@ -49,6 +49,7 @@ from core.config import (
     TVDI_NDVI_MAX,
     TVDI_NDVI_MIN,
     TVDI_WET_EDGE_PERCENTILE,
+    TVDI_ZSCORE_NUMERICAL_EPSILON,
 )
 from core.io_utils import setup_logger
 
@@ -279,18 +280,29 @@ def compute_current_tvdi(
 ) -> tuple[Path, dict]:
     """
     İkinci geçiş (current): windowed olarak current TVDI rasterını yazar.
+
+    Ayrıca current_tvdi_valid_count.tif üretir. Current NDVI median rasterında
+    valid-count bandı (Current_Period_NDVI_Valid_Count, bant 2) varsa o kullanılır;
+    yoksa TVDI'nin pikselde geçerli olup olmadığı (1/0) yazılır. Bu, current TVDI'ye
+    kaç QA-temiz gözlemin katkı verdiğini yansıtır.
     """
     output_path = OUTPUT_DIR / "current_tvdi.tif"
+    count_path = OUTPUT_DIR / "current_tvdi_valid_count.tif"
     stats = RunningStats()
+    count_stats = RunningStats()
 
     with rasterio.open(current_lst_path) as lst_src:
         profile = lst_src.profile.copy()
         width = profile["width"]
         height = profile["height"]
 
+        with rasterio.open(current_ndvi_path) as ndvi_src:
+            has_ndvi_count_band = ndvi_src.count >= 2
+
         with (
             rasterio.open(current_ndvi_path) as ndvi_src,
             open_output(output_path, profile) as tvdi_dst,
+            open_output(count_path, profile) as count_dst,
         ):
             for window in iter_windows(width, height, STEP5_WINDOW_SIZE):
                 lst = mask_physical_celsius(read_band_window(lst_src, window, band_index=1))
@@ -299,7 +311,22 @@ def compute_current_tvdi(
                 tvdi_dst.write(tvdi, 1, window=window)
                 stats.update(tvdi)
 
-    return output_path, stats.as_dict()
+                if has_ndvi_count_band:
+                    valid_count = read_band_window(
+                        ndvi_src, window, band_index=2
+                    ).astype("float32")
+                    # TVDI'nin NaN olduğu yerde valid_count'u 0'a düşür (tutarlılık).
+                    valid_count = np.where(np.isfinite(tvdi), valid_count, 0.0).astype("float32")
+                else:
+                    valid_count = np.where(np.isfinite(tvdi), 1.0, 0.0).astype("float32")
+
+                count_dst.write(valid_count, 1, window=window)
+                count_stats.update(valid_count)
+
+    result_stats = stats.as_dict()
+    result_stats["current_tvdi_valid_count"] = str(count_path)
+    result_stats["current_tvdi_valid_count_stats"] = count_stats.as_dict()
+    return output_path, result_stats
 
 
 def compute_baseline_tvdi(
@@ -338,12 +365,19 @@ def compute_baseline_tvdi(
         std_path = OUTPUT_DIR / "baseline_tvdi_std.tif"
         count_path = OUTPUT_DIR / "baseline_tvdi_valid_count.tif"
         zscore_path = OUTPUT_DIR / "tvdi_anomaly_zscore.tif"
+        difference_path = OUTPUT_DIR / "tvdi_difference.tif"
 
         mean_stats = RunningStats()
         std_stats = RunningStats()
         zscore_stats = RunningStats()
+        difference_stats = RunningStats()
 
         current_tvdi_path = OUTPUT_DIR / "current_tvdi.tif"
+
+        # Düşük baseline std nedeniyle z-score'u maskelenen piksel sayacı.
+        low_std_masked_count = 0
+        # z-score adayı olabilecek (yeterli gözlem + geçerli current/baseline) piksel sayısı.
+        zscore_candidate_count = 0
 
         baseline_ndvi_srcs = [rasterio.open(path) for path in baseline_ndvi_tifs]
         try:
@@ -353,6 +387,7 @@ def compute_baseline_tvdi(
                 open_output(std_path, profile) as std_dst,
                 open_output(count_path, profile) as count_dst,
                 open_output(zscore_path, profile) as zscore_dst,
+                open_output(difference_path, profile) as difference_dst,
             ):
                 for window in iter_windows(width, height, STEP5_WINDOW_SIZE):
                     lst_mean = mask_physical_celsius(
@@ -385,10 +420,29 @@ def compute_baseline_tvdi(
                         current_tvdi_src, window, band_index=1
                     )
 
+                    # Ham fark ürünü: yorumlanması z-score'dan daha kolay.
+                    difference = (current_tvdi - baseline_mean).astype("float32")
+
+                    # z-score adayı: yeterli gözlem + geçerli current + geçerli baseline.
+                    candidate = (
+                        enough
+                        & np.isfinite(current_tvdi)
+                        & np.isfinite(baseline_mean)
+                        & np.isfinite(baseline_std)
+                    )
+                    # Güvenilirlik maskesi: düşük baseline std z-score'u şişirir.
+                    reliable_std = candidate & (baseline_std >= MIN_TVDI_BASELINE_STD)
+                    # Yalnız düşük-std yüzünden elenen pikseller (sayım için).
+                    low_std_only = candidate & (baseline_std < MIN_TVDI_BASELINE_STD)
+
+                    low_std_masked_count += int(np.sum(low_std_only))
+                    zscore_candidate_count += int(np.sum(candidate))
+
                     with np.errstate(invalid="ignore", divide="ignore"):
                         zscore = np.where(
-                            enough & (baseline_std >= TVDI_MIN_BASELINE_STD),
-                            (current_tvdi - baseline_mean) / baseline_std,
+                            reliable_std,
+                            (current_tvdi - baseline_mean)
+                            / (baseline_std + TVDI_ZSCORE_NUMERICAL_EPSILON),
                             np.nan,
                         ).astype("float32")
 
@@ -396,10 +450,12 @@ def compute_baseline_tvdi(
                     std_dst.write(baseline_std, 1, window=window)
                     count_dst.write(valid_count, 1, window=window)
                     zscore_dst.write(zscore, 1, window=window)
+                    difference_dst.write(difference, 1, window=window)
 
                     mean_stats.update(baseline_mean)
                     std_stats.update(baseline_std)
                     zscore_stats.update(zscore)
+                    difference_stats.update(difference)
         finally:
             for src in baseline_ndvi_srcs:
                 src.close()
@@ -408,11 +464,20 @@ def compute_baseline_tvdi(
         "baseline_tvdi_mean": str(mean_path),
         "baseline_tvdi_std": str(std_path),
         "baseline_tvdi_valid_count": str(count_path),
+        "tvdi_difference": str(difference_path),
         "tvdi_anomaly_zscore": str(zscore_path),
         "baseline_tvdi_mean_stats": mean_stats.as_dict(),
         "baseline_tvdi_std_stats": std_stats.as_dict(),
+        "tvdi_difference_stats": difference_stats.as_dict(),
         "tvdi_zscore_stats": zscore_stats.as_dict(),
         "baseline_window_count": len(baseline_ndvi_tifs),
+        "low_tvdi_std_masked_pixel_count": low_std_masked_count,
+        "tvdi_zscore_candidate_pixel_count": zscore_candidate_count,
+        "low_tvdi_std_masked_ratio": (
+            float(low_std_masked_count / zscore_candidate_count)
+            if zscore_candidate_count > 0
+            else None
+        ),
     }
 
 
@@ -511,8 +576,32 @@ def main() -> dict | None:
             "dry_edge_percentile": TVDI_DRY_EDGE_PERCENTILE,
             "min_pixels_per_bin": TVDI_MIN_PIXELS_PER_BIN,
             "min_edge_span_celsius": TVDI_MIN_EDGE_SPAN_CELSIUS,
-            "min_baseline_std": TVDI_MIN_BASELINE_STD,
+            "tvdi_anomaly_formula": (
+                "tvdi_anomaly_zscore = (current_tvdi - baseline_tvdi_mean) "
+                "/ baseline_tvdi_std; masked where baseline_tvdi_std < "
+                "MIN_TVDI_BASELINE_STD"
+            ),
+            "min_tvdi_baseline_std": MIN_TVDI_BASELINE_STD,
+            "zscore_numerical_epsilon": TVDI_ZSCORE_NUMERICAL_EPSILON,
+            "low_tvdi_std_masked_pixel_count": baseline_result.get(
+                "low_tvdi_std_masked_pixel_count"
+            ),
+            "low_tvdi_std_masked_ratio": baseline_result.get(
+                "low_tvdi_std_masked_ratio"
+            ),
+            "tvdi_zscore_candidate_pixel_count": baseline_result.get(
+                "tvdi_zscore_candidate_pixel_count"
+            ),
             "min_baseline_valid_count": TVDI_MIN_BASELINE_VALID_COUNT,
+            "baseline_tvdi_valid_count_policy": (
+                "Her piksel için baseline yıllarından kaçında geçerli TVDI "
+                "üretildiği sayılır; valid_count < min_baseline_valid_count olan "
+                "pikseller baseline mean/std ve z-score'da NaN bırakılır."
+            ),
+            "current_tvdi_valid_count_policy": (
+                "Current NDVI median rasterının valid-count bandı varsa kullanılır; "
+                "yoksa TVDI'nin geçerli olduğu pikseller 1, değilse 0 yazılır."
+            ),
             "temporal_interpolation_used": False,
             "insufficient_observations_policy": "mask_as_nan",
         },

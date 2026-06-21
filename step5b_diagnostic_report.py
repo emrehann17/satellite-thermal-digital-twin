@@ -34,6 +34,7 @@ from core.io_utils import setup_logger
 
 BASE_DIR = Path(__file__).resolve().parent
 STEP5_OUTPUT_DIR = BASE_DIR / "outputs" / "step5"
+STEP5C_OUTPUT_DIR = BASE_DIR / "outputs" / "step5c"
 DIAGNOSTIC_DIR = BASE_DIR / "outputs" / "diagnostics"
 DIAGNOSTIC_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -850,6 +851,177 @@ def plot_landsat_modis_edge_agreement(
     plt.close()
 
 
+def _array_stats(array: np.ndarray, path: Path) -> dict[str, Any]:
+    """min/max/mean/std/nan_ratio for a raw array (no value modification)."""
+    values = finite_values(array)
+    total = int(array.size)
+    valid = int(values.size)
+    nan_ratio = None if total == 0 else float(1 - valid / total)
+    if valid == 0:
+        return {
+            "path": str(path),
+            "valid_pixel_count": 0,
+            "nan_ratio": nan_ratio,
+            "min": None, "max": None, "mean": None, "std": None,
+        }
+    return {
+        "path": str(path),
+        "valid_pixel_count": valid,
+        "nan_ratio": nan_ratio,
+        "min": float(np.min(values)),
+        "max": float(np.max(values)),
+        "mean": float(np.mean(values)),
+        "std": float(np.std(values)),
+    }
+
+
+def compute_tvdi_stats(
+    lst_anomaly: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """
+    Step5C TVDI rasterlarının numeric istatistiklerini üretir.
+
+    Rasterları yalnız OKUR; hiçbir değeri değiştirmez, smoothing/blur uygulamaz.
+    Üretilen alanlar her raster için: min/max/mean/std/nan_ratio.
+    Ek olarak tvdi z-score için |z|>2 ve |z|>3 oranları ile (mümkünse) LST anomaly
+    ile TVDI anomaly arasındaki korelasyon hesaplanır.
+    """
+    result: dict[str, Any] = {"available": False, "rasters": {}}
+
+    tvdi_files = {
+        "current_tvdi": STEP5C_OUTPUT_DIR / "current_tvdi.tif",
+        "baseline_tvdi_mean": STEP5C_OUTPUT_DIR / "baseline_tvdi_mean.tif",
+        "baseline_tvdi_std": STEP5C_OUTPUT_DIR / "baseline_tvdi_std.tif",
+        "tvdi_difference": STEP5C_OUTPUT_DIR / "tvdi_difference.tif",
+        "tvdi_anomaly_zscore": STEP5C_OUTPUT_DIR / "tvdi_anomaly_zscore.tif",
+    }
+
+    arrays: dict[str, np.ndarray] = {}
+    for key, path in tvdi_files.items():
+        if not path.exists():
+            result["rasters"][key] = {"path": str(path), "status": "missing"}
+            continue
+        with rasterio.open(path) as src:
+            array = src.read(1, masked=True).astype("float32").filled(np.nan)
+        arrays[key] = array
+        result["rasters"][key] = _array_stats(array, path)
+
+    if arrays:
+        result["available"] = True
+
+    # Düşük baseline-std nedeniyle maskelenen piksel bilgisi Step5C metadata'sından
+    # okunur (Step5C bu sayımı üretim sırasında tutar).
+    metadata_path = STEP5C_OUTPUT_DIR / "step5c_metadata.json"
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, encoding="utf-8") as f:
+                step5c_meta = json.load(f)
+            proc = step5c_meta.get("processing", {})
+            result["low_std_masking"] = {
+                "min_tvdi_baseline_std": proc.get("min_tvdi_baseline_std"),
+                "low_tvdi_std_masked_pixel_count": proc.get(
+                    "low_tvdi_std_masked_pixel_count"
+                ),
+                "low_tvdi_std_masked_ratio": proc.get("low_tvdi_std_masked_ratio"),
+                "tvdi_zscore_candidate_pixel_count": proc.get(
+                    "tvdi_zscore_candidate_pixel_count"
+                ),
+            }
+        except (json.JSONDecodeError, OSError):
+            result["low_std_masking"] = {"status": "metadata_unreadable"}
+
+    # TVDI z-score eşik oranları
+    zscore = arrays.get("tvdi_anomaly_zscore")
+    if zscore is not None:
+        finite = np.isfinite(zscore)
+        valid = int(np.sum(finite))
+        if valid > 0:
+            abs_z = np.abs(zscore[finite])
+            result["tvdi_zscore_thresholds"] = {
+                "abs_z_gt_2_ratio": float(np.sum(abs_z > 2) / valid),
+                "abs_z_gt_3_ratio": float(np.sum(abs_z > 3) / valid),
+                "valid_pixel_count": valid,
+            }
+        else:
+            result["tvdi_zscore_thresholds"] = {
+                "abs_z_gt_2_ratio": None,
+                "abs_z_gt_3_ratio": None,
+                "valid_pixel_count": 0,
+            }
+
+    # LST anomaly ile TVDI anomaly korelasyonu (aynı grid varsayımıyla)
+    if lst_anomaly is not None and zscore is not None:
+        if lst_anomaly.shape == zscore.shape:
+            result["lst_vs_tvdi_anomaly_correlation"] = safe_corrcoef(
+                lst_anomaly, zscore
+            )
+        else:
+            result["lst_vs_tvdi_anomaly_correlation"] = {
+                "correlation": None,
+                "note": "grid_shape_mismatch",
+            }
+
+    return result
+
+
+def write_tvdi_png_outputs() -> list[str]:
+    """
+    Step5C'nin ürettiği TVDI rasterlarını PNG'ye çevirir.
+
+    Bu blok LST diagnostic akışından bağımsızdır; outputs/step5c altındaki TVDI
+    GeoTIFF'lerini okuyup DIAGNOSTIC_DIR'e PNG yazar. Dosya yoksa sessizce atlanır,
+    böylece TVDI henüz üretilmemişse LST diagnostic çıktıları etkilenmez.
+
+    TVDI haritaları (current/mean) 0-1 aralığında, z-score haritası -3/+3 aralığında
+    sabit ölçekle çizilir.
+    """
+    outputs: list[str] = []
+
+    tvdi_maps = [
+        ("current_tvdi.tif", "Current TVDI (0-1)", "current_tvdi_map.png",
+         0.0, 1.0, "YlOrBr"),
+        ("baseline_tvdi_mean.tif", "Baseline TVDI mean (0-1)",
+         "baseline_tvdi_mean_map.png", 0.0, 1.0, "YlOrBr"),
+        ("baseline_tvdi_std.tif", "Baseline TVDI std", "baseline_tvdi_std_map.png",
+         None, None, "magma"),
+        ("tvdi_difference.tif", "TVDI difference (current - baseline mean)",
+         "tvdi_difference_map.png", -0.5, 0.5, "coolwarm"),
+        ("tvdi_anomaly_zscore.tif", "TVDI anomaly z-score (-3/+3)",
+         "tvdi_anomaly_zscore_map.png", -3.0, 3.0, "coolwarm"),
+    ]
+
+    for filename, title, png_name, vmin, vmax, cmap in tvdi_maps:
+        tif_path = STEP5C_OUTPUT_DIR / filename
+        if not tif_path.exists():
+            log.info("TVDI rasterı bulunamadı, PNG atlandı: %s", tif_path.name)
+            continue
+
+        with rasterio.open(tif_path) as src:
+            array = src.read(1, masked=True).astype("float32").filled(np.nan)
+
+        plot_map(
+            array,
+            title,
+            DIAGNOSTIC_DIR / png_name,
+            vmin=vmin,
+            vmax=vmax,
+            cmap=cmap,
+        )
+        outputs.append(png_name)
+        log.info("TVDI PNG yazıldı: %s", png_name)
+
+    # TVDI z-score histogramı (varsa)
+    zscore_path = STEP5C_OUTPUT_DIR / "tvdi_anomaly_zscore.tif"
+    if zscore_path.exists():
+        with rasterio.open(zscore_path) as src:
+            zscore = src.read(1, masked=True).astype("float32").filled(np.nan)
+        plot_histogram(zscore, DIAGNOSTIC_DIR / "tvdi_anomaly_histogram.png")
+        outputs.append("tvdi_anomaly_histogram.png")
+        log.info("TVDI PNG yazıldı: tvdi_anomaly_histogram.png")
+
+    return outputs
+
+
 def write_png_outputs(
     layers: dict[str, RasterLayer],
     seam_masks: dict[str, np.ndarray],
@@ -1008,9 +1180,18 @@ def build_report() -> dict[str, Any]:
     )
     png_outputs = write_png_outputs(layers, seam_masks)
 
+    # TVDI rasterlarını (Step5C çıktısı) da PNG'ye çevir. Step5C, Step5B'den önce
+    # çalıştığı için bu noktada TVDI GeoTIFF'leri hazır olmalı; değilse atlanır.
+    tvdi_png_outputs = write_tvdi_png_outputs()
+    png_outputs = png_outputs + tvdi_png_outputs
+
+    # TVDI numeric istatistikleri (Step5C çıktıları). Rasterları yalnız okur.
+    tvdi_stats = compute_tvdi_stats(lst_anomaly=anomaly)
+
     return {
         "created_at": datetime.now().isoformat(),
         "step5_output_dir": str(STEP5_OUTPUT_DIR),
+        "step5c_output_dir": str(STEP5C_OUTPUT_DIR),
         "diagnostic_dir": str(DIAGNOSTIC_DIR),
         "log_file": str(log_file),
         "missing_rasters": missing,
@@ -1022,6 +1203,8 @@ def build_report() -> dict[str, Any]:
         "seam_evidence_scores": evidence_scores,
         "possible_seam_source": seam_report,
         "png_outputs": png_outputs,
+        "tvdi_png_outputs": tvdi_png_outputs,
+        "tvdi_stats": tvdi_stats,
     }
 
 
@@ -1187,6 +1370,114 @@ def write_summary_markdown(report: dict[str, Any]) -> Path:
             f"- `{key}`: same grid as anomaly = "
             f"`{info['same_grid_as_anomaly']}`, size={info['width']}x{info['height']}, "
             f"crs=`{info['crs']}`"
+        )
+
+    # --- TVDI (Step5C) numeric stats ---
+    tvdi = report.get("tvdi_stats")
+    lines.extend(["", "## TVDI / Dryness Stats (Step5C)", ""])
+    if not tvdi or not tvdi.get("available"):
+        lines.append(
+            "Step5C TVDI rasters not found; TVDI stats skipped. "
+            "(Run Step5C before Step5B to populate these.)"
+        )
+    else:
+        lines.append(
+            "| Raster | Min | Max | Mean | Std | NaN ratio | Valid pixels |"
+        )
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+        for key in [
+            "current_tvdi",
+            "baseline_tvdi_mean",
+            "baseline_tvdi_std",
+            "tvdi_difference",
+            "tvdi_anomaly_zscore",
+        ]:
+            stats = tvdi["rasters"].get(key)
+            if stats is None or stats.get("status") == "missing":
+                lines.append(f"| {key} | n/a | n/a | n/a | n/a | n/a | missing |")
+                continue
+            lines.append(
+                "| {key} | {min} | {max} | {mean} | {std} | {nan} | {valid} |".format(
+                    key=key,
+                    min=scalar(stats["min"]),
+                    max=scalar(stats["max"]),
+                    mean=scalar(stats["mean"]),
+                    std=scalar(stats["std"]),
+                    nan=pct(
+                        None if stats["nan_ratio"] is None
+                        else 100 * stats["nan_ratio"]
+                    ),
+                    valid=stats["valid_pixel_count"],
+                )
+            )
+
+        # Düşük baseline-std maskeleme raporu
+        masking = tvdi.get("low_std_masking")
+        if masking and "low_tvdi_std_masked_pixel_count" in masking:
+            ratio = masking.get("low_tvdi_std_masked_ratio")
+            lines.extend([
+                "",
+                "### Low baseline-std masking (z-score reliability)",
+                "",
+                f"- Min baseline TVDI std threshold: "
+                f"`{scalar(masking.get('min_tvdi_baseline_std'))}`",
+                f"- Pixels masked due to low baseline std: "
+                f"`{masking.get('low_tvdi_std_masked_pixel_count')}`",
+                f"- z-score candidate pixels (before low-std mask): "
+                f"`{masking.get('tvdi_zscore_candidate_pixel_count')}`",
+                f"- Masked ratio: "
+                f"{pct(None if ratio is None else 100 * ratio)}",
+            ])
+
+        thresholds = tvdi.get("tvdi_zscore_thresholds")
+        gt3_ratio = None
+        if thresholds:
+            gt3_ratio = thresholds.get("abs_z_gt_3_ratio")
+            lines.extend([
+                "",
+                "### TVDI anomaly z-score thresholds (after low-std masking)",
+                "",
+                f"- `|tvdi_z| > 2`: {pct(None if thresholds['abs_z_gt_2_ratio'] is None else 100 * thresholds['abs_z_gt_2_ratio'])}",
+                f"- `|tvdi_z| > 3`: {pct(None if thresholds['abs_z_gt_3_ratio'] is None else 100 * thresholds['abs_z_gt_3_ratio'])}",
+                f"- Valid pixels: `{thresholds['valid_pixel_count']}`",
+            ])
+
+        corr = tvdi.get("lst_vs_tvdi_anomaly_correlation")
+        if corr is not None:
+            lines.extend([
+                "",
+                "### LST anomaly vs TVDI anomaly",
+                "",
+            ])
+            if corr.get("note") == "grid_shape_mismatch":
+                lines.append(
+                    "- Correlation skipped: LST anomaly and TVDI anomaly grids differ."
+                )
+            else:
+                lines.append(
+                    f"- Pearson correlation: `{scalar(corr.get('pearson_correlation'))}`"
+                )
+                if "valid_pair_count" in corr:
+                    lines.append(
+                        f"- Valid paired pixels: `{corr['valid_pair_count']}`"
+                    )
+
+        # İnstabilite uyarısı: |tvdi_z| > 3 oranı %10'un üzerindeyse.
+        if gt3_ratio is not None and gt3_ratio > 0.10:
+            lines.extend([
+                "",
+                "> **Warning:** TVDI z-score appears unstable; baseline TVDI std "
+                "may be too low or baseline sample size may be insufficient. "
+                f"(`|tvdi_z| > 3` = {100 * gt3_ratio:.2f}% after low-std masking.)",
+            ])
+
+        lines.append("")
+        lines.append(
+            "_Note: TVDI is a candidate dryness indicator / prototype, not a "
+            "validated fire-risk product. `tvdi_difference.tif` "
+            "(current_tvdi - baseline_tvdi_mean) is provided as a more "
+            "interpretable companion to the z-score. Validation against "
+            "burned-area and active-fire datasets is the next step._"
         )
 
     lines.extend(["", "## PNG Outputs", ""])

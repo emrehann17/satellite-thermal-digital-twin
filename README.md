@@ -539,33 +539,225 @@ Bu repo şu anda tamamlanmış bir 3B termal dijital ikiz sistemi değildir. Mev
 Bu eksikler giderildikçe proje daha güçlü 2B/3B termal temsil ve risk analizi katmanlarına doğru genişletilecektir.
 ---
 
-# Next scientific direction: TVDI + burned area validation
+# Step5C: TVDI-based Dryness Anomaly
 
-Projenin bir sonraki bilimsel yönü, çıplak LST anomalisinden çıkıp yangınla fiziksel bağı kurulmuş bir kuruluk/termal durum temsiline geçmektir.
+Bu bölüm, projeyi çıplak LST (Land Surface Temperature) anomalisinden, LST + NDVI
+temelli bir **TVDI (Temperature Vegetation Dryness Index)** / kuruluk göstergesine
+doğru nasıl genişlettiğimizi anlatır. Step5C, mevcut LST anomaly pipeline'ının
+yerine geçmez; onun yanında çalışan **yeni ve ayrı bir prototip ürün** ailesidir.
 
-## Phase 1 (bu sürümde eklendi)
+## Neden TVDI? (amaç)
 
-* **NDVI**: Step3'e Landsat 8 C2L2 Red/NIR (SR_B4/SR_B5) bantlarından, LST ile
-  aynı QA mask / grid / pencere mantığıyla NDVI üretimi eklendi. Current period
-  için `current_ndvi_median.tif`, baseline yılları için pencere-simetrik NDVI
-  median composite'leri export edilir.
-* **TVDI (basit/ilk sürüm)**: `step5c_tvdi.py` yeni bir ürün olarak eklendi.
-  LST-NDVI scatter üzerinden NDVI bin'leri kurulur; her bin için wet edge (düşük
-  LST percentile) ve dry edge (yüksek LST percentile) hesaplanır. TVDI =
-  (LST - wet_edge) / (dry_edge - wet_edge), [0, 1] aralığına clamp edilir.
-  Çıktılar: `current_tvdi.tif`, `baseline_tvdi_mean.tif`, `baseline_tvdi_std.tif`,
-  `tvdi_anomaly_zscore.tif`. Temporal interpolation yapılmaz; yetersiz gözlemde
-  NaN bırakılır.
-* Mevcut LST anomaly pipeline'ı (Step5/Step5B) silinmedi; TVDI ayrı ürün olarak
-  eklendi ve onların çıktılarını okur ama üzerine yazmaz.
+Mevcut Step5 LST anomaly ürünü yalnızca **sıcaklık sapmasını** gösterir: bir piksel,
+kendi baseline'ına göre ne kadar sıcak/soğuk? Ancak ham yüzey sıcaklığı tek başına
+kuruluğu temsil etmekte zayıftır, çünkü sıcaklık bitki örtüsü yoğunluğuna güçlü
+bağlıdır — çıplak/seyrek toprak doğal olarak sıcak, yoğun bitki örtüsü doğal olarak
+serindir.
 
-## Phase 2 (sonraki adımlar — henüz değil)
+TVDI, **LST ile NDVI arasındaki ilişkiyi** kullanarak bu bağımlılığı normalize eder.
+Aynı NDVI seviyesindeki pikselleri kendi içinde kıyaslayıp, bir pikselin o bitki
+örtüsü sınıfı için ne kadar "kuru/sıcak uç"ta olduğunu ölçer. Bu sayede TVDI, bitki
+örtüsü durumuna göre düzeltilmiş bir **termal kuruluk** temsili verir.
 
-* **Yanmış alan doğrulama**: `validation_burned_area.py` skeleton'u MCD64A1
-  (500 m), FireCCI51 (250 m) ve FIRMS/MCD14ML aktif yangın için GEE collection
-  helper'larını tanımlar. Bir sezonun kuruluk/TVDI katmanı aynı sezonun yanmış
-  alanıyla çakıştırılıp yanan vs yanmayan piksellerde ayrışma (ROC/AUC) ölçülecek.
+Bu fiziksel düzeltme nedeniyle TVDI, çıplak LST z-score'a kıyasla yangınla daha güçlü
+bir fiziksel bağ kuran bir **aday kuruluk göstergesi (candidate dryness indicator)**
+olabilir. Bu hipotez henüz doğrulanmamıştır; yanmış alan kayıtlarına karşı test
+edilmesi gerekir (bkz. *Next validation step*).
+
+## TVDI formülü
+
+Her piksel için, o pikselin NDVI değerinin düştüğü NDVI aralığı (bin) içindeki LST
+dağılımının uçları kullanılır:
+
+```
+TVDI = (LST - LST_wet_edge) / (LST_dry_edge - LST_wet_edge)
+```
+
+* **wet edge** — aynı NDVI aralığındaki **düşük LST sınırı** (nemli/serin uç; düşük
+  percentile, örn. p2). Su stresi olmayan, buharlaşma-terlemesi yüksek yüzeyler.
+* **dry edge** — aynı NDVI aralığındaki **yüksek LST sınırı** (kuru/sıcak uç; yüksek
+  percentile, örn. p98). Su stresi altında, buharlaşma-terlemesi kısıtlı yüzeyler.
+* **TVDI → 0**'a yakınsa: daha **nemli** / düşük kuruluk.
+* **TVDI → 1**'e yakınsa: daha **kuru** / yüksek kuruluk.
+
+TVDI değerleri `[0, 1]` aralığına clamp edilir. Bir NDVI bin'inde yeterli geçerli
+piksel yoksa veya dry/wet edge farkı çok küçükse, o pikseller NaN bırakılır
+(temporal interpolation uygulanmaz).
+
+## Step5C çıktıları (prototype / diagnostic outputs)
+
+Aşağıdaki dosyalar `outputs/step5c/` (rasterlar) ve `outputs/diagnostics/`
+(görseller) altında üretilir. Görseller şu an **final ürün değil**, prototip /
+diagnostic çıktılardır:
+
+Raster çıktıları:
+* `current_tvdi.tif` — current period TVDI (kuruluk durumu)
+* `baseline_tvdi_mean.tif` — baseline yıllarının TVDI ortalaması
+* `baseline_tvdi_std.tif` — baseline TVDI standart sapması
+* `tvdi_difference.tif` — **ham fark** ürünü: `current_tvdi - baseline_tvdi_mean`.
+  z-score'a göre yorumlanması daha kolay olan tamamlayıcı (companion) ürün.
+* `tvdi_anomaly_zscore.tif` — current TVDI'nin baseline'a göre z-score anomalisi
+  (düşük baseline std güvenilirlik kontrolünden geçirilmiş; aşağıya bakınız)
+* `baseline_tvdi_valid_count.tif` — her piksele kaç baseline yılının geçerli TVDI
+  katkısı verdiği
+* `current_tvdi_valid_count.tif` — current TVDI'ye katkı veren geçerli gözlem sayısı
+
+Diagnostic görselleri (Step5B üretir):
+* `current_tvdi_map.png`
+* `baseline_tvdi_mean_map.png`
+* `baseline_tvdi_std_map.png`
+* `tvdi_difference_map.png`
+* `tvdi_anomaly_zscore_map.png`
+* `tvdi_anomaly_histogram.png`
+
+## TVDI z-score güvenilirlik kontrolü (baseline std reliability)
+
+TVDI z-score, `(current_tvdi - baseline_tvdi_mean) / baseline_tvdi_std` ile
+hesaplanır. Burada bir kırılganlık vardır: **baseline TVDI std çok küçükse**, küçük
+bir paydaya bölme nedeniyle z-score yapay olarak şişer ve `|z| > 3` oranı
+gerçekçi olmayan seviyelere çıkar.
+
+Bunu ele almak için Step5C, std'yi yapay olarak epsilon ile şişirmek yerine
+**düşük-std piksellerini maskeler**:
+
+* Config'de `MIN_TVDI_BASELINE_STD` (varsayılan `0.05`) eşiği tanımlıdır.
+* Bir pikselde `baseline_tvdi_std < MIN_TVDI_BASELINE_STD` ise o piksel için
+  `tvdi_anomaly_zscore` NaN bırakılır.
+* Sıfıra bölme yalnız çok küçük bir sayısal epsilon (`1e-9`) ile önlenir; bu
+  epsilon güvenilirlik maskelemesinin yerini tutmaz, sadece sayısal güvenlik içindir.
+* Step5C metadata'sı kaç pikselin bu nedenle maskelendiğini
+  (`low_tvdi_std_masked_pixel_count`) ve oranını raporlar; Step5B summary'si
+  maskeleme öncesi/sonrası `|tvdi_z| > 2` ve `|tvdi_z| > 3` oranlarını yazar.
+* `|tvdi_z| > 3` oranı %10'un üzerindeyse Step5B summary'sine bir **instabilite
+  uyarısı** eklenir (baseline std çok düşük veya baseline örnek sayısı yetersiz
+  olabilir).
+
+Bu nedenle çıplak z-score'a ek olarak `tvdi_difference.tif` daha sağlam ve
+yorumlanabilir bir tamamlayıcı ürün olarak sağlanır.
+
+## LST anomaly vs TVDI anomaly farkı
+
+Projede artık iki ayrı anomali ürünü bir arada bulunur:
+
+* `thermal_anomaly_zscore.tif` (Step5) — **sıcaklık anomalisi**. Pikselin baseline'ına
+  göre LST sapması. NDVI'ye göre düzeltme yoktur.
+* `tvdi_anomaly_zscore.tif` (Step5C) — **NDVI'ye göre normalize edilmiş kuruluk
+  anomalisi**. Bitki örtüsü etkisi giderildikten sonra kalan kuruluk sapması.
+
+İkisi farklı şeyleri ölçer ve bu fark kasıtlıdır. Yangın doğrulama aşamasında
+**TVDI anomaly, ana aday predictor (candidate predictor)** olarak değerlendirilecek;
+LST anomaly ise referans/karşılaştırma tabanı olarak korunacaktır. z-score'a ek
+olarak `tvdi_difference.tif` (current_tvdi − baseline_tvdi_mean), düşük baseline std
+kaynaklı şişmeden etkilenmediği için daha sağlam bir tamamlayıcı göstergedir.
+
+## Interpretation status
+
+* Step5C çıktıları küçük Kozan AOI üzerinde başarıyla üretildi (*Step5C outputs have
+  been generated successfully on the small Kozan AOI*).
+* Current TVDI ve baseline TVDI haritaları tutarlı mekansal desenler gösteriyor
+  (*coherent spatial patterns*).
+* TVDI anomaly **henüz doğrulanmış bir yangın-riski ürünü olarak değerlendirilmiyor**
+  (*not yet treated as a validated fire-risk product*). Bu sürüm bir **first
+  TVDI-based dryness prototype**'tır.
+* Bir sonraki adım, TVDI'nin yanmış alan ve aktif yangın veri kümelerine karşı
+  doğrulanmasıdır (*TVDI will be validated against burned-area records*).
+
+# Step6: Burned-Area Association Test (ilk doğrulama)
+
+`step6_validate_fire_relation.py`, predictor rasterlarını aynı sezon/AOI yanmış
+alan etiketlerine karşı test eden **ilk burned-area ilişki (association)
+testidir**. Bu bir yangın-riski MODELİ değildir ve RF/XGBoost eğitmez.
+
+## Test edilen predictor'lar
+
+* `thermal_anomaly_zscore.tif` (Step5) — LST sıcaklık anomalisi
+* `current_tvdi.tif` (Step5C) — sürekli kuruluk göstergesi
+* `tvdi_difference.tif` (Step5C) — sürekli fark göstergesi (current − baseline mean)
+* `tvdi_anomaly_zscore.tif` (Step5C) — güvenilirlik-filtreli anomali
+
+## Etiket kaynakları (GEE)
+
+* **MCD64A1** — MODIS yanmış alan (500 m, aylık)
+* **FireCCI51** — ESA CCI FireCCI 5.1 yanmış alan (250 m, varsa)
+* **FIRMS / MCD14ML** — aktif yangın (opsiyonel, `VALIDATION_INCLUDE_FIRMS`)
+
+## Validation modları
+
+Step6 iki mod destekler (`VALIDATION_MODE`):
+
+* **same_season** — predictor rasterları ve yanmış alan etiketleri AYNI sezon
+  penceresinden alınır. İlk burned-area ilişki (association) testidir; predictor
+  ile label aynı dönemde çakıştırılır.
+* **pre_fire** — predictor window ve label window AYRIDIR. Yangından önceki
+  kuruluk sinyalinin, sonraki yanmış alanlarla ilişkisini test etmek içindir.
+  Varsayılan örnek: predictor window `2023-06-01 -> 2023-07-31`, label window
+  `2023-08-01 -> 2023-10-31`.
+
+pre_fire modu bilimsel olarak yalnızca predictor rasterları gerçekten o predictor
+window'a göre üretilmişse anlamlıdır. Mevcut Step5/Step5C çıktıları farklı bir
+current period'dan geliyorsa summary.md bir uyarı yazar ("Predictor rasters may
+not match the configured pre-fire predictor window; regenerate Step5/Step5C ...").
+
+## Akış
+
+1. Validation moduna göre predictor ve label pencereleri belirlenir.
+2. Yanmış alan etiketleri label window için GEE'den çekilir.
+3. Etiketler binary rasterlara çevrilir (burned=1, unburned=0) ve predictor
+   grid'ine resample edilir (nearest).
+4. NaN predictor pikselleri ve geçersiz etiketler dışlanır.
+5. Sınıf dengesizliği için yanmayan pikseller alt-örneklenir; hem **full** hem
+   **balanced** metrikler raporlanır.
+6. Her predictor için: burned/unburned mean & median, ROC eğrisi, AUC.
+
+LST anomaly predictor dosya adı esnek tanınır: `thermal_anomaly_zscore.tif`
+veya `anomaly_zscore.tif` (ilk bulunan kullanılır).
+
+## Çıktılar
+
+* `outputs/validation/validation_summary.md`
+* `outputs/validation/validation_stats.json`
+* `outputs/validation/roc_curve_comparison.png`
+* `outputs/validation/burned_vs_unburned_boxplot.png`
+* `outputs/validation/predictor_maps_with_burn_overlay.png` (mümkünse)
+
+## Önemli yorum notları
+
+* `current_tvdi` ve `tvdi_difference` **sürekli kuruluk göstergeleri** olarak ele
+  alınır.
+* `tvdi_anomaly_zscore` güvenilirlik-filtreli ve yoğun maskelidir; geçerli örnek
+  sayısı **ayrı raporlanır** ve sürekli predictor'lardan çok daha küçüktür. AUC
+  karşılaştırmasında bu göz önünde bulundurulmalıdır.
+* AUC > 0.5, predictor ile yanmış alan arasında pozitif ilişki olduğunu gösterir;
+  bu **ön ilişki kanıtıdır**, doğrulanmış bir yangın-riski ürünü değildir.
+* Seçili AOI/sezonda hiç yanmış piksel yoksa Step6 net bir hata verir ve AOI'yi
+  genişletmeyi veya sezonu değiştirmeyi önerir.
+
+## JSON çıktı formatı
+
+`validation_stats.json` **kompakt özet formatındadır**. Full per-pixel array'ler
+ve full ROC array'leri JSON'a YAZILMAZ — ROC eğrileri PNG olarak kaydedilir.
+JSON'da her predictor için yalnız özet metrikler (valid_paired_pixels,
+burned/unburned count, mean/median, auc_full, auc_balanced, source_file) ve
+küçük bir downsample'lı `roc_curve_preview` (≤ `VALIDATION_MAX_ROC_PREVIEW_POINTS`
+nokta) tutulur. Bu sayede JSON boyutu milyonlarca pikselde bile birkaç MB'ın
+altında kalır.
+
+## Yanmış alan etiket kaynakları
+
+* **MCD64A1** ana label kaynağıdır (500 m, aylık).
+* **FireCCI51** yalnız istenen label window dataset kapsamındaysa denenir.
+  FireCCI51 yakın yıllarda (örn. 2023) veri döndürmediği için, label window
+  kapsam dışındaysa Earth Engine'e SORULMADAN skip edilir ve summary'de
+  "FireCCI51 skipped: requested label window outside dataset availability."
+  olarak raporlanır. 2023 validation için MCD64A1 ana label kaynağıdır.
+* Boş collection / bandsiz image kontrolleri (collection.size, bandNames().size)
+  korunur; `.gt()` asla boş image üzerinde çağrılmaz.
+
+## Diğer ileri adımlar (Phase 2+)
+
 * **DEM** (SRTM/Copernicus): yükseklik + eğim hem değişken hem downscaling girdisi.
 * **MODIS downscaling**: 1 km MODIS'in NDVI + DEM ile 30 m'ye indirgenmesi.
 * **Kayan pencere**: "current state"in tek snapshot yerine sezon boyunca kayan
   pencere + sürekli doğrulama döngüsüne çevrilmesi.
+* **RF/XGBoost**: çok-değişkenli yangın duyarlılık modeli (bu association testi
+  olumlu sonuç verirse).
