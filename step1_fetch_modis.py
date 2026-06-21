@@ -15,7 +15,13 @@ from pathlib import Path
 
 import ee
 
-from core.config import *
+from core.config import (
+    GEE_PROJECT,
+    MODIS_COLLECTION,
+    REGION_NAME,
+    START_DATE,
+    END_DATE,
+)
 from core.gee_utils import init_gee
 from core.regions import build_regions
 from core.io_utils import setup_logger

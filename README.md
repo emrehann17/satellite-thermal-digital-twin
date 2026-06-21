@@ -537,3 +537,35 @@ Bu repo şu anda tamamlanmış bir 3B termal dijital ikiz sistemi değildir. Mev
 * Step5 çıktılarının büyük veri ile daha güçlü doğrulanması
 
 Bu eksikler giderildikçe proje daha güçlü 2B/3B termal temsil ve risk analizi katmanlarına doğru genişletilecektir.
+---
+
+# Next scientific direction: TVDI + burned area validation
+
+Projenin bir sonraki bilimsel yönü, çıplak LST anomalisinden çıkıp yangınla fiziksel bağı kurulmuş bir kuruluk/termal durum temsiline geçmektir.
+
+## Phase 1 (bu sürümde eklendi)
+
+* **NDVI**: Step3'e Landsat 8 C2L2 Red/NIR (SR_B4/SR_B5) bantlarından, LST ile
+  aynı QA mask / grid / pencere mantığıyla NDVI üretimi eklendi. Current period
+  için `current_ndvi_median.tif`, baseline yılları için pencere-simetrik NDVI
+  median composite'leri export edilir.
+* **TVDI (basit/ilk sürüm)**: `step5c_tvdi.py` yeni bir ürün olarak eklendi.
+  LST-NDVI scatter üzerinden NDVI bin'leri kurulur; her bin için wet edge (düşük
+  LST percentile) ve dry edge (yüksek LST percentile) hesaplanır. TVDI =
+  (LST - wet_edge) / (dry_edge - wet_edge), [0, 1] aralığına clamp edilir.
+  Çıktılar: `current_tvdi.tif`, `baseline_tvdi_mean.tif`, `baseline_tvdi_std.tif`,
+  `tvdi_anomaly_zscore.tif`. Temporal interpolation yapılmaz; yetersiz gözlemde
+  NaN bırakılır.
+* Mevcut LST anomaly pipeline'ı (Step5/Step5B) silinmedi; TVDI ayrı ürün olarak
+  eklendi ve onların çıktılarını okur ama üzerine yazmaz.
+
+## Phase 2 (sonraki adımlar — henüz değil)
+
+* **Yanmış alan doğrulama**: `validation_burned_area.py` skeleton'u MCD64A1
+  (500 m), FireCCI51 (250 m) ve FIRMS/MCD14ML aktif yangın için GEE collection
+  helper'larını tanımlar. Bir sezonun kuruluk/TVDI katmanı aynı sezonun yanmış
+  alanıyla çakıştırılıp yanan vs yanmayan piksellerde ayrışma (ROC/AUC) ölçülecek.
+* **DEM** (SRTM/Copernicus): yükseklik + eğim hem değişken hem downscaling girdisi.
+* **MODIS downscaling**: 1 km MODIS'in NDVI + DEM ile 30 m'ye indirgenmesi.
+* **Kayan pencere**: "current state"in tek snapshot yerine sezon boyunca kayan
+  pencere + sürekli doğrulama döngüsüne çevrilmesi.

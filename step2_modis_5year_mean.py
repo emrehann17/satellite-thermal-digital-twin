@@ -120,7 +120,7 @@ def process_summer_mean(
         "date_start": start,
         "date_end": end,
         "months": f"{month_start}-{month_end}",
-        "baseline_years": f"{month_start}-{month_end}",
+        "baseline_years": f"{start[:4]}-{end[:4]}",
         "baseline_metrics": ["mean", "stdDev"],
         "image_count": count,
         "first_image_date": first_date,

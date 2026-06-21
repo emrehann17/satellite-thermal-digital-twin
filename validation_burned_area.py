@@ -1,0 +1,142 @@
+"""
+validation_burned_area.py
+
+Yanmış alan / aktif yangın doğrulama SKELETON'u (Phase 2 için taslak).
+
+Bu modül henüz AĞIR validation yapmaz. Amacı, TVDI/dryness katmanını yangın
+kayıtlarıyla çakıştırma (ROC/AUC) adımına temel oluşturacak GEE collection
+helper'larını tek yerde tanımlamaktır.
+
+Kapsanan kaynaklar:
+    - MCD64A1   : MODIS yanmış alan (500 m, aylık)        -> BurnDate bandı
+    - FireCCI51 : ESA CCI FireCCI 5.1 yanmış alan (250 m)  -> BurnDate bandı
+    - FIRMS     : aktif yangın (MODIS/MCD14ML türevi, günlük) -> T21 bandı
+
+Phase 2'de yapılacaklar (henüz DEĞİL):
+    - Bir sezonun TVDI/dryness katmanını aynı sezonun yanmış alanıyla çakıştır.
+    - Yanan vs yanmayan piksellerde TVDI ayrışmasını ölç (ROC/AUC).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+import ee
+
+from core.config import (
+    ENABLE_BURNED_AREA_VALIDATION,
+    FIRECCI51_BURNDATE_BAND,
+    FIRECCI51_COLLECTION,
+    FIRMS_COLLECTION,
+    FIRMS_FIRE_BAND,
+    MCD64A1_BURNDATE_BAND,
+    MCD64A1_COLLECTION,
+)
+from core.io_utils import setup_logger
+
+
+log, log_file = setup_logger("validation_burned_area")
+
+
+def get_mcd64a1_burned_area(
+    region: ee.Geometry,
+    start: str,
+    end: str,
+) -> ee.Image:
+    """
+    MCD64A1 (500 m) yanmış alan maskesi taslağı.
+
+    BurnDate > 0 olan pikseller yanmış kabul edilir. Verilen tarih aralığındaki
+    aylık ürünler birleştirilip tek bir "yanmış mı" maskesine indirgenir.
+    """
+    collection = (
+        ee.ImageCollection(MCD64A1_COLLECTION)
+        .filterBounds(region)
+        .filterDate(start, end)
+        .select(MCD64A1_BURNDATE_BAND)
+    )
+    burned = collection.max().gt(0).rename("MCD64A1_burned").clip(region)
+    return burned
+
+
+def get_firecci51_burned_area(
+    region: ee.Geometry,
+    start: str,
+    end: str,
+) -> ee.Image:
+    """
+    FireCCI51 (250 m) yanmış alan maskesi taslağı.
+
+    BurnDate > 0 olan pikseller yanmış kabul edilir.
+    """
+    collection = (
+        ee.ImageCollection(FIRECCI51_COLLECTION)
+        .filterBounds(region)
+        .filterDate(start, end)
+        .select(FIRECCI51_BURNDATE_BAND)
+    )
+    burned = collection.max().gt(0).rename("FireCCI51_burned").clip(region)
+    return burned
+
+
+def get_firms_active_fire(
+    region: ee.Geometry,
+    start: str,
+    end: str,
+) -> ee.Image:
+    """
+    FIRMS aktif yangın yoğunluğu taslağı.
+
+    T21 (parlaklık sıcaklığı) bandının maksimumu alınır; aktif yangın sinyalinin
+    mekansal izini verir. Phase 2'de eşikleme/temizleme eklenebilir.
+    """
+    collection = (
+        ee.ImageCollection(FIRMS_COLLECTION)
+        .filterBounds(region)
+        .filterDate(start, end)
+        .select(FIRMS_FIRE_BAND)
+    )
+    active_fire = collection.max().rename("FIRMS_active_fire").clip(region)
+    return active_fire
+
+
+def build_validation_inputs(
+    region: ee.Geometry,
+    start: str,
+    end: str,
+) -> dict:
+    """
+    Üç kaynağı tek dict'te toplayan üst seviye taslak.
+
+    NOT: Bu fonksiyon yalnız ee.Image nesneleri kurar; export/indirme/ROC-AUC
+    yapmaz. ENABLE_BURNED_AREA_VALIDATION False ise erken döner.
+    """
+    if not ENABLE_BURNED_AREA_VALIDATION:
+        log.info(
+            "Burned-area validation kapalı (ENABLE_BURNED_AREA_VALIDATION=False). "
+            "Skeleton hazır; Phase 2'de açılacak."
+        )
+        return {
+            "enabled": False,
+            "created_at": datetime.now().isoformat(),
+            "note": "validation skeleton only; no images built",
+        }
+
+    log.info("Burned-area validation girdileri kuruluyor: %s -> %s", start, end)
+    return {
+        "enabled": True,
+        "created_at": datetime.now().isoformat(),
+        "mcd64a1_burned": get_mcd64a1_burned_area(region, start, end),
+        "firecci51_burned": get_firecci51_burned_area(region, start, end),
+        "firms_active_fire": get_firms_active_fire(region, start, end),
+        "sources": {
+            "mcd64a1": {"collection": MCD64A1_COLLECTION, "resolution_m": 500},
+            "firecci51": {"collection": FIRECCI51_COLLECTION, "resolution_m": 250},
+            "firms": {"collection": FIRMS_COLLECTION, "resolution_m": 1000},
+        },
+    }
+
+
+if __name__ == "__main__":
+    log.info("validation_burned_area skeleton modülü. Phase 2'de doldurulacak.")
+    log.info("Tanımlı kaynaklar: MCD64A1, FireCCI51, FIRMS.")

@@ -30,8 +30,10 @@ from core.config import (
     EXPORT_CRS,
     MODIS_EXPORT,
     LANDSAT_EXPORT,
+    LANDSAT_NDVI_EXPORT,
     ENABLE_MODIS_EXPORT,
     ENABLE_LANDSAT_EXPORT,
+    ENABLE_NDVI_EXPORT,
     DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT,
     DRIVE_TASK_POLLING_ENABLED,
     DRIVE_TASK_POLL_INTERVAL_SECONDS,
@@ -183,7 +185,7 @@ def export_image_to_drive(
 # 2. LANDSAT DAILY LST+QA EXPORT 
 # =============================================================================
 def export_landsat_timeseries_lst_and_qa_to_drive(
-collection: ee.ImageCollection,
+    collection: ee.ImageCollection,
     date_list: list[str],
     region: ee.Geometry,
     folder: str,
@@ -304,6 +306,96 @@ collection: ee.ImageCollection,
         })
 
     return export_metadata
+
+
+# =============================================================================
+# 2b. NDVI BASELINE TIMESERIES EXPORT (tek bant NDVI median)
+# =============================================================================
+def export_ndvi_timeseries_to_drive(
+    collection: ee.ImageCollection,
+    date_list: list[str],
+    region: ee.Geometry,
+    folder: str,
+    file_prefix: str,
+    scale: int = LANDSAT_NDVI_EXPORT["scale"],
+    crs: str = EXPORT_CRS,
+    max_exports: int | None = 20,
+) -> list[dict]:
+    """
+    NDVI pencere-simetrik baseline collection'ındaki her görüntü için NDVI bandını
+    Google Drive'a export eder. LST timeseries export ile aynı limit/sort mantığını
+    kullanır; QA bandı ayrı export edilmez çünkü NDVI zaten QA-maskeli üretilir.
+    """
+    if not date_list:
+        log.warning("NDVI date_list boş geldi. NDVI export başlatılmadı.")
+        return []
+
+    export_count = len(date_list) if max_exports is None else min(len(date_list), max_exports)
+    if export_count == 0:
+        log.warning("NDVI export_count = 0. NDVI export başlatılmadı.")
+        return []
+
+    log.info(f"Export edilecek baseline NDVI görüntü sayısı: {export_count}")
+
+    limited_collection = (
+        collection
+        .sort("export_date")
+        .limit(export_count)
+    )
+    collection_list = limited_collection.toList(export_count)
+    export_metadata = []
+
+    for i in range(export_count):
+        image = ee.Image(collection_list.get(i))
+        date_text = date_list[i]
+
+        ndvi_image = image.select("NDVI")
+        ndvi_description = f"export_{file_prefix}_{date_text}"
+        ndvi_file_name = f"{file_prefix}_{date_text}"
+
+        log.info(f"[{i + 1}/{export_count}] NDVI Drive export: {ndvi_file_name}")
+
+        ndvi_task = ee.batch.Export.image.toDrive(
+            image=ndvi_image,
+            description=ndvi_description,
+            folder=folder,
+            fileNamePrefix=ndvi_file_name,
+            region=region,
+            scale=scale,
+            crs=crs,
+            maxPixels=1e13,
+            fileFormat="GeoTIFF",
+        )
+        ndvi_task.start()
+        ndvi_status = ndvi_task.status()
+
+        ndvi_meta = {
+            "band": "NDVI",
+            "description": ndvi_description,
+            "file_name_prefix": ndvi_file_name,
+            "task_id": ndvi_status.get("id"),
+            "task_state": ndvi_status.get("state"),
+        }
+
+        register_drive_task(
+            task=ndvi_task,
+            metadata_ref=ndvi_meta,
+            description=ndvi_description,
+            file_name_prefix=ndvi_file_name,
+            output_group="baseline_ndvi",
+        )
+
+        export_metadata.append({
+            "date": date_text,
+            "mode": "drive",
+            "folder": folder,
+            "scale": scale,
+            "crs": crs,
+            "ndvi": ndvi_meta,
+        })
+
+    return export_metadata
+
 
 # =============================================================================
 # 3. DRIVE TASK POLLING VE GEEMAP İNDİRME
@@ -469,6 +561,10 @@ def main(step3_result: dict | None = None) -> None:
     landsat_processing_metadata = None
     current_period_export = None
     current_period_metadata = None
+    ndvi_timeseries_exports = []
+    ndvi_processing_metadata = None
+    current_ndvi_export = None
+    current_ndvi_metadata = None
     drive_task_polling_metadata = {
         "enabled": DRIVE_TASK_POLLING_ENABLED,
         "task_count": 0,
@@ -522,7 +618,39 @@ def main(step3_result: dict | None = None) -> None:
             file_name_prefix=f"landsat_current_period_{CURRENT_PERIOD_DAYS}days",
             scale=LANDSAT_EXPORT["scale"]
         )
-        
+
+        # NDVI ürünleri (yeni bilimsel yön): baseline timeseries + current median.
+        if ENABLE_NDVI_EXPORT and "ndvi_timeseries" in step3_result:
+            log.info("\nNDVI baseline timeseries ve current median export ediliyor.")
+            ndvi_collection = step3_result["ndvi_timeseries"]
+            ndvi_processing_metadata = step3_result["ndvi_metadata"]
+            current_ndvi_image = step3_result["current_ndvi"]
+            current_ndvi_metadata = step3_result["current_ndvi_metadata"]
+
+            ndvi_timeseries_exports = export_ndvi_timeseries_to_drive(
+                collection=ndvi_collection,
+                date_list=ndvi_processing_metadata["daily_dates"],
+                region=region,
+                folder=EXPORT_FOLDER,
+                file_prefix=LANDSAT_NDVI_EXPORT["file_name_prefix"],
+                scale=LANDSAT_NDVI_EXPORT["scale"],
+                max_exports=MAX_LANDSAT_DAILY_EXPORTS,
+            )
+
+            current_ndvi_export = export_image_to_drive(
+                image=current_ndvi_image,
+                region=region,
+                description=f"export_current_ndvi_median_{CURRENT_PERIOD_DAYS}days",
+                folder=EXPORT_FOLDER,
+                file_name_prefix="current_ndvi_median",
+                scale=LANDSAT_NDVI_EXPORT["scale"],
+            )
+        elif ENABLE_NDVI_EXPORT:
+            log.warning(
+                "ENABLE_NDVI_EXPORT açık ama step3_result NDVI çıktısı içermiyor; "
+                "NDVI export atlandı."
+            )
+
     else:
         log.info("Landsat export devre dışı bırakıldı.")
 
@@ -566,17 +694,22 @@ def main(step3_result: dict | None = None) -> None:
         "download_required_before_step5": download_required_before_step5,
         "enabled_exports": {
             "modis": ENABLE_MODIS_EXPORT,
-            "landsat": ENABLE_LANDSAT_EXPORT
+            "landsat": ENABLE_LANDSAT_EXPORT,
+            "ndvi": ENABLE_NDVI_EXPORT
         },
         "processing": {
             "modis": modis_processing_metadata,
             "landsat_baseline_timeseries": landsat_processing_metadata,
-            "landsat_current_period": current_period_metadata
+            "landsat_current_period": current_period_metadata,
+            "ndvi_baseline_timeseries": ndvi_processing_metadata,
+            "ndvi_current_period": current_ndvi_metadata
         },
         "exports": {
             "modis": modis_export_metadata,
             "landsat_baseline_timeseries": landsat_timeseries_exports,
-            "landsat_current_period": current_period_export
+            "landsat_current_period": current_period_export,
+            "ndvi_baseline_timeseries": ndvi_timeseries_exports,
+            "ndvi_current_period": current_ndvi_export
         },
         "drive_task_polling": drive_task_polling_metadata,
         "drive_download": drive_download_metadata,

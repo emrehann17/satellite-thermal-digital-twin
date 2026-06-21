@@ -11,7 +11,23 @@ dosyalarını mekansal pencereler halinde işler. Yaklaşık tepe bellek kullan�
 tam raster yığını yerine yalnızca pencere yığını ve birkaç çıktı bloğu
 """
 
-from core.config import *
+from core.config import (
+    BASELINE_END_DATE,
+    BASELINE_START_DATE,
+    CURRENT_PERIOD_DAYS,
+    CURRENT_PERIOD_END_DATE,
+    ENABLE_MODIS_STEP5_CONTEXT,
+    LANDSAT_EXPORT,
+    LANDSAT_OFFSET,
+    LANDSAT_SCALE,
+    MODIS_EXPORT,
+    STEP5_MIN_BASELINE_STD_CELSIUS,
+    STEP5_MIN_BASELINE_VALID_COUNT,
+    STEP5_MIN_CURRENT_VALID_COUNT,
+    STEP5_MIN_MODIS_STD_CELSIUS,
+    STEP5_WINDOW_SIZE,
+    STEP5_WRITE_INTERPOLATED_NETCDF,
+)
 from core.io_utils import setup_logger
 
 import json
@@ -874,14 +890,14 @@ def write_metadata(
     times = result["times"]
     tif_files = result["tif_files"]
     output_paths = result["output_paths"]
-    baseline_netcdf = None
+    baseline_netcdf = None  # NetCDF çıktısı henüz desteklenmiyor
 
     if STEP5_WRITE_INTERPOLATED_NETCDF:
         log.warning(
-            "STEP5_WRITE_INTERPOLATED_NETCDF=True istendi; ancak bellek dostu "
-            "Step5 akışı şu anda NetCDF yazmıyor. Raster çıktıları windowed "
-            "işleme ile yazıldı."
+            "STEP5_WRITE_INTERPOLATED_NETCDF=True istendi; ancak windowed Step5 "
+            "akışı şu anda NetCDF yazmıyor. Raster çıktıları GeoTIFF olarak yazıldı."
         )
+        baseline_netcdf = "not_implemented"
 
     metadata = {
         "step": "step5_preprocess_timeseries",

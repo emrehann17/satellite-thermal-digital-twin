@@ -22,6 +22,7 @@ from core.config import (
     GOOGLE_DRIVE_EXPORT_FOLDER_ID,
     GOOGLE_DRIVE_EXPORT_FOLDER_URL,
     LANDSAT_EXPORT,
+    LANDSAT_NDVI_EXPORT,
     MODIS_EXPORT,
 )
 from core.io_utils import setup_logger
@@ -68,19 +69,23 @@ def resolve_drive_folder_reference() -> tuple[str | None, str | None]:
     return folder_url, folder_id
 
 
-def ensure_step5_data_dirs() -> tuple[Path, Path, Path, Path]:
+def ensure_step5_data_dirs() -> tuple[Path, Path, Path, Path, Path, Path]:
     """İndirilen rasterlar için Step5'in beklediği yerel veri klasörlerini hazırlar."""
     lst_dir = BASE_DIR / "data" / "landsat_timeseries"
     qa_dir = BASE_DIR / "data" / "landsat_qa"
     current_dir = BASE_DIR / "data" / "current_period"
     modis_dir = BASE_DIR / "data" / "modis"
+    ndvi_baseline_dir = BASE_DIR / "data" / "ndvi_timeseries"
+    ndvi_current_dir = BASE_DIR / "data" / "ndvi_current_period"
 
     lst_dir.mkdir(parents=True, exist_ok=True)
     qa_dir.mkdir(parents=True, exist_ok=True)
     current_dir.mkdir(parents=True, exist_ok=True)
     modis_dir.mkdir(parents=True, exist_ok=True)
+    ndvi_baseline_dir.mkdir(parents=True, exist_ok=True)
+    ndvi_current_dir.mkdir(parents=True, exist_ok=True)
 
-    return lst_dir, qa_dir, current_dir, modis_dir
+    return lst_dir, qa_dir, current_dir, modis_dir, ndvi_baseline_dir, ndvi_current_dir
 
 
 def copy_with_overwrite_control(source_path: Path, target_path: Path) -> None:
@@ -107,12 +112,25 @@ def is_landsat_qa_export_name(filename: str) -> bool:
 
 def classify_downloaded_tif(source_path: Path) -> tuple[str, Path] | None:
     """İndirilen GeoTIFF'i Step5 data klasörlerinden doğru hedefe sınıflandırır."""
-    lst_dir, qa_dir, current_dir, modis_dir = ensure_step5_data_dirs()
+    (
+        lst_dir,
+        qa_dir,
+        current_dir,
+        modis_dir,
+        ndvi_baseline_dir,
+        ndvi_current_dir,
+    ) = ensure_step5_data_dirs()
     name = source_path.name
     lower_name = name.lower()
 
     if is_landsat_qa_export_name(name):
         return "baseline_qa", qa_dir / name
+
+    if lower_name.startswith("current_ndvi_median"):
+        return "ndvi_current_period", ndvi_current_dir / name
+
+    if lower_name.startswith(LANDSAT_NDVI_EXPORT["file_name_prefix"].lower()):
+        return "ndvi_baseline", ndvi_baseline_dir / name
 
     if lower_name.startswith("landsat_current_period_"):
         return "current_period", current_dir / name
@@ -139,6 +157,8 @@ def place_downloaded_drive_tifs(staging_dir: Path) -> dict:
         "baseline_qa": [],
         "current_period": [],
         "modis": [],
+        "ndvi_baseline": [],
+        "ndvi_current_period": [],
         "unmatched": [],
     }
 

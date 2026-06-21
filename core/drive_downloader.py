@@ -13,7 +13,6 @@ GEE Drive export task'lerini otomatik olarak takip edip indiren modül.
 import time
 import json
 from pathlib import Path
-from typing import Optional, List, Dict
 import logging
 
 import ee
@@ -25,6 +24,14 @@ except ImportError:
     GEEMAP_AVAILABLE = False
     print("WARNING: geemap not installed. Auto-drive mode will not work.")
     print("Install with: pip install geemap")
+
+try:
+    import gdown
+    GDOWN_AVAILABLE = True
+except ImportError:
+    GDOWN_AVAILABLE = False
+    print("WARNING: gdown not installed. Drive file download will not work.")
+    print("Install with: pip install gdown")
 
 
 log = logging.getLogger(__name__)
@@ -39,7 +46,7 @@ class TaskPoller:
         self,
         check_interval: int = 30,
         timeout: int = 3600,
-        output_dir: Optional[Path] = None
+        output_dir: Path | None = None
     ):
         """
         Args:
@@ -109,7 +116,7 @@ class TaskPoller:
         log.error(f"✗ Task timeout: {description} ({self.timeout}s)")
         return False
     
-    def wait_for_tasks(self, tasks: List[ee.batch.Task]) -> Dict[str, bool]:
+    def wait_for_tasks(self, tasks: list[ee.batch.Task]) -> dict[str, bool]:
         """
         Birden fazla task'in tamamlanmasını bekler.
         
@@ -145,47 +152,76 @@ class TaskPoller:
     def download_from_drive(
         self,
         filename: str,
-        output_subdir: Optional[str] = None
-    ) -> Optional[Path]:
+        output_subdir: str | None = None,
+        file_id: str | None = None,
+    ) -> Path | None:
         """
-        Google Drive'dan dosya indirir (geemap kullanarak).
-        
+        Google Drive'dan dosya indirir.
+
+        Önce gdown (file_id ile direkt indirme) denenir.
+        file_id verilmemişse geemap Drive API üzerinden arama yapılır.
+
         Args:
-            filename: Drive'daki dosya adı (uzantısız)
-            output_subdir: Alt klasör adı (opsiyonel)
-            
+            filename:    Drive'daki dosya adı (uzantısız, ör. "landsat_lst_kozan_2023-07-15")
+            output_subdir: Çıktı alt klasörü (opsiyonel)
+            file_id:     Google Drive dosya ID'si (biliniyorsa direkt indirim)
+
         Returns:
-            İndirilen dosyanın path'i veya None (başarısız ise)
+            İndirilen dosyanın Path'i ya da None (başarısızsa)
         """
-        try:
-            output_dir = self.output_dir
-            if output_subdir:
-                output_dir = output_dir / output_subdir
-                output_dir.mkdir(parents=True, exist_ok=True)
-            
-            output_path = output_dir / f"{filename}.tif"
-            
-            log.info(f"Drive'dan indiriliyor: {filename}")
-            log.info(f"  Hedef: {output_path}")
-            
-            # geemap.download_file kullan
-            # Not: geemap.download_file Google Drive API kullanır
-            # Credentials gerektirir (gcloud auth veya service account)
-            
-            # Basitleştirilmiş yaklaşım: ee_export_image kullan
-            # Bu drive export yerine direkt indirmeyi dener
-            
-            log.warning(
-                "Otomatik Drive indirme henüz tam desteklenmiyor. "
-                "Manuel indirme gerekiyor."
-            )
-            
-            return None
-            
-        except Exception as e:
-            log.error(f"Drive indirme hatası: {filename}")
-            log.error(f"  {str(e)}")
-            return None
+        output_dir = self.output_dir
+        if output_subdir:
+            output_dir = output_dir / output_subdir
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+        output_path = output_dir / f"{filename}.tif"
+
+        log.info(f"Drive'dan indiriliyor: {filename}")
+        log.info(f"  Hedef: {output_path}")
+
+        # --- Yöntem 1: gdown ile direkt file_id indirimi ---
+        if file_id and GDOWN_AVAILABLE:
+            try:
+                url = f"https://drive.google.com/uc?id={file_id}"
+                result = gdown.download(url, str(output_path), quiet=False)
+                if result and output_path.exists():
+                    log.info(f"  gdown ile indirildi: {output_path}")
+                    return output_path
+                else:
+                    log.warning("  gdown indirimi başarısız; geemap deneniyor.")
+            except Exception as e:
+                log.warning(f"  gdown hatası: {e}; geemap deneniyor.")
+
+        # --- Yöntem 2: geemap Drive API ile dosya arama + indirme ---
+        if GEEMAP_AVAILABLE:
+            try:
+                drive_files = geemap.drive_list_files(name=f"{filename}.tif")
+                if not drive_files:
+                    log.warning(f"  Drive'da dosya bulunamadı: {filename}.tif")
+                    return None
+                matched = drive_files[0]
+                matched_id = matched.get("id")
+                if not matched_id:
+                    log.warning(f"  Drive dosyasının ID'si alınamadı: {filename}.tif")
+                    return None
+                geemap.download_file(
+                    url=f"https://drive.google.com/uc?id={matched_id}",
+                    output=str(output_path),
+                )
+                if output_path.exists():
+                    log.info(f"  geemap ile indirildi: {output_path}")
+                    return output_path
+                log.error(f"  geemap indirimi sonrası dosya bulunamadı: {output_path}")
+                return None
+            except Exception as e:
+                log.error(f"  geemap Drive indirme hatası: {e}")
+                return None
+
+        log.error(
+            "Drive indirme başarısız: gdown ve geemap ikisi de kullanılamıyor. "
+            "Dosyayı manuel olarak Drive'dan indirip data/ klasörüne koy."
+        )
+        return None
 
 
 def export_and_download_image(
@@ -198,7 +234,7 @@ def export_and_download_image(
     wait: bool = True,
     check_interval: int = 30,
     timeout: int = 3600
-) -> Dict:
+) -> dict:
     """
     Görüntüyü export edip otomatik olarak indirir.
     
@@ -313,10 +349,10 @@ def export_and_download_image(
 
 
 def batch_export_and_wait(
-    tasks: List[ee.batch.Task],
+    tasks: list[ee.batch.Task],
     check_interval: int = 30,
     timeout: int = 3600
-) -> Dict[str, bool]:
+) -> dict[str, bool]:
     """
     Birden fazla task'i batch olarak bekler.
     

@@ -38,20 +38,31 @@ LANDSAT_EXPORT = {
     "scale": 30,
 }
 
+# Landsat NDVI export ayarları. LST ile aynı QA mask / grid / pencere mantığı kullanılır.
+LANDSAT_NDVI_EXPORT = {
+    "file_name_prefix": "landsat_ndvi_dogu_akdeniz",
+    "scale": 30,
+}
+
 ENABLE_MODIS_EXPORT = True
 ENABLE_LANDSAT_EXPORT = True
 ENABLE_MODIS_STEP5_CONTEXT = True
 
+# NDVI ve TVDI ürünleri (yeni bilimsel yön). Mevcut LST anomaly pipeline'ından bağımsız.
+ENABLE_NDVI_EXPORT = True
+ENABLE_TVDI_STEP5 = True
+
 LANDSAT_SCALE = 0.00341802
 LANDSAT_OFFSET = 149.0
 
+# Landsat 8 Collection 2 Level 2 yüzey yansıması (SR) bantları için scale/offset.
+# SR_B4 = Red, SR_B5 = NIR. Reflectance = DN * SR_SCALE + SR_OFFSET.
+LANDSAT_SR_SCALE = 0.0000275
+LANDSAT_SR_OFFSET = -0.2
+LANDSAT_RED_BAND = "SR_B4"
+LANDSAT_NIR_BAND = "SR_B5"
+
 REGION_NAME = "kozan_aoi"  # Test için küçük bölge kullan
-
-MODIS_EXPORT_FOLDER = "B7_Thermal_Digital_Twin_MODIS"
-LANDSAT_LST_EXPORT_FOLDER = "B7_Thermal_Digital_Twin_Landsat_Timeseries"
-LANDSAT_QA_EXPORT_FOLDER = "B7_Thermal_Digital_Twin_Landsat_QA"
-
-MODIS_FILE_PREFIX = "modis_lst_dogu_akdeniz_5y_summer_mean"
 
 SUMMER_MONTH_START = 6
 SUMMER_MONTH_END = 9
@@ -98,3 +109,56 @@ STEP5_MIN_CURRENT_VALID_COUNT = 2
 # Windowed akış ana raster çıktıları üretir. Interpolated full NetCDF çıktısı
 # büyük veri için tekrar yüksek bellek/disk baskısı yaratabileceği için kapalıdır.
 STEP5_WRITE_INTERPOLATED_NETCDF = False
+
+
+# =============================================================================
+# TVDI (Temperature Vegetation Dryness Index) ayarları
+# =============================================================================
+# TVDI = (LST - wet_edge) / (dry_edge - wet_edge)
+# Her NDVI bin'i için wet_edge = düşük LST percentile, dry_edge = yüksek LST percentile.
+# TVDI offline (Step5) katmanında hesaplanır; tiling/windowed akışı bozulmaz.
+
+# NDVI ekseni bu kadar bin'e bölünür. LST-NDVI scatter üçgeni bu bin'lerle örneklenir.
+TVDI_NDVI_BIN_COUNT = 20
+
+# Geçerli NDVI aralığı. Bu aralık dışındaki pikseller TVDI'ye girmez.
+TVDI_NDVI_MIN = 0.0
+TVDI_NDVI_MAX = 1.0
+
+# Wet/dry edge percentile'ları (her NDVI bin'i içindeki LST dağılımından).
+TVDI_WET_EDGE_PERCENTILE = 2.0
+TVDI_DRY_EDGE_PERCENTILE = 98.0
+
+# Bir NDVI bin'inin edge hesabına katkı vermesi için gereken minimum geçerli piksel.
+# Az örnekli bin'ler gürültülü edge üretir; bu bin'ler edge fit'ine alınmaz.
+TVDI_MIN_PIXELS_PER_BIN = 30
+
+# dry_edge - wet_edge bu eşiğin altındaysa TVDI NaN bırakılır (sıfıra bölme koruması).
+TVDI_MIN_EDGE_SPAN_CELSIUS = 0.5
+
+# Baseline TVDI std bu eşiğin altındaysa tvdi z-score NaN bırakılır.
+TVDI_MIN_BASELINE_STD = 0.02
+
+# Bu eşiğin altında geçerli baseline TVDI gözlemi olan piksellerde z-score hesaplanmaz.
+TVDI_MIN_BASELINE_VALID_COUNT = 3
+
+
+# =============================================================================
+# Burned-area / aktif yangın validation (skeleton — Phase 2'de doldurulacak)
+# =============================================================================
+# Bu collection'lar henüz ağır validation için kullanılmaz; sadece config/helper
+# taslağı olarak tanımlanır. TVDI/dryness katmanı ile yanmış alan çakıştırması
+# (ROC/AUC) bir sonraki bilimsel adımdır.
+ENABLE_BURNED_AREA_VALIDATION = False
+
+# MODIS yanmış alan (500 m, aylık)
+MCD64A1_COLLECTION = "MODIS/061/MCD64A1"
+MCD64A1_BURNDATE_BAND = "BurnDate"
+
+# ESA FireCCI51 yanmış alan (250 m, aylık)
+FIRECCI51_COLLECTION = "ESA/CCI/FireCCI/5_1"
+FIRECCI51_BURNDATE_BAND = "BurnDate"
+
+# FIRMS aktif yangın (MODIS/MCD14ML türevi, günlük)
+FIRMS_COLLECTION = "FIRMS"
+FIRMS_FIRE_BAND = "T21"

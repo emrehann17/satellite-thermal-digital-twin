@@ -27,11 +27,16 @@ from core.config import (
     END_DATE,
     LANDSAT_SCALE,
     LANDSAT_OFFSET,
+    LANDSAT_SR_SCALE,
+    LANDSAT_SR_OFFSET,
+    LANDSAT_RED_BAND,
+    LANDSAT_NIR_BAND,
     REGION_NAME,
     CURRENT_PERIOD_DAYS,
     CURRENT_PERIOD_END_DATE,
     BASELINE_START_DATE,
-    BASELINE_END_DATE
+    BASELINE_END_DATE,
+    ENABLE_NDVI_EXPORT,
 )
 from core.gee_utils import init_gee
 from core.regions import build_regions
@@ -83,9 +88,33 @@ def apply_qa_mask(image: ee.Image) -> ee.Image:
     )
     return image.updateMask(clean_mask)
 
-# =============================================================================
-# 1. LANDSAT TIMESERIES COLLECTION ÜRETME
-# =============================================================================
+
+def add_ndvi_band(image: ee.Image) -> ee.Image:
+    """
+    Landsat 8 C2L2 yüzey yansıması (SR) bantlarından NDVI bandı üretir.
+
+    SR_B4 (Red) ve SR_B5 (NIR) DN değerleri önce reflectance'a çevrilir:
+        reflectance = DN * LANDSAT_SR_SCALE + LANDSAT_SR_OFFSET
+    Ardından:
+        NDVI = (NIR - Red) / (NIR + Red)
+
+    NDVI bandı QA maskesini miras alır (apply_qa_mask önce çağrılmalı). LST ile
+    aynı QA mask / grid / composite mantığını paylaşması için ayrı maske kurulmaz.
+    """
+    red = (
+        image.select(LANDSAT_RED_BAND)
+        .multiply(LANDSAT_SR_SCALE)
+        .add(LANDSAT_SR_OFFSET)
+    )
+    nir = (
+        image.select(LANDSAT_NIR_BAND)
+        .multiply(LANDSAT_SR_SCALE)
+        .add(LANDSAT_SR_OFFSET)
+    )
+    ndvi = nir.subtract(red).divide(nir.add(red)).rename("NDVI")
+    return image.addBands(ndvi)
+
+
 def get_landsat_daily_median_collection(
     region: ee.Geometry,
     region_name: str,
@@ -342,28 +371,38 @@ def get_current_period_median(
     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
     start_dt = end_dt - timedelta(days=window_days)
     start_date = start_dt.strftime("%Y-%m-%d")
-    
+
+    # Pencere içindeki tüm ayları hesapla; yalnızca penceredeki ayları filtrele.
+    # Sabit 6-9 filtresi, pencere yaz dışına taşarsa sıfır sahne döndürürdü.
+    window_months = sorted({
+        (start_dt.month + i) % 12 or 12
+        for i in range((end_dt - start_dt).days + 1)
+    })
+    month_start = min(window_months)
+    month_end = max(window_months)
+
     log.info(f"Current period median hazırlanıyor:")
     log.info(f"  Bölge: {region_name}")
     log.info(f"  Pencere: {start_date} -> {end_date} ({window_days} gün)")
-    
+    log.info(f"  Ay filtresi: {month_start}-{month_end}")
+
     collection = (
         ee.ImageCollection(LANDSAT_COLLECTION)
         .filterBounds(region)
         .filterDate(start_date, end_date)
-        .filter(ee.Filter.calendarRange(6, 9, "month"))  # Yaz ayları
+        .filter(ee.Filter.calendarRange(month_start, month_end, "month"))
         .select(["ST_B10", "QA_PIXEL"])
         .map(lambda img: img.clip(region))
         .map(apply_qa_mask)
         .select("ST_B10")
     )
-    
+
     scene_count = collection.size().getInfo()
-    
+
     if scene_count == 0:
         raise ValueError(
-            f"{region_name} için {start_date} - {end_date} arasında yaz aylarında "
-            f"Landsat sahnesi bulunamadı."
+            f"{region_name} için {start_date} - {end_date} arasında "
+            f"(ay filtresi: {month_start}-{month_end}) Landsat sahnesi bulunamadı."
         )
     
     log.info(f"  Current period sahne sayısı: {scene_count}")
@@ -404,7 +443,7 @@ def get_current_period_median(
         "window_end": end_date,
         "window_days": window_days,
         "scene_count": scene_count,
-        "months_filter": "6-9",
+        "months_filter": f"{month_start}-{month_end}",
         "composite_method": "median",
         "qa_mask_applied": True,
         "output_bands": [
@@ -432,6 +471,233 @@ def get_current_period_median(
     log.info("Current period median başarıyla oluşturuldu.")
     
     return current_median, metadata
+
+
+# =============================================================================
+# 2b. NDVI CURRENT PERIOD + BASELINE (LST ile aynı mask/grid/pencere mantığı)
+# =============================================================================
+def get_current_period_ndvi_median(
+    region: ee.Geometry,
+    region_name: str,
+    end_date: str,
+    window_days: int = CURRENT_PERIOD_DAYS,
+) -> tuple[ee.Image, dict]:
+    """
+    Current period için QA-maskeli NDVI median composite üretir.
+
+    LST current period ile birebir aynı pencere, ay filtresi, QA mask ve median
+    composite mantığını kullanır; tek fark NDVI bandının seçilmesidir.
+
+    Çıktı bantları:
+        - Current_Period_NDVI         : NDVI median
+        - Current_Period_NDVI_Valid_Count : QA-temiz gözlem sayısı
+    """
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    start_dt = end_dt - timedelta(days=window_days)
+    start_date = start_dt.strftime("%Y-%m-%d")
+
+    window_months = sorted({
+        (start_dt.month + i) % 12 or 12
+        for i in range((end_dt - start_dt).days + 1)
+    })
+    month_start = min(window_months)
+    month_end = max(window_months)
+
+    log.info("Current period NDVI median hazırlanıyor. Bölge: %s", region_name)
+    log.info("  Pencere: %s -> %s (%s gün)", start_date, end_date, window_days)
+    log.info("  Ay filtresi: %s-%s", month_start, month_end)
+
+    collection = (
+        ee.ImageCollection(LANDSAT_COLLECTION)
+        .filterBounds(region)
+        .filterDate(start_date, end_date)
+        .filter(ee.Filter.calendarRange(month_start, month_end, "month"))
+        .map(lambda img: img.clip(region))
+        .map(apply_qa_mask)
+        .map(add_ndvi_band)
+        .select("NDVI")
+    )
+
+    scene_count = collection.size().getInfo()
+    if scene_count == 0:
+        raise ValueError(
+            f"{region_name} için {start_date} - {end_date} arasında "
+            f"(ay filtresi: {month_start}-{month_end}) NDVI sahnesi bulunamadı."
+        )
+
+    log.info("  Current period NDVI sahne sayısı: %s", scene_count)
+
+    ndvi_valid_count = (
+        collection
+        .count()
+        .rename("Current_Period_NDVI_Valid_Count")
+        .toFloat()
+        .clip(region)
+    )
+
+    ndvi_median = (
+        collection
+        .median()
+        .rename("Current_Period_NDVI")
+        .toFloat()
+    )
+
+    current_ndvi = (
+        ndvi_median
+        .addBands(ndvi_valid_count)
+        .toFloat()
+        .clip(region)
+    )
+
+    metadata = {
+        "gee_project": GEE_PROJECT,
+        "region_name": region_name,
+        "collection": LANDSAT_COLLECTION,
+        "product": "NDVI",
+        "source_bands": [LANDSAT_RED_BAND, LANDSAT_NIR_BAND],
+        "sr_scale": LANDSAT_SR_SCALE,
+        "sr_offset": LANDSAT_SR_OFFSET,
+        "window_start": start_date,
+        "window_end": end_date,
+        "window_days": window_days,
+        "scene_count": scene_count,
+        "months_filter": f"{month_start}-{month_end}",
+        "composite_method": "median",
+        "qa_mask_applied": True,
+        "output_bands": [
+            "Current_Period_NDVI",
+            "Current_Period_NDVI_Valid_Count",
+        ],
+        "qa_water_bit_preserved": True,
+        "resolution": "30m",
+        "created_at": datetime.now().isoformat(),
+        "status": "current_period_ndvi_median_prepared",
+    }
+
+    log.info("Current period NDVI median başarıyla oluşturuldu.")
+    return current_ndvi, metadata
+
+
+def get_landsat_baseline_window_ndvi_collection(
+    region: ee.Geometry,
+    region_name: str,
+    current_end_date: str,
+    window_days: int,
+    baseline_start: str = BASELINE_START_DATE,
+    baseline_end: str = BASELINE_END_DATE,
+) -> tuple[ee.ImageCollection, dict]:
+    """
+    NDVI için pencere-simetrik baseline median collection'ı üretir.
+
+    LST baseline ile aynı yıl seçimi, pencere ve QA mask mantığını kullanır;
+    her baseline yılı için tek QA-maskeli NDVI median composite döner.
+    """
+    current_end_dt = datetime.strptime(current_end_date, "%Y-%m-%d")
+    current_start_dt = current_end_dt - timedelta(days=window_days)
+    current_year = current_end_dt.year
+    baseline_start_year = datetime.strptime(baseline_start, "%Y-%m-%d").year
+    baseline_end_year = datetime.strptime(baseline_end, "%Y-%m-%d").year
+    baseline_years = [
+        year
+        for year in range(baseline_start_year, baseline_end_year + 1)
+        if year < current_year
+    ]
+
+    if not baseline_years:
+        raise ValueError(
+            "Pencere-simetrik NDVI baseline için current yılından önce en az bir "
+            "baseline yılı gerekir."
+        )
+
+    log.info("Pencere-simetrik NDVI baseline hazırlanıyor. Bölge: %s", region_name)
+    log.info("Baseline yılları: %s", baseline_years)
+
+    image_list = []
+    window_records = []
+
+    for year in baseline_years:
+        window_start = current_start_dt.replace(year=year)
+        window_end = current_end_dt.replace(year=year)
+        start_text = window_start.strftime("%Y-%m-%d")
+        end_text = window_end.strftime("%Y-%m-%d")
+
+        raw_collection = (
+            ee.ImageCollection(LANDSAT_COLLECTION)
+            .filterBounds(region)
+            .filterDate(start_text, end_text)
+            .map(lambda image: image.clip(region))
+        )
+        scene_count = raw_collection.size().getInfo()
+
+        if scene_count == 0:
+            log.warning(
+                "%s yılı için %s -> %s penceresinde NDVI sahnesi bulunamadı.",
+                year,
+                start_text,
+                end_text,
+            )
+            continue
+
+        masked_collection = raw_collection.map(apply_qa_mask).map(add_ndvi_band)
+        ndvi_median = masked_collection.select("NDVI").median().rename("NDVI")
+        valid_count = (
+            masked_collection
+            .select("NDVI")
+            .count()
+            .rename("Baseline_Window_NDVI_Valid_Count")
+            .toFloat()
+        )
+
+        window_image = (
+            ndvi_median
+            .addBands(valid_count)
+            .clip(region)
+            .set("export_date", end_text)
+            .set("window_start", start_text)
+            .set("window_end", end_text)
+            .set("baseline_year", year)
+            .set("source_image_count", scene_count)
+        )
+        image_list.append(window_image)
+        window_records.append(
+            {
+                "year": year,
+                "window_start": start_text,
+                "window_end": end_text,
+                "scene_count": scene_count,
+            }
+        )
+
+    if not image_list:
+        raise ValueError("Hiçbir baseline yılı için NDVI pencere medianı üretilemedi.")
+
+    baseline_collection = ee.ImageCollection(image_list)
+    export_dates = [record["window_end"] for record in window_records]
+
+    metadata = {
+        "gee_project": GEE_PROJECT,
+        "region_name": region_name,
+        "collection": LANDSAT_COLLECTION,
+        "product": "NDVI",
+        "source_bands": [LANDSAT_RED_BAND, LANDSAT_NIR_BAND],
+        "bands": ["NDVI", "Baseline_Window_NDVI_Valid_Count"],
+        "method": "window_symmetric_baseline",
+        "current_reference_end_date": current_end_date,
+        "window_days": window_days,
+        "baseline_years": baseline_years,
+        "windows": window_records,
+        "daily_dates": export_dates,
+        "daily_composite_count": len(export_dates),
+        "lst_composite_method": "qa_masked_window_median_per_year",
+        "qa_mask_applied_to_ndvi": True,
+        "qa_water_bit_preserved": True,
+        "resolution": "30m",
+        "created_at": datetime.now().isoformat(),
+        "status": "window_symmetric_ndvi_baseline_collection_prepared",
+    }
+
+    log.info("Pencere-simetrik NDVI baseline pencere sayısı: %s", len(export_dates))
+    return baseline_collection, metadata
 
 
 # =============================================================================
@@ -491,12 +757,39 @@ def prepare_landsat_anomaly_inputs(
         window_days=window_days,
     )
 
-    return {
+    result = {
         "landsat_timeseries": landsat_timeseries,
         "landsat_metadata": ts_metadata,
         "current_median": current_median,
         "current_metadata": current_metadata,
     }
+
+    # NDVI ürünleri (yeni bilimsel yön). LST ile aynı pencere/QA mantığını paylaşır.
+    if ENABLE_NDVI_EXPORT:
+        ndvi_timeseries, ndvi_ts_metadata = get_landsat_baseline_window_ndvi_collection(
+            region=region,
+            region_name=region_name,
+            current_end_date=current_end_date,
+            window_days=window_days,
+            baseline_start=baseline_start,
+            baseline_end=baseline_end,
+        )
+        current_ndvi, current_ndvi_metadata = get_current_period_ndvi_median(
+            region=region,
+            region_name=region_name,
+            end_date=current_end_date,
+            window_days=window_days,
+        )
+        result.update(
+            {
+                "ndvi_timeseries": ndvi_timeseries,
+                "ndvi_metadata": ndvi_ts_metadata,
+                "current_ndvi": current_ndvi,
+                "current_ndvi_metadata": current_ndvi_metadata,
+            }
+        )
+
+    return result
 
 
 # =============================================================================
@@ -524,6 +817,9 @@ def main() -> None:
         "baseline_timeseries": step3_result["landsat_metadata"],
         "current_period": step3_result["current_metadata"],
     }
+    if "ndvi_metadata" in step3_result:
+        combined_metadata["ndvi_baseline_timeseries"] = step3_result["ndvi_metadata"]
+        combined_metadata["ndvi_current_period"] = step3_result["current_ndvi_metadata"]
     
     metadata_path = save_metadata(combined_metadata)
 

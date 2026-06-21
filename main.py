@@ -19,6 +19,7 @@ import step4_export_geotiff
 import step4b_download_drive_export
 import step5_preprocess_timeseries
 import step5b_diagnostic_report
+import step5c_tvdi
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -57,6 +58,7 @@ def main() -> None:
         run_step("STEP 4B", step4b_download_drive_export.main)
         run_step("STEP 5", step5_preprocess_timeseries.main)
         run_step("STEP 5B", step5b_diagnostic_report.main)
+        run_step("STEP 5C", step5c_tvdi.main)
 
         end_time = datetime.now()
 
