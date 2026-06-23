@@ -17,6 +17,11 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
+import sys
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 import ee
 import core.config as runtime_config
@@ -49,13 +54,14 @@ from core.config import (
 from core.gee_utils import init_gee
 from core.regions import build_regions
 from core.io_utils import setup_logger
+from core.paths import PROJECT_ROOT
 
 
 from src.step2_modis_5year_mean import process_summer_mean
 from src.step3_landsat_lst import prepare_landsat_anomaly_inputs
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = PROJECT_ROOT
 OUTPUTS_DIR = BASE_DIR / "outputs" / "step4"
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 

@@ -10,6 +10,13 @@ oranlarını ve olası seam/artefact kaynak yorumunu raporlar.
 
 from __future__ import annotations
 
+from pathlib import Path as _Path
+import sys as _sys
+
+_PROJECT_ROOT = _Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_PROJECT_ROOT))
+
 import json
 import math
 from dataclasses import dataclass
@@ -30,9 +37,10 @@ from core.config import (
     STEP5_MIN_CURRENT_VALID_COUNT,
 )
 from core.io_utils import setup_logger
+from core.paths import PROJECT_ROOT
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = PROJECT_ROOT
 STEP5_OUTPUT_DIR = BASE_DIR / "outputs" / "step5"
 STEP5C_OUTPUT_DIR = BASE_DIR / "outputs" / "step5c"
 DIAGNOSTIC_DIR = BASE_DIR / "outputs" / "diagnostics"

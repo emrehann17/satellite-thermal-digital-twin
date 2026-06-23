@@ -14,6 +14,11 @@ import re
 import shutil
 from datetime import datetime
 from pathlib import Path
+import sys
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from core.config import (
     DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT,
@@ -26,9 +31,10 @@ from core.config import (
     MODIS_EXPORT,
 )
 from core.io_utils import setup_logger
+from core.paths import PROJECT_ROOT
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = PROJECT_ROOT
 OUTPUTS_DIR = BASE_DIR / "outputs" / "step4b"
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 

@@ -17,6 +17,11 @@ NOT:
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+import sys
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 import ee
 
@@ -41,9 +46,10 @@ from core.config import (
 from core.gee_utils import init_gee
 from core.regions import build_regions
 from core.io_utils import setup_logger
+from core.paths import PROJECT_ROOT
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = PROJECT_ROOT
 OUTPUTS_DIR = BASE_DIR / "outputs" / "step3"
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 

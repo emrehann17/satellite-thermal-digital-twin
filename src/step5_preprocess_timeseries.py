@@ -11,6 +11,13 @@ dosyalarını mekansal pencereler halinde işler. Yaklaşık tepe bellek kullan�
 tam raster yığını yerine yalnızca pencere yığını ve birkaç çıktı bloğu
 """
 
+from pathlib import Path as _Path
+import sys as _sys
+
+_PROJECT_ROOT = _Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_PROJECT_ROOT))
+
 from core.config import (
     BASELINE_END_DATE,
     BASELINE_START_DATE,
@@ -29,6 +36,7 @@ from core.config import (
     STEP5_WRITE_INTERPOLATED_NETCDF,
 )
 from core.io_utils import setup_logger
+from core.paths import PROJECT_ROOT
 
 import json
 import math
@@ -37,7 +45,6 @@ import warnings
 from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
-
 import numpy as np
 import rasterio
 from rasterio.enums import Resampling
@@ -45,7 +52,7 @@ from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = PROJECT_ROOT
 BASELINE_INPUT_DIR = BASE_DIR / "data" / "landsat_timeseries"
 QA_DIR = BASE_DIR / "data" / "landsat_qa"
 CURRENT_PERIOD_DIR = BASE_DIR / "data" / "current_period"

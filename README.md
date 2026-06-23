@@ -188,19 +188,26 @@ MODIS rasterları yalnızca düşük çözünürlüklü bağlamsal karşılaşt�
 ```text
 core/
 ├── config.py
+├── drive_downloader.py
 ├── gee_utils.py
 ├── io_utils.py
-├── regions.py
-└── drive_downloader.py
+├── paths.py
+└── regions.py
 
-step1_fetch_modis.py
-step2_modis_5year_mean.py
-step3_landsat_lst.py
-step4_export_geotiff.py
-step4b_download_drive_export.py
-step5_preprocess_timeseries.py
-step5b_diagnostic_report.py
-main.py
+src/
+├── step1_fetch_modis.py
+├── step2_modis_5year_mean.py
+├── step3_landsat_lst.py
+├── step4_export_geotiff.py
+├── step4b_download_drive_export.py
+├── step5_preprocess_timeseries.py
+├── step5b_diagnostic_report.py
+├── step5c_tvdi.py
+└── step6_validate_fire_relation.py
+
+scripts/
+├── main.py
+└── standalone_step5.py
 
 ```
 
@@ -430,7 +437,7 @@ Production veya daha kapsamlı denemelerde baseline yıl aralığı ve pencere s
 ## Uçtan Uca Akış
 
 ```bash
-python main.py
+python scripts/main.py
 
 ```
 
@@ -446,13 +453,13 @@ Bu komut güncel akışta sırasıyla şunları yürütür:
 ## Adım Adım Çalıştırma
 
 ```bash
-python step1_fetch_modis.py
-python step2_modis_5year_mean.py
-python step3_landsat_lst.py
-python step4_export_geotiff.py
-python step4b_download_drive_export.py
-python step5_preprocess_timeseries.py
-python step5b_diagnostic_report.py
+python src/step1_fetch_modis.py
+python src/step2_modis_5year_mean.py
+python src/step3_landsat_lst.py
+python src/step4_export_geotiff.py
+python src/step4b_download_drive_export.py
+python src/step5_preprocess_timeseries.py
+python src/step5b_diagnostic_report.py
 
 ```
 
@@ -478,16 +485,16 @@ Current period tarafında Step5, `CURRENT_PERIOD_DAYS` ile eşleşen dosya adın
 ## Step5'i Tek Başına Çalıştırma
 
 ```bash
-python step5_preprocess_timeseries.py
+python src/step5_preprocess_timeseries.py
 
 ```
 
-Bu komut, Step5'i tek başına yeniden çalıştırmak istediğinde kullanılabilir. Normal kullanımda `main.py` akışı içinde otomatik tetiklenir.
+Bu komut, Step5'i tek başına yeniden çalıştırmak istediğinde kullanılabilir. Normal kullanımda `scripts/main.py` akışı içinde otomatik tetiklenir.
 
 ## Step5B Tanı Raporu
 
 ```bash
-python step5b_diagnostic_report.py
+python src/step5b_diagnostic_report.py
 
 ```
 

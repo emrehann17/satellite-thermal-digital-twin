@@ -38,6 +38,11 @@ import json
 import warnings
 from datetime import datetime
 from pathlib import Path
+import sys
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 import matplotlib
 
@@ -68,6 +73,7 @@ from core.config import (
     VALIDATION_SEASON_START,
 )
 from core.io_utils import setup_logger
+from core.paths import PROJECT_ROOT
 
 try:
     from sklearn.metrics import roc_auc_score, roc_curve
@@ -100,7 +106,7 @@ except ImportError:
     GEEMAP_AVAILABLE = False
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = PROJECT_ROOT
 STEP5_OUTPUT_DIR = BASE_DIR / "outputs" / "step5"
 STEP5C_OUTPUT_DIR = BASE_DIR / "outputs" / "step5c"
 OUTPUT_DIR = BASE_DIR / "outputs" / "validation"

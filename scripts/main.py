@@ -6,11 +6,18 @@ Yapılanlar:
     - GEE tarafındaki online pipeline'ı tek yerden yönetir
 """
 
+from pathlib import Path as _Path
+import sys as _sys
+
+_PROJECT_ROOT = _Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_PROJECT_ROOT))
+
 from datetime import datetime
-from pathlib import Path
 import traceback
 
 from core.io_utils import setup_logger
+from core.paths import PROJECT_ROOT
 
 import src.step1_fetch_modis as step1_fetch_modis
 import src.step2_modis_5year_mean as step2_modis_5year_mean
@@ -23,7 +30,7 @@ import src.step5c_tvdi as step5c_tvdi
 import src.step6_validate_fire_relation as step6_validate_fire_relation
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = PROJECT_ROOT
 log, log_file = setup_logger("main")
 
 

@@ -5,17 +5,24 @@ Yapılanlar:
     - Step5'teki akışı tek başına çalıştırır. Pipeline'ın geri kalan adımlarını çalıştırmaz, sadece Step5'e odaklanır.
 """
 
+from pathlib import Path as _Path
+import sys as _sys
+
+_PROJECT_ROOT = _Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_PROJECT_ROOT))
+
 from datetime import datetime
-from pathlib import Path
 import traceback
 
 from core.io_utils import setup_logger
+from core.paths import PROJECT_ROOT
 
 import src.step5_preprocess_timeseries as step5_preprocess_timeseries
 import src.step5b_diagnostic_report as step5b_diagnostic_report
 import src.step5c_tvdi as step5c_tvdi
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = PROJECT_ROOT
 log, log_file = setup_logger("main")
 
 def run_step(step_name: str, step_func) -> None:
