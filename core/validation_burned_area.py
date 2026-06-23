@@ -35,7 +35,17 @@ from core.config import (
 from core.io_utils import setup_logger
 
 
-log, log_file = setup_logger("validation_burned_area")
+# Logger'ı import sırasında değil, ilk kullanımda kur (lazy). Modül-seviyesi
+# yan etkiler (log dosyası oluşturma vb.) import zincirini kırabilir; bu da
+# step6'da "GEE importları başarısız" gibi yanıltıcı hatalara yol açar.
+_log = None
+
+
+def _get_log():
+    global _log
+    if _log is None:
+        _log, _ = setup_logger("validation_burned_area")
+    return _log
 
 
 def get_mcd64a1_burned_area(
@@ -121,7 +131,7 @@ def get_firecci51_burned_area_safe(
         )
     except Exception:  # noqa: BLE001
         available_bands = []
-    log.info("FireCCI51 mevcut bantlar: %s", available_bands)
+    _get_log().info("FireCCI51 mevcut bantlar: %s", available_bands)
 
     if FIRECCI51_BURNDATE_BAND not in available_bands:
         return (
@@ -170,7 +180,7 @@ def get_mcd64a1_burned_area_safe(
         available_bands = ee.Image(collection.first()).bandNames().getInfo()
     except Exception:  # noqa: BLE001
         available_bands = []
-    log.info("MCD64A1 mevcut bantlar: %s", available_bands)
+    _get_log().info("MCD64A1 mevcut bantlar: %s", available_bands)
 
     if MCD64A1_BURNDATE_BAND not in available_bands:
         return (
@@ -226,7 +236,7 @@ def build_validation_inputs(
     yapmaz. ENABLE_BURNED_AREA_VALIDATION False ise erken döner.
     """
     if not ENABLE_BURNED_AREA_VALIDATION:
-        log.info(
+        _get_log().info(
             "Burned-area validation kapalı (ENABLE_BURNED_AREA_VALIDATION=False). "
             "Skeleton hazır; Phase 2'de açılacak."
         )
@@ -236,7 +246,7 @@ def build_validation_inputs(
             "note": "validation skeleton only; no images built",
         }
 
-    log.info("Burned-area validation girdileri kuruluyor: %s -> %s", start, end)
+    _get_log().info("Burned-area validation girdileri kuruluyor: %s -> %s", start, end)
     return {
         "enabled": True,
         "created_at": datetime.now().isoformat(),
@@ -252,5 +262,5 @@ def build_validation_inputs(
 
 
 if __name__ == "__main__":
-    log.info("validation_burned_area skeleton modülü. Phase 2'de doldurulacak.")
-    log.info("Tanımlı kaynaklar: MCD64A1, FireCCI51, FIRMS.")
+    _get_log().info("validation_burned_area skeleton modülü. Phase 2'de doldurulacak.")
+    _get_log().info("Tanımlı kaynaklar: MCD64A1, FireCCI51, FIRMS.")

@@ -207,6 +207,7 @@ src/
 
 scripts/
 ├── main.py
+├── run_prefire_experiment.py
 └── standalone_step5.py
 
 ```
@@ -704,6 +705,33 @@ pre_fire modu bilimsel olarak yalnızca predictor rasterları gerçekten o predi
 window'a göre üretilmişse anlamlıdır. Mevcut Step5/Step5C çıktıları farklı bir
 current period'dan geliyorsa summary.md bir uyarı yazar ("Predictor rasters may
 not match the configured pre-fire predictor window; regenerate Step5/Step5C ...").
+
+### Pre-fire deneyini çalıştırma
+
+`VALIDATION_MODE = "pre_fire"` yapıldığında `core/config.py`, current period'u
+otomatik olarak pre_fire **predictor window**'undan türetir
+(`CURRENT_PERIOD_END_DATE` = predictor_end, `CURRENT_PERIOD_DAYS` = pencere günü).
+Böylece Step3/Step4/Step5/Step5C çıktıları yangından ÖNCEKi dönemi temsil eder ve
+label window'a sızmaz. Config yüklemesi, predictor window'un label window'la
+çakışmadığını da doğrular (çakışırsa `ValueError`).
+
+Uçtan uca koşu (yeni klasör yapısına göre):
+
+```bash
+# 1. core/config.py içinde: VALIDATION_MODE = "pre_fire"
+# 2. (isteğe bağlı) same-season çıktılarını korumak için yedekleyin:
+cp -r outputs/step5  outputs/step5_sameseason_backup
+cp -r outputs/step5c outputs/step5c_sameseason_backup
+# 3. çalıştırın:
+python scripts/run_prefire_experiment.py
+```
+
+Bu script Step3 -> Step4 -> Step4B -> Step5 -> Step5C -> Step6 sırasını predictor
+window için çalıştırır. GEE erişimi ve auth gerektirir. Sonuç ilk pre-fire
+burned-area association testidir; doğrulanmış yangın-riski modeli değildir.
+Varsayılan örnek: predictor window `2023-06-01 -> 2023-07-31`, label window
+`2023-08-01 -> 2023-10-31`, AOI `kozan_aoi`, label kaynağı MCD64A1 (FireCCI51
+2023 kapsamı dışı olduğu için skip).
 
 ## Akış
 

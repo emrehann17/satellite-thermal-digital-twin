@@ -666,10 +666,13 @@ def write_summary_markdown(report: dict) -> Path:
 
     if mode == "pre_fire" and lead is not None:
         lead_text = f"{lead}"
+        relation_text = "predictor before label (pre-fire)"
     elif mode == "same_season":
         lead_text = "overlapping windows / n/a"
+        relation_text = "predictor and label same window (same-season)"
     else:
         lead_text = "n/a"
+        relation_text = "n/a"
 
     lines = [
         "# Step6 Burned-Area Association Test",
@@ -679,6 +682,7 @@ def write_summary_markdown(report: dict) -> Path:
         f"Region / AOI: `{report['region']}`",
         f"Predictor window: `{pred_w.get('start')} -> {pred_w.get('end')}`",
         f"Label window: `{label_w.get('start')} -> {label_w.get('end')}`",
+        f"Temporal relation: `{relation_text}`",
         f"Temporal lead/gap (days): `{lead_text}`",
         f"Label sources (used): `{', '.join(used_sources) if used_sources else 'none'}`",
         f"Label sources (skipped): "
