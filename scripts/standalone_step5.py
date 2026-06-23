@@ -11,9 +11,9 @@ import traceback
 
 from core.io_utils import setup_logger
 
-import step5_preprocess_timeseries
-import step5b_diagnostic_report
-import step5c_tvdi
+import src.step5_preprocess_timeseries as step5_preprocess_timeseries
+import src.step5b_diagnostic_report as step5b_diagnostic_report
+import src.step5c_tvdi as step5c_tvdi
 
 BASE_DIR = Path(__file__).resolve().parent
 log, log_file = setup_logger("main")

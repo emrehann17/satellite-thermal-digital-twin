@@ -226,3 +226,38 @@ VALIDATION_PREFIRE_LABEL_END = "2023-10-31"
 # FireCCI51 Earth Engine'e SORULMADAN skip edilir (2023 verisi yoktur).
 FIRECCI51_AVAILABLE_START = "2001-01-01"
 FIRECCI51_AVAILABLE_END = "2020-12-31"
+
+# =============================================================================
+# Pre-fire modunda current period'u predictor window'a hizala
+# =============================================================================
+# VALIDATION_MODE == "pre_fire" iken, Step3/Step4/Step5/Step5C'nin ürettiği
+# "current period" rasterları pre_fire PREDICTOR window'unu temsil etmelidir
+# (yangından ÖNCEKi dönem). Aksi halde predictor verisi label/yangın dönemine
+# sızar ve pre-fire deneyi bilimsel olarak geçersiz olur.
+#
+# Burada CURRENT_PERIOD_END_DATE ve CURRENT_PERIOD_DAYS, predictor window'dan
+# TÜRETİLİR. Böylece tek kaynak (VALIDATION_PREFIRE_PREDICTOR_*) kullanılır ve
+# iki tarih tanımı arasında tutarsızlık olamaz. Baseline yılları aynı takvim
+# penceresini önceki yıllarda kullanmaya devam eder (Step3 bunu otomatik yapar).
+#
+# same_season modunda bu blok hiçbir şeyi değiştirmez; yukarıdaki varsayılan
+# CURRENT_PERIOD_* değerleri aynen korunur.
+if VALIDATION_MODE == "pre_fire":
+    from datetime import datetime as _dt
+
+    _pred_start = _dt.strptime(VALIDATION_PREFIRE_PREDICTOR_START, "%Y-%m-%d")
+    _pred_end = _dt.strptime(VALIDATION_PREFIRE_PREDICTOR_END, "%Y-%m-%d")
+
+    # Pencere gün sayısı (dahil): örn. 2023-06-01 -> 2023-07-31 = 61 gün.
+    CURRENT_PERIOD_DAYS = (_pred_end - _pred_start).days
+    CURRENT_PERIOD_END_DATE = VALIDATION_PREFIRE_PREDICTOR_END
+
+    # Pre-fire predictor window ile label window çakışmamalı (sızıntı kontrolü).
+    _label_start = _dt.strptime(VALIDATION_PREFIRE_LABEL_START, "%Y-%m-%d")
+    if _pred_end > _label_start:
+        raise ValueError(
+            "pre_fire yapılandırması geçersiz: predictor window label window ile "
+            f"çakışıyor (predictor_end={VALIDATION_PREFIRE_PREDICTOR_END} > "
+            f"label_start={VALIDATION_PREFIRE_LABEL_START}). Predictor window "
+            "yangın/label döneminden ÖNCE bitmelidir."
+        )

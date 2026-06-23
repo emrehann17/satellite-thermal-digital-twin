@@ -51,8 +51,8 @@ from core.regions import build_regions
 from core.io_utils import setup_logger
 
 
-from step2_modis_5year_mean import process_summer_mean
-from step3_landsat_lst import prepare_landsat_anomaly_inputs
+from src.step2_modis_5year_mean import process_summer_mean
+from src.step3_landsat_lst import prepare_landsat_anomaly_inputs
 
 
 BASE_DIR = Path(__file__).resolve().parent

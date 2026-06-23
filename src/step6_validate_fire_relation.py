@@ -85,8 +85,13 @@ try:
         get_mcd64a1_burned_area_safe,
     )
     GEE_IMPORTS_OK = True
-except ImportError:
+    GEE_IMPORT_ERROR = None
+except Exception as _gee_import_exc:  # noqa: BLE001
+    # ImportError dışındaki hataları da yakala (ör. validation_burned_area
+    # içindeki bir bağımlılık veya init hatası). Gerçek sebebi sakla ki
+    # fetch_labels net mesaj verebilsin.
     GEE_IMPORTS_OK = False
+    GEE_IMPORT_ERROR = f"{type(_gee_import_exc).__name__}: {_gee_import_exc}"
 
 try:
     import geemap
@@ -273,12 +278,24 @@ def fetch_labels(grid: dict, label_start: str, label_end: str) -> dict:
     """
     if not GEE_IMPORTS_OK:
         raise ValidationError(
-            "GEE importları başarısız (ee/geemap/regions). Step6 etiket indirmesi "
-            "için GEE ortamı gerekli. Lütfen earthengine-api ve geemap kurun ve "
-            "GEE auth yapın."
+            "GEE importları başarısız (ee/geemap/regions/validation_burned_area). "
+            "Step6 etiket indirmesi için GEE ortamı gerekli. "
+            f"Gerçek import hatası: {GEE_IMPORT_ERROR}. "
+            "Olası çözümler: (1) earthengine-api ve geemap kurun "
+            "(pip install earthengine-api geemap), (2) GEE auth yapın "
+            "(earthengine authenticate), (3) hata bir modül içi soruna işaret "
+            "ediyorsa ilgili modülü kontrol edin."
         )
 
-    init_gee(GEE_PROJECT)
+    try:
+        init_gee(GEE_PROJECT)
+    except Exception as exc:  # noqa: BLE001
+        raise ValidationError(
+            "GEE başlatma/auth başarısız (ee.Initialize). "
+            f"Hata: {type(exc).__name__}: {exc}. "
+            "Çözüm: 'earthengine authenticate' çalıştırın ve GEE_PROJECT "
+            f"değerinin ('{GEE_PROJECT}') doğru/erişilebilir olduğundan emin olun."
+        ) from exc
     regions = build_regions()
     if REGION_NAME not in regions:
         raise ValidationError(f"Bölge bulunamadı: {REGION_NAME}")
@@ -641,6 +658,13 @@ def write_summary_markdown(report: dict) -> Path:
     label_w = report.get("label_window", {})
     lead = report.get("temporal_lead_days")
 
+    if mode == "pre_fire" and lead is not None:
+        lead_text = f"{lead}"
+    elif mode == "same_season":
+        lead_text = "overlapping windows / n/a"
+    else:
+        lead_text = "n/a"
+
     lines = [
         "# Step6 Burned-Area Association Test",
         "",
@@ -649,7 +673,7 @@ def write_summary_markdown(report: dict) -> Path:
         f"Region / AOI: `{report['region']}`",
         f"Predictor window: `{pred_w.get('start')} -> {pred_w.get('end')}`",
         f"Label window: `{label_w.get('start')} -> {label_w.get('end')}`",
-        f"Temporal lead/gap (days): `{lead if lead is not None else 'n/a'}`",
+        f"Temporal lead/gap (days): `{lead_text}`",
         f"Label sources (used): `{', '.join(used_sources) if used_sources else 'none'}`",
         f"Label sources (skipped): "
         f"`{', '.join(skipped_names) if skipped_names else 'none'}`",
@@ -816,8 +840,20 @@ def resolve_windows() -> dict:
     }
 
 
-def temporal_lead_days(predictor_end: str, label_start: str) -> int | None:
-    """Predictor penceresi bitişi ile label penceresi başlangıcı arası gün farkı."""
+def temporal_lead_days(
+    predictor_end: str,
+    label_start: str,
+    mode: str,
+) -> int | None:
+    """
+    Predictor penceresi bitişi ile label penceresi başlangıcı arası gerçek lead (gün).
+
+    Yalnız pre_fire modunda anlamlıdır (predictor window label window'dan önce gelir).
+    same_season modunda pencereler çakıştığı için lead anlamsızdır; None döner ve
+    raporda "overlapping windows / n/a" gösterilir.
+    """
+    if mode != "pre_fire":
+        return None
     try:
         pe = datetime.strptime(predictor_end, "%Y-%m-%d")
         ls = datetime.strptime(label_start, "%Y-%m-%d")
@@ -906,7 +942,9 @@ def main() -> dict:
     if overlay_png:
         png_outputs.append(overlay_png)
 
-    lead_days = temporal_lead_days(windows["predictor_end"], windows["label_start"])
+    lead_days = temporal_lead_days(
+        windows["predictor_end"], windows["label_start"], windows["mode"]
+    )
 
     # pre_fire uyarısı: mevcut predictor rasterları predictor window'a göre
     # üretilmemiş olabilir (Step5/Step5C config'i CURRENT_PERIOD_END_DATE'e bağlı).

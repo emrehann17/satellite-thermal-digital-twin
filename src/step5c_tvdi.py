@@ -54,7 +54,7 @@ from core.config import (
 from core.io_utils import setup_logger
 
 # Step5'in windowed yardımcılarını yeniden kullan (kod tekrarı yok, aynı mantık).
-from step5_preprocess_timeseries import (
+from src.step5_preprocess_timeseries import (
     count_windows,
     extract_date_from_filename,
     iter_windows,

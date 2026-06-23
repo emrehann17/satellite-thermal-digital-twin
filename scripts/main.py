@@ -12,15 +12,15 @@ import traceback
 
 from core.io_utils import setup_logger
 
-import step1_fetch_modis
-import step2_modis_5year_mean
-import step3_landsat_lst
-import step4_export_geotiff
-import step4b_download_drive_export
-import step5_preprocess_timeseries
-import step5b_diagnostic_report
-import step5c_tvdi
-import step6_validate_fire_relation
+import src.step1_fetch_modis as step1_fetch_modis
+import src.step2_modis_5year_mean as step2_modis_5year_mean
+import src.step3_landsat_lst as step3_landsat_lst
+import src.step4_export_geotiff as step4_export_geotiff
+import src.step4b_download_drive_export as step4b_download_drive_export
+import src.step5_preprocess_timeseries as step5_preprocess_timeseries
+import src.step5b_diagnostic_report as step5b_diagnostic_report
+import src.step5c_tvdi as step5c_tvdi
+import src.step6_validate_fire_relation as step6_validate_fire_relation
 
 
 BASE_DIR = Path(__file__).resolve().parent
