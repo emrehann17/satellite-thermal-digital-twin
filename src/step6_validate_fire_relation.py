@@ -111,8 +111,37 @@ except ImportError:
 BASE_DIR = PROJECT_ROOT
 STEP5_OUTPUT_DIR = BASE_DIR / "outputs" / "step5"
 STEP5C_OUTPUT_DIR = BASE_DIR / "outputs" / "step5c"
+CURRENT_PERIOD_DIR = BASE_DIR / "data" / "current_period"
+NDVI_CURRENT_DIR = BASE_DIR / "data" / "ndvi_current_period"
+LANDCOVER_CANDIDATE_DIRS = [
+    BASE_DIR / "data" / "landcover",
+    BASE_DIR / "data" / "land_cover",
+    BASE_DIR / "outputs" / "landcover",
+    BASE_DIR / "outputs" / "land_cover",
+]
 OUTPUT_DIR = BASE_DIR / "outputs" / "validation"
 LABEL_DIR = OUTPUT_DIR / "labels"
+BURNABLE_NDVI_THRESHOLD = 0.2
+VEGETATION_NDVI_THRESHOLDS = (BURNABLE_NDVI_THRESHOLD, 0.3)
+NDVI_STRATA = (
+    ("ndvi_0_2_0_4", 0.2, 0.4, "NDVI 0.2-0.4"),
+    ("ndvi_0_4_0_6", 0.4, 0.6, "NDVI 0.4-0.6"),
+    ("ndvi_0_6_0_8", 0.6, 0.8, "NDVI 0.6-0.8"),
+)
+LANDSAT_QA_WATER_BIT = 1 << 7
+ESA_WORLDCOVER_BURNABLE_CLASSES = {
+    10: "tree_cover",
+    20: "shrubland",
+    30: "grassland",
+    40: "cropland",
+}
+ESA_WORLDCOVER_EXCLUDED_CLASSES = {
+    50: "built_up",
+    60: "bare_sparse_vegetation",
+    80: "water",
+}
+STEP5_METADATA_PATH = STEP5_OUTPUT_DIR / "step5_metadata.json"
+STEP5C_METADATA_PATH = STEP5C_OUTPUT_DIR / "step5c_metadata.json"
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 LABEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -177,6 +206,290 @@ def read_predictor(path: Path) -> np.ndarray:
     """Tek bantlı predictor rasterını float32 + NaN olarak okur."""
     with rasterio.open(path) as src:
         return src.read(1, masked=True).astype("float32").filled(np.nan)
+
+
+def read_raster_to_grid(
+    path: Path,
+    grid: dict,
+    band_index: int = 1,
+    resampling: Resampling = Resampling.bilinear,
+) -> np.ndarray:
+    """Read one raster band and align it to the validation reference grid."""
+    with rasterio.open(path) as src:
+        arr = src.read(band_index, masked=True).astype("float32").filled(np.nan)
+        same_grid = (
+            src.width == grid["width"]
+            and src.height == grid["height"]
+            and src.crs == grid["crs"]
+            and src.transform == grid["transform"]
+        )
+        if same_grid:
+            return arr
+
+        aligned = np.full((grid["height"], grid["width"]), np.nan, dtype="float32")
+        reproject(
+            source=arr,
+            destination=aligned,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=grid["transform"],
+            dst_crs=grid["crs"],
+            src_nodata=np.nan,
+            dst_nodata=np.nan,
+            resampling=resampling,
+        )
+        return aligned
+
+
+def list_current_ndvi_tif() -> Path | None:
+    """Return the current-period NDVI raster used by Step5C, if present."""
+    candidates = sorted(NDVI_CURRENT_DIR.glob("*.tif"))
+    if not candidates:
+        return None
+    preferred = [
+        path for path in candidates
+        if path.name.lower().startswith("current_ndvi_median")
+    ]
+    return preferred[0] if preferred else candidates[0]
+
+
+def list_current_period_tif() -> Path | None:
+    """Return the current-period Landsat raster, if available for QA water masking."""
+    candidates = sorted(CURRENT_PERIOD_DIR.glob("*.tif"))
+    if not candidates:
+        return None
+    return candidates[0]
+
+
+def list_landcover_tif() -> Path | None:
+    """Return an optional local land-cover raster, if one has been staged."""
+    for directory in LANDCOVER_CANDIDATE_DIRS:
+        candidates = sorted(directory.glob("*.tif"))
+        if candidates:
+            return candidates[0]
+    return None
+
+
+def read_current_ndvi_to_grid(grid: dict) -> tuple[np.ndarray | None, dict]:
+    """Read current NDVI to the validation grid and describe the source."""
+    ndvi_path = list_current_ndvi_tif()
+    if ndvi_path is None:
+        return None, {
+            "available": False,
+            "reason": f"current NDVI raster not found in {NDVI_CURRENT_DIR}",
+        }
+    ndvi = read_raster_to_grid(ndvi_path, grid, band_index=1, resampling=Resampling.bilinear)
+    return ndvi, {
+        "available": True,
+        "source": str(ndvi_path),
+        "finite_ndvi_pixels": int(np.sum(np.isfinite(ndvi))),
+    }
+
+
+def read_water_mask_to_grid(grid: dict) -> tuple[np.ndarray | None, dict]:
+    """Read the Landsat QA water bit as a diagnostic water mask when available."""
+    current_path = list_current_period_tif()
+    if current_path is None:
+        return None, {
+            "available": False,
+            "source": None,
+            "reason": f"current-period raster not found in {CURRENT_PERIOD_DIR}",
+        }
+
+    try:
+        with rasterio.open(current_path) as src:
+            if src.count < 2:
+                return None, {
+                    "available": False,
+                    "source": str(current_path),
+                    "reason": "current-period raster has no QA_PIXEL band",
+                }
+        qa = read_raster_to_grid(
+            current_path,
+            grid,
+            band_index=2,
+            resampling=Resampling.nearest,
+        ).astype("float32")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Water mask could not be read from current-period QA: %s", exc)
+        return None, {
+            "available": False,
+            "source": str(current_path),
+            "reason": f"QA read failed: {type(exc).__name__}: {exc}",
+        }
+
+    qa_uint = np.where(np.isfinite(qa), qa, 0).astype("uint16")
+    water = np.isfinite(qa) & ((qa_uint & LANDSAT_QA_WATER_BIT) != 0)
+    return water, {
+        "available": True,
+        "source": str(current_path),
+        "source_detail": "Landsat QA_PIXEL bit 7 water flag",
+        "water_pixel_count": int(np.sum(water)),
+        "finite_qa_pixels": int(np.sum(np.isfinite(qa))),
+    }
+
+
+def read_landcover_burnable_mask_to_grid(
+    grid: dict,
+    water_mask: np.ndarray | None,
+) -> tuple[np.ndarray | None, dict]:
+    """Build an optional land-cover burnable mask from a local categorical raster."""
+    landcover_path = list_landcover_tif()
+    if landcover_path is None:
+        return None, {
+            "available": False,
+            "reason": "no local land-cover GeoTIFF found",
+            "searched_dirs": [str(path) for path in LANDCOVER_CANDIDATE_DIRS],
+        }
+
+    landcover = read_raster_to_grid(
+        landcover_path,
+        grid,
+        band_index=1,
+        resampling=Resampling.nearest,
+    )
+    lc_int = np.where(np.isfinite(landcover), landcover, -9999).astype("int32")
+    burnable = np.isin(lc_int, list(ESA_WORLDCOVER_BURNABLE_CLASSES))
+    if water_mask is not None:
+        burnable &= ~water_mask
+
+    return burnable, {
+        "available": True,
+        "source": str(landcover_path),
+        "classification_assumption": "ESA WorldCover-style class IDs",
+        "included_classes": ESA_WORLDCOVER_BURNABLE_CLASSES,
+        "excluded_classes": ESA_WORLDCOVER_EXCLUDED_CLASSES,
+        "water_excluded_with_qa_mask": water_mask is not None,
+    }
+
+
+def mask_summary(mask: np.ndarray, base_valid: np.ndarray) -> dict:
+    """Compact population mask summary."""
+    mask_count = int(np.sum(mask))
+    base_count = int(np.sum(base_valid))
+    return {
+        "pixel_count": mask_count,
+        "fraction_of_all_valid_candidates": (
+            float(mask_count / base_count) if base_count else None
+        ),
+    }
+
+
+def build_validation_population_masks(grid: dict, burned: np.ndarray) -> tuple[dict, dict]:
+    """
+    Build named validation populations.
+
+    all_valid is handled by passing no mask to the stats function. All other masks
+    are diagnostic populations with explicit source metadata.
+    """
+    ndvi, ndvi_info = read_current_ndvi_to_grid(grid)
+    water_mask, water_info = read_water_mask_to_grid(grid)
+    base_valid = np.isfinite(burned)
+
+    populations: dict = {}
+    summaries: dict = {
+        "all_valid": {
+            "label": "All valid pixels",
+            "mask_source": "predictor finite pixels and finite burned labels",
+            "available": True,
+        },
+    }
+
+    if water_mask is not None:
+        non_water = base_valid & ~water_mask
+        populations["non_water"] = non_water
+        summaries["non_water"] = {
+            "label": "Non-water diagnostic pixels",
+            "mask_source": "Landsat QA_PIXEL bit 7 water excluded",
+            "available": True,
+            **mask_summary(non_water, base_valid),
+        }
+    else:
+        summaries["non_water"] = {
+            "label": "Non-water diagnostic pixels",
+            "available": False,
+            "mask_source": "unavailable",
+            "reason": water_info.get("reason"),
+        }
+
+    for threshold in VEGETATION_NDVI_THRESHOLDS:
+        key = f"ndvi_gt_{str(threshold).replace('.', '_')}"
+        label = f"NDVI > {threshold:.1f} vegetation pixels"
+        if ndvi is None:
+            summaries[key] = {
+                "label": label,
+                "available": False,
+                "mask_source": "unavailable",
+                "reason": ndvi_info.get("reason"),
+            }
+            continue
+        vegetation = base_valid & np.isfinite(ndvi) & (ndvi > threshold)
+        if water_mask is not None:
+            vegetation &= ~water_mask
+        populations[key] = vegetation
+        summaries[key] = {
+            "label": label,
+            "available": True,
+            "mask_source": (
+                f"current NDVI > {threshold:.1f}"
+                + (" and Landsat QA_PIXEL bit 7 water excluded" if water_mask is not None else "")
+            ),
+            "ndvi_threshold": threshold,
+            "water_excluded": water_mask is not None,
+            **mask_summary(vegetation, base_valid),
+        }
+
+    landcover_mask, landcover_info = read_landcover_burnable_mask_to_grid(grid, water_mask)
+    if landcover_mask is not None:
+        landcover_mask = base_valid & landcover_mask
+        populations["landcover_burnable"] = landcover_mask
+        summaries["landcover_burnable"] = {
+            "label": "Land-cover burnable pixels",
+            "available": True,
+            "mask_source": "optional land-cover categorical raster",
+            **landcover_info,
+            **mask_summary(landcover_mask, base_valid),
+        }
+    else:
+        summaries["landcover_burnable"] = {
+            "label": "Land-cover burnable pixels",
+            "available": False,
+            **landcover_info,
+        }
+
+    summaries["inputs"] = {
+        "ndvi": ndvi_info,
+        "water": water_info,
+    }
+    return populations, summaries
+
+
+def build_ndvi_strata_masks(grid: dict, burned: np.ndarray) -> tuple[dict, dict]:
+    """Build NDVI strata masks for direction diagnostics."""
+    ndvi, ndvi_info = read_current_ndvi_to_grid(grid)
+    strata = {}
+    summaries = {"inputs": {"ndvi": ndvi_info}}
+    if ndvi is None:
+        for key, _lo, _hi, label in NDVI_STRATA:
+            summaries[key] = {
+                "label": label,
+                "available": False,
+                "reason": ndvi_info.get("reason"),
+            }
+        return strata, summaries
+
+    base_valid = np.isfinite(burned)
+    for key, lo, hi, label in NDVI_STRATA:
+        mask = base_valid & np.isfinite(ndvi) & (ndvi >= lo) & (ndvi < hi)
+        strata[key] = mask
+        summaries[key] = {
+            "label": label,
+            "available": True,
+            "ndvi_min_inclusive": lo,
+            "ndvi_max_exclusive": hi,
+            **mask_summary(mask, base_valid),
+        }
+    return strata, summaries
 
 
 def read_reference_grid(path: Path) -> dict:
@@ -465,6 +778,9 @@ def predictor_label_stats(
     predictor: np.ndarray,
     burned: np.ndarray,
     rng: np.random.Generator,
+    population_mask: np.ndarray | None = None,
+    include_roc_preview: bool = True,
+    keep_roc_for_plot: bool = True,
 ) -> tuple[dict, dict | None]:
     """
     Tek bir predictor için burned/unburned ayrışmasını ve ROC/AUC'yi hesaplar.
@@ -479,6 +795,8 @@ def predictor_label_stats(
     pikselleri ve geçersiz etiketler dışlanır.
     """
     valid = np.isfinite(predictor) & np.isfinite(burned)
+    if population_mask is not None:
+        valid &= population_mask
     pred_valid = predictor[valid]
     label_valid = (burned[valid] > 0).astype("int8")
 
@@ -511,12 +829,15 @@ def predictor_label_stats(
 
     # Tam (full) AUC + ROC (array'ler yalnız bellekte/PNG için)
     result["auc_full"] = float(roc_auc_score(label_valid, pred_valid))
-    fpr, tpr, thresholds = roc_curve(label_valid, pred_valid)
-    roc_for_plot = {"fpr": fpr, "tpr": tpr}
-    # JSON'a sadece küçük downsample önizleme:
-    result["roc_curve_preview"] = downsample_roc(
-        fpr, tpr, thresholds, VALIDATION_MAX_ROC_PREVIEW_POINTS
-    )
+    if include_roc_preview or keep_roc_for_plot:
+        fpr, tpr, thresholds = roc_curve(label_valid, pred_valid)
+        if keep_roc_for_plot:
+            roc_for_plot = {"fpr": fpr, "tpr": tpr}
+        # JSON'a sadece küçük downsample önizleme:
+        if include_roc_preview:
+            result["roc_curve_preview"] = downsample_roc(
+                fpr, tpr, thresholds, VALIDATION_MAX_ROC_PREVIEW_POINTS
+            )
 
     # Dengeli (balanced) AUC: unburned alt-örnekleme
     target_unburned = int(n_burned * VALIDATION_BALANCED_UNBURNED_RATIO)
@@ -532,6 +853,124 @@ def predictor_label_stats(
         result["balanced_unburned_count"] = target_unburned
 
     return result, roc_for_plot
+
+
+def auc_only(
+    score: np.ndarray,
+    burned: np.ndarray,
+    population_mask: np.ndarray | None = None,
+) -> dict:
+    """Compact AUC-only diagnostic for predictor direction checks."""
+    valid = np.isfinite(score) & np.isfinite(burned)
+    if population_mask is not None:
+        valid &= population_mask
+
+    score_valid = score[valid]
+    label_valid = (burned[valid] > 0).astype("int8")
+    n_burned = int(np.sum(label_valid == 1))
+    n_unburned = int(np.sum(label_valid == 0))
+    result = {
+        "valid_paired_pixels": int(score_valid.size),
+        "burned_pixels": n_burned,
+        "unburned_pixels": n_unburned,
+        "auc_full": None,
+        "diagnostic_only": True,
+    }
+
+    if n_burned == 0 or n_unburned == 0:
+        result["note"] = "insufficient burned or unburned samples for ROC/AUC"
+        return result
+    if not SKLEARN_AVAILABLE:
+        result["note"] = "sklearn unavailable; AUC skipped"
+        return result
+
+    result["auc_full"] = float(roc_auc_score(label_valid, score_valid))
+    return result
+
+
+def compute_direction_diagnostics(
+    predictors: dict,
+    burned: np.ndarray,
+    population_mask: np.ndarray | None = None,
+) -> dict:
+    """
+    Report original and inverted AUCs for TVDI predictors.
+
+    Inverted AUCs are diagnostic only and must not be treated as final products.
+    """
+    specs = [
+        ("current_tvdi", "current_tvdi", lambda arr: arr),
+        ("current_tvdi_inverted", "1-current_tvdi", lambda arr: 1.0 - arr),
+        ("tvdi_difference", "tvdi_difference", lambda arr: arr),
+        ("tvdi_difference_inverted", "-tvdi_difference", lambda arr: -arr),
+        ("tvdi_anomaly_zscore", "tvdi_anomaly_zscore", lambda arr: arr),
+        ("tvdi_anomaly_zscore_inverted", "-tvdi_anomaly_zscore", lambda arr: -arr),
+    ]
+    diagnostics = {}
+    for out_key, label, transform in specs:
+        source_key = out_key.replace("_inverted", "")
+        if source_key not in predictors:
+            continue
+        diagnostics[out_key] = {
+            "label": label,
+            **auc_only(transform(predictors[source_key]), burned, population_mask),
+        }
+    return diagnostics
+
+
+def compute_population_predictor_metrics(
+    predictors: dict,
+    burned: np.ndarray,
+    predictor_sources: dict,
+    population_mask: np.ndarray | None,
+    include_roc_preview: bool,
+    keep_roc_for_plot: bool,
+    rng: np.random.Generator,
+) -> tuple[dict, dict]:
+    """Compute per-predictor metrics for one validation population."""
+    per_predictor = {}
+    roc_arrays = {}
+    for key, arr in predictors.items():
+        summary, roc = predictor_label_stats(
+            arr,
+            burned,
+            rng,
+            population_mask=population_mask,
+            include_roc_preview=include_roc_preview,
+            keep_roc_for_plot=keep_roc_for_plot,
+        )
+        summary["predictor_name"] = key
+        summary["source_file"] = predictor_sources.get(key)
+        per_predictor[key] = summary
+        roc_arrays[key] = roc
+    return per_predictor, roc_arrays
+
+
+def compute_ndvi_stratified_auc(
+    predictors: dict,
+    burned: np.ndarray,
+    strata_masks: dict,
+) -> dict:
+    """AUC diagnostics for selected TVDI predictors inside NDVI strata."""
+    specs = [
+        ("current_tvdi", "current_tvdi", lambda arr: arr),
+        ("current_tvdi_inverted", "1-current_tvdi", lambda arr: 1.0 - arr),
+        ("tvdi_difference", "tvdi_difference", lambda arr: arr),
+        ("tvdi_difference_inverted", "-tvdi_difference", lambda arr: -arr),
+    ]
+    result = {}
+    for stratum_key, mask in strata_masks.items():
+        rows = {}
+        for out_key, label, transform in specs:
+            source_key = out_key.replace("_inverted", "")
+            if source_key not in predictors:
+                continue
+            rows[out_key] = {
+                "label": label,
+                **auc_only(transform(predictors[source_key]), burned, mask),
+            }
+        result[stratum_key] = rows
+    return result
 
 
 def plot_roc_comparison(
@@ -658,6 +1097,12 @@ def write_summary_markdown(report: dict) -> Path:
     """validation_summary.md yazar."""
     labels = report["labels"]
     per = report["per_predictor"]
+    per_population = report.get("per_population_predictor", {})
+    population_info = report.get("validation_populations", {})
+    direction = report.get("diagnostic_direction_auc", {})
+    ndvi_strata = report.get("ndvi_strata", {})
+    ndvi_stratified_auc = report.get("ndvi_stratified_auc", {})
+    predictor_metadata = report.get("predictor_metadata", {})
     used_sources = labels.get("sources_used", [])
     skipped = labels.get("skipped_sources", [])
     skipped_names = [s["source"] for s in skipped]
@@ -725,7 +1170,46 @@ def write_summary_markdown(report: dict) -> Path:
         "",
         f"- Burned pixels (label): `{labels['burned_pixel_count']}`",
         "",
-        "## Predictor comparison",
+        "## Predictor metadata",
+        "",
+    ])
+    if predictor_metadata:
+        for name, meta in predictor_metadata.items():
+            lines.extend([
+                f"### {name}",
+                "",
+                f"- Metadata path: `{meta.get('metadata_path')}`",
+                f"- Current period: `{meta.get('current_period_start')} -> "
+                f"{meta.get('current_period_end')}`",
+                f"- Baseline years used: `{meta.get('baseline_years_used')}`",
+                "- Current year excluded from baseline: "
+                f"`{meta.get('current_year_excluded_from_baseline')}`",
+                "",
+            ])
+    else:
+        lines.extend(["- Predictor metadata validation not required for this mode.", ""])
+
+    lines.extend([
+        "## Validation populations",
+        "",
+        "| Population | Available | Pixels | Mask source |",
+        "| --- | --- | ---: | --- |",
+    ])
+    for key, info in population_info.items():
+        if key == "inputs":
+            continue
+        lines.append(
+            "| {label} | {available} | {pixels} | {source} |".format(
+                label=info.get("label", key),
+                available=info.get("available"),
+                pixels=info.get("pixel_count", "n/a"),
+                source=info.get("mask_source", info.get("reason", "n/a")),
+            )
+        )
+
+    lines.extend([
+        "",
+        "## Predictor comparison: all valid pixels",
         "",
         "| Predictor | Valid pairs | Burned | Unburned | Burned mean | "
         "Unburned mean | AUC (full) | AUC (balanced) |",
@@ -746,6 +1230,84 @@ def write_summary_markdown(report: dict) -> Path:
                 auc_b=fmt(stats.get("auc_balanced")),
             )
         )
+
+    for population_key, population_metrics in per_population.items():
+        label = population_info.get(population_key, {}).get("label", population_key)
+        lines.extend([
+            "",
+            f"## Predictor comparison: {label}",
+            "",
+            "| Predictor | Valid pairs | Burned | Unburned | Burned mean | "
+            "Unburned mean | AUC (full) | AUC (balanced) |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ])
+        for key, stats in population_metrics.items():
+            lines.append(
+                "| {label} | {pairs} | {burned} | {unburned} | {bmean} | {umean} "
+                "| {auc_f} | {auc_b} |".format(
+                    label=PREDICTORS[key]["label"],
+                    pairs=stats["valid_paired_pixels"],
+                    burned=stats["burned_pixels"],
+                    unburned=stats["unburned_pixels"],
+                    bmean=fmt(stats["burned_mean"]),
+                    umean=fmt(stats["unburned_mean"]),
+                    auc_f=fmt(stats.get("auc_full")),
+                    auc_b=fmt(stats.get("auc_balanced")),
+                )
+            )
+
+    if direction:
+        lines.extend([
+            "",
+            "## Diagnostic direction check",
+            "",
+            "Inverted AUCs are diagnostic only; they are not final products and do "
+            "not automatically imply that TVDI should be flipped.",
+            "",
+            "| Population | Score | Valid pairs | Burned | Unburned | AUC |",
+            "| --- | --- | ---: | ---: | ---: | ---: |",
+        ])
+        for population_key, population_rows in direction.items():
+            population_label = population_info.get(
+                population_key, {}
+            ).get("label", "All valid pixels" if population_key == "all_valid" else population_key)
+            for stats in population_rows.values():
+                lines.append(
+                    "| {population} | `{score}` | {pairs} | {burned} | {unburned} "
+                    "| {auc} |".format(
+                        population=population_label,
+                        score=stats["label"],
+                        pairs=stats["valid_paired_pixels"],
+                        burned=stats["burned_pixels"],
+                        unburned=stats["unburned_pixels"],
+                        auc=fmt(stats.get("auc_full")),
+                    )
+                )
+
+    if ndvi_stratified_auc:
+        lines.extend([
+            "",
+            "## NDVI-stratified diagnostic AUC",
+            "",
+            "Inverted scores in this table are diagnostic only.",
+            "",
+            "| NDVI stratum | Score | Valid pairs | Burned | Unburned | AUC |",
+            "| --- | --- | ---: | ---: | ---: | ---: |",
+        ])
+        for stratum_key, rows in ndvi_stratified_auc.items():
+            stratum_label = ndvi_strata.get(stratum_key, {}).get("label", stratum_key)
+            for stats in rows.values():
+                lines.append(
+                    "| {stratum} | `{score}` | {pairs} | {burned} | {unburned} "
+                    "| {auc} |".format(
+                        stratum=stratum_label,
+                        score=stats["label"],
+                        pairs=stats["valid_paired_pixels"],
+                        burned=stats["burned_pixels"],
+                        unburned=stats["unburned_pixels"],
+                        auc=fmt(stats.get("auc_full")),
+                    )
+                )
 
     lines.extend(["", "## Burned vs unburned (median)", ""])
     for key, stats in per.items():
@@ -782,6 +1344,13 @@ def write_summary_markdown(report: dict) -> Path:
         "- AUC > 0.5 suggests positive association between the predictor and "
         "burned area; this is preliminary association evidence, **not** a "
         "validated fire-risk product.",
+        "- A low `current_tvdi` AUC may be caused by the validation population "
+        "mixing vegetation with non-burnable hot/dry surfaces; compare "
+        "the all-pixel, non-water, NDVI vegetation, and land-cover tables before changing "
+        "the product.",
+        "- If an inverted TVDI AUC is high, do not immediately flip the product; "
+        "TVDI direction or validation population should be inspected before "
+        "changing product semantics.",
     ])
 
     # Koşullu yorumlar (AUC tabanlı)
@@ -804,7 +1373,9 @@ def write_summary_markdown(report: dict) -> Path:
         lines.append(
             "- TVDI predictors do not show positive separation in this run "
             f"({', '.join(tvdi_below_half)} AUC < 0.5); this may indicate temporal "
-            "misalignment between the predictor window and the burn-label window."
+            "misalignment between the predictor window and the burn-label window, "
+            "or validation-population mixing between vegetation and "
+            "non-burnable hot/dry surfaces."
         )
 
     if mode == "pre_fire":
@@ -900,6 +1471,120 @@ def temporal_lead_days(
         return None
 
 
+def read_json_file(path: Path) -> dict:
+    """Read a compact JSON metadata file with a clear Step6 error on failure."""
+    if not path.exists():
+        raise ValidationError(
+            f"Required predictor metadata not found: {path}. "
+            "Regenerate Step5/Step5C so pre-fire validation can verify dates."
+        )
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise ValidationError(f"Could not read predictor metadata {path}: {exc}") from exc
+
+
+def first_present(metadata: dict, keys: list[tuple[str, ...]]):
+    """Return the first present nested metadata value."""
+    for key_path in keys:
+        node = metadata
+        found = True
+        for key in key_path:
+            if not isinstance(node, dict) or key not in node:
+                found = False
+                break
+            node = node[key]
+        if found:
+            return node
+    return None
+
+
+def compact_predictor_metadata(name: str, path: Path, metadata: dict) -> dict:
+    """Extract the Step6 metadata contract from Step5/Step5C metadata."""
+    current_start = first_present(
+        metadata,
+        [("current_period_start",), ("current_period", "current_period_start"), ("current_period", "start_date")],
+    )
+    current_end = first_present(
+        metadata,
+        [("current_period_end",), ("current_period", "current_period_end"), ("current_period", "end_date")],
+    )
+    baseline_years = first_present(
+        metadata,
+        [("baseline_years_used",), ("baseline", "baseline_years_used")],
+    )
+    current_year_excluded = first_present(
+        metadata,
+        [
+            ("current_year_excluded_from_baseline",),
+            ("baseline", "current_year_excluded_from_baseline"),
+        ],
+    )
+    return {
+        "name": name,
+        "metadata_path": str(path),
+        "current_period_start": current_start,
+        "current_period_end": current_end,
+        "baseline_years_used": baseline_years,
+        "current_year_excluded_from_baseline": current_year_excluded,
+    }
+
+
+def validate_predictor_metadata_for_prefire(windows: dict) -> dict:
+    """
+    Verify predictor raster metadata in pre_fire mode.
+
+    This is intentionally fail-fast: Step6 should not quietly validate rasters whose
+    current period does not match the configured predictor window.
+    """
+    metadata_specs = [
+        ("step5", STEP5_METADATA_PATH),
+        ("step5c", STEP5C_METADATA_PATH),
+    ]
+    found = {}
+    errors = []
+
+    for name, path in metadata_specs:
+        raw = read_json_file(path)
+        compact = compact_predictor_metadata(name, path, raw)
+        found[name] = compact
+
+        missing = [
+            key for key in (
+                "current_period_start",
+                "current_period_end",
+                "baseline_years_used",
+                "current_year_excluded_from_baseline",
+            )
+            if compact.get(key) is None
+        ]
+        if missing:
+            errors.append(f"{name} metadata missing required fields: {missing}")
+            continue
+
+        if compact["current_period_start"] != windows["predictor_start"]:
+            errors.append(
+                f"{name} current_period_start={compact['current_period_start']} "
+                f"!= predictor_start_date={windows['predictor_start']}"
+            )
+        if compact["current_period_end"] != windows["predictor_end"]:
+            errors.append(
+                f"{name} current_period_end={compact['current_period_end']} "
+                f"!= predictor_end_date={windows['predictor_end']}"
+            )
+        if compact["current_year_excluded_from_baseline"] is not True:
+            errors.append(f"{name} did not confirm current year was excluded from baseline")
+
+    if errors:
+        raise ValidationError(
+            "Pre-fire predictor metadata validation failed:\n- "
+            + "\n- ".join(errors)
+            + "\nRegenerate Step5 and Step5C for the configured predictor window."
+        )
+
+    return found
+
+
 def main() -> dict:
     """Step6 burned-area association testini çalıştırır."""
     log.info("=" * 60)
@@ -925,8 +1610,10 @@ def main() -> dict:
     )
     if windows["mode"] == "pre_fire":
         log.info("Temporal relation: predictor before label (pre-fire)")
+        predictor_metadata = validate_predictor_metadata_for_prefire(windows)
     else:
         log.info("Temporal relation: predictor and label same window (same-season)")
+        predictor_metadata = {}
 
     # Referans grid + predictor'ları yükle (esnek dosya adı)
     ref_path = reference_predictor_path()
@@ -954,11 +1641,13 @@ def main() -> dict:
     # Etiketleri label window ile indir
     labels = fetch_labels(grid, windows["label_start"], windows["label_end"])
     burned = labels["burned"]
+    validation_populations, validation_population_summaries = (
+        build_validation_population_masks(grid, burned)
+    )
+    ndvi_strata_masks, ndvi_strata_summaries = build_ndvi_strata_masks(grid, burned)
 
-    # Her predictor için istatistik (ROC array'leri ayrı, bellekte)
-    rng = np.random.default_rng(VALIDATION_RANDOM_SEED)
-    per_predictor = {}
-    roc_arrays = {}
+    # Shape uyumlu predictor'ları ayır; metrikler ve plotlar aynı predictor setini kullanır.
+    compatible_predictors = {}
     for key, arr in predictors.items():
         if arr.shape != burned.shape:
             log.warning(
@@ -966,11 +1655,49 @@ def main() -> dict:
                 key, arr.shape, burned.shape,
             )
             continue
-        summary, roc = predictor_label_stats(arr, burned, rng)
-        summary["predictor_name"] = key
-        summary["source_file"] = predictor_sources.get(key)
-        per_predictor[key] = summary
-        roc_arrays[key] = roc
+        compatible_predictors[key] = arr
+    if not compatible_predictors:
+        raise ValidationError("No predictor rasters match the burned-label grid shape.")
+
+    # Her predictor için all-valid istatistik (ROC array'leri ayrı, bellekte)
+    per_predictor, roc_arrays = compute_population_predictor_metrics(
+        compatible_predictors,
+        burned,
+        predictor_sources,
+        population_mask=None,
+        include_roc_preview=True,
+        keep_roc_for_plot=True,
+        rng=np.random.default_rng(VALIDATION_RANDOM_SEED),
+    )
+
+    per_population_predictor = {}
+    for population_key, population_mask in validation_populations.items():
+        population_metrics, _ = compute_population_predictor_metrics(
+            compatible_predictors,
+            burned,
+            predictor_sources,
+            population_mask=population_mask,
+            include_roc_preview=False,
+            keep_roc_for_plot=False,
+            rng=np.random.default_rng(VALIDATION_RANDOM_SEED),
+        )
+        for stats in population_metrics.values():
+            stats["population"] = population_key
+        per_population_predictor[population_key] = population_metrics
+
+    direction_diagnostics = {
+        "all_valid": compute_direction_diagnostics(compatible_predictors, burned),
+    }
+    for population_key, population_mask in validation_populations.items():
+        direction_diagnostics[population_key] = compute_direction_diagnostics(
+            compatible_predictors, burned, population_mask
+        )
+
+    ndvi_stratified_auc = compute_ndvi_stratified_auc(
+        compatible_predictors,
+        burned,
+        ndvi_strata_masks,
+    )
 
     # Görseller (full ROC array'leri yalnız burada, bellekten)
     png_outputs = []
@@ -979,11 +1706,13 @@ def main() -> dict:
     )
     if roc_png:
         png_outputs.append(roc_png)
-    box_png = plot_boxplot(predictors, burned, OUTPUT_DIR / "burned_vs_unburned_boxplot.png")
+    box_png = plot_boxplot(
+        compatible_predictors, burned, OUTPUT_DIR / "burned_vs_unburned_boxplot.png"
+    )
     if box_png:
         png_outputs.append(box_png)
     overlay_png = plot_predictor_maps_with_overlay(
-        predictors, burned, OUTPUT_DIR / "predictor_maps_with_burn_overlay.png"
+        compatible_predictors, burned, OUTPUT_DIR / "predictor_maps_with_burn_overlay.png"
     )
     if overlay_png:
         png_outputs.append(overlay_png)
@@ -991,16 +1720,6 @@ def main() -> dict:
     lead_days = temporal_lead_days(
         windows["predictor_end"], windows["label_start"], windows["mode"]
     )
-
-    # pre_fire uyarısı: mevcut predictor rasterları predictor window'a göre
-    # üretilmemiş olabilir (Step5/Step5C config'i CURRENT_PERIOD_END_DATE'e bağlı).
-    prefire_warning = None
-    if windows["mode"] == "pre_fire":
-        prefire_warning = (
-            "Predictor rasters may not match the configured pre-fire predictor "
-            "window; regenerate Step5/Step5C for this window before interpreting "
-            "results."
-        )
 
     report = {
         "step": "step6_validate_fire_relation",
@@ -1017,13 +1736,19 @@ def main() -> dict:
             "end": windows["label_end"],
         },
         "temporal_lead_days": lead_days,
-        "prefire_warning": prefire_warning,
+        "prefire_warning": None,
         "reference_grid": {
             "path": str(ref_path),
             "width": grid["width"],
             "height": grid["height"],
         },
+        "predictor_metadata": predictor_metadata,
         "per_predictor": per_predictor,
+        "per_population_predictor": per_population_predictor,
+        "validation_populations": validation_population_summaries,
+        "diagnostic_direction_auc": direction_diagnostics,
+        "ndvi_strata": ndvi_strata_summaries,
+        "ndvi_stratified_auc": ndvi_stratified_auc,
         "png_outputs": png_outputs,
         "config": {
             "balanced_unburned_ratio": VALIDATION_BALANCED_UNBURNED_RATIO,

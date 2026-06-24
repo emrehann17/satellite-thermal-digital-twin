@@ -29,9 +29,10 @@ Tasarım notları:
 
 from __future__ import annotations
 
+import csv
 import json
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import sys
 
@@ -39,13 +40,19 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import rasterio
 
 from core.config import (
     CURRENT_PERIOD_DAYS,
+    CURRENT_PERIOD_END_DATE,
     ENABLE_TVDI_STEP5,
     MIN_TVDI_BASELINE_STD,
+    MIN_TVDI_EDGE_SPAN_C,
     TVDI_DRY_EDGE_PERCENTILE,
     TVDI_MIN_BASELINE_VALID_COUNT,
     TVDI_MIN_EDGE_SPAN_CELSIUS,
@@ -199,6 +206,7 @@ def collect_bin_lst_samples(
 
 def compute_edges_from_samples(
     bin_samples: dict[int, list[np.ndarray]],
+    edges: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, list[dict]]:
     """
     Her NDVI bin'i için wet_edge (düşük LST percentile) ve dry_edge (yüksek LST
@@ -215,7 +223,18 @@ def compute_edges_from_samples(
         chunks = bin_samples.get(b, [])
         pixel_count = int(sum(chunk.size for chunk in chunks))
 
-        record = {"bin": b, "pixel_count": pixel_count}
+        record = {
+            "bin": b,
+            "ndvi_bin_start": float(edges[b]),
+            "ndvi_bin_end": float(edges[b + 1]),
+            "ndvi_bin_center": float((edges[b] + edges[b + 1]) / 2.0),
+            "pixel_count": pixel_count,
+            "wet_edge": None,
+            "dry_edge": None,
+            "edge_span": None,
+            "status": None,
+            "is_valid": False,
+        }
 
         if pixel_count < TVDI_MIN_PIXELS_PER_BIN:
             record["status"] = "insufficient_pixels"
@@ -225,18 +244,128 @@ def compute_edges_from_samples(
         values = np.concatenate(chunks)
         wet = float(np.percentile(values, TVDI_WET_EDGE_PERCENTILE))
         dry = float(np.percentile(values, TVDI_DRY_EDGE_PERCENTILE))
+        span = dry - wet
 
-        wet_edges[b] = wet
-        dry_edges[b] = dry
+        if dry <= wet:
+            status = "invalid_edge_order"
+        elif span < MIN_TVDI_EDGE_SPAN_C:
+            status = "edge_span_below_threshold"
+        else:
+            status = "ok"
+            wet_edges[b] = wet
+            dry_edges[b] = dry
+
         record.update({
             "wet_edge": wet,
             "dry_edge": dry,
-            "edge_span": dry - wet,
-            "status": "ok",
+            "edge_span": span,
+            "status": status,
+            "is_valid": status == "ok",
         })
         bin_records.append(record)
 
     return wet_edges, dry_edges, bin_records
+
+
+def summarize_edge_diagnostics(bin_records: list[dict]) -> dict:
+    """Compact summary for raw edge spans, including invalid finite spans."""
+    finite_records = [
+        record for record in bin_records
+        if record.get("edge_span") is not None
+        and np.isfinite(record.get("edge_span"))
+    ]
+    spans = np.array([record["edge_span"] for record in finite_records], dtype="float64")
+
+    if spans.size:
+        span_summary = {
+            "min": float(np.min(spans)),
+            "mean": float(np.mean(spans)),
+            "median": float(np.median(spans)),
+            "max": float(np.max(spans)),
+        }
+    else:
+        span_summary = {"min": None, "mean": None, "median": None, "max": None}
+
+    dry_le_wet = sum(
+        1 for record in finite_records
+        if record.get("dry_edge") is not None
+        and record.get("wet_edge") is not None
+        and record["dry_edge"] <= record["wet_edge"]
+    )
+    span_below_threshold = int(np.sum(spans < MIN_TVDI_EDGE_SPAN_C)) if spans.size else 0
+
+    return {
+        "edge_table": "tvdi_edge_diagnostics.csv",
+        "edge_plot": "tvdi_edge_diagnostics.png",
+        "valid_bin_count": sum(1 for record in bin_records if record.get("is_valid")),
+        "invalid_edge_order_bin_count": int(dry_le_wet),
+        "edge_span_below_threshold_bin_count": span_below_threshold,
+        "edge_span_summary": span_summary,
+        "min_tvdi_edge_span_c": MIN_TVDI_EDGE_SPAN_C,
+    }
+
+
+def write_edge_diagnostics(bin_records: list[dict]) -> tuple[Path, dict]:
+    """Write per-bin edge diagnostics as CSV and return its compact summary."""
+    csv_path = OUTPUT_DIR / "tvdi_edge_diagnostics.csv"
+    fieldnames = [
+        "bin",
+        "ndvi_bin_start",
+        "ndvi_bin_end",
+        "ndvi_bin_center",
+        "pixel_count",
+        "wet_edge",
+        "dry_edge",
+        "edge_span",
+        "status",
+        "is_valid",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in bin_records:
+            writer.writerow({name: record.get(name) for name in fieldnames})
+
+    return csv_path, summarize_edge_diagnostics(bin_records)
+
+
+def plot_edge_diagnostics(bin_records: list[dict]) -> Path | None:
+    """Plot NDVI bin center against wet/dry edges for edge-quality review."""
+    plot_records = [
+        record for record in bin_records
+        if record.get("wet_edge") is not None
+        and record.get("dry_edge") is not None
+    ]
+    if not plot_records:
+        return None
+
+    centers = np.array([record["ndvi_bin_center"] for record in plot_records], dtype="float64")
+    wet = np.array([record["wet_edge"] for record in plot_records], dtype="float64")
+    dry = np.array([record["dry_edge"] for record in plot_records], dtype="float64")
+    valid = np.array([bool(record.get("is_valid")) for record in plot_records])
+
+    out_path = OUTPUT_DIR / "tvdi_edge_diagnostics.png"
+    plt.figure(figsize=(8, 5))
+    plt.plot(centers, wet, marker="o", label="wet edge (p2)", color="#1f77b4")
+    plt.plot(centers, dry, marker="o", label="dry edge (p98)", color="#d62728")
+    if np.any(~valid):
+        plt.scatter(
+            centers[~valid],
+            dry[~valid],
+            marker="x",
+            s=80,
+            color="black",
+            label="invalid dry edge",
+        )
+    plt.xlabel("NDVI bin center")
+    plt.ylabel("LST edge (Celsius)")
+    plt.title("TVDI wet/dry edge diagnostics")
+    plt.grid(alpha=0.25)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=160)
+    plt.close()
+    return out_path
 
 
 def tvdi_from_lst_ndvi(
@@ -266,7 +395,7 @@ def tvdi_from_lst_ndvi(
     dry = dry_edges[bin_idx]
     span = dry - wet
 
-    edge_ok = np.isfinite(wet) & np.isfinite(dry) & (span >= TVDI_MIN_EDGE_SPAN_CELSIUS)
+    edge_ok = np.isfinite(wet) & np.isfinite(dry) & (span >= MIN_TVDI_EDGE_SPAN_C)
 
     with np.errstate(invalid="ignore", divide="ignore"):
         tvdi_valid = (lst_valid - wet) / span
@@ -530,10 +659,23 @@ def main() -> dict | None:
     # 1. geçiş: current scatter'dan NDVI bin edge'leri
     log.info("Birinci geçiş: LST-NDVI scatter edge örnekleri toplanıyor.")
     bin_samples = collect_bin_lst_samples(CURRENT_LST_PATH, current_ndvi_path, edges)
-    wet_edges, dry_edges, bin_records = compute_edges_from_samples(bin_samples)
+    wet_edges, dry_edges, bin_records = compute_edges_from_samples(bin_samples, edges)
+    edge_csv_path, edge_diagnostics = write_edge_diagnostics(bin_records)
+    edge_plot_path = plot_edge_diagnostics(bin_records)
+    if edge_plot_path is None:
+        edge_diagnostics["edge_plot"] = None
 
     valid_bins = int(np.sum(np.isfinite(wet_edges) & np.isfinite(dry_edges)))
     log.info("Geçerli edge üretilen NDVI bin sayısı: %s/%s", valid_bins, TVDI_NDVI_BIN_COUNT)
+    log.info("TVDI edge diagnostik CSV: %s", edge_csv_path)
+    if edge_plot_path is not None:
+        log.info("TVDI edge diagnostik plot: %s", edge_plot_path)
+    log.info(
+        "Edge span sorunlu binler: dry<=wet=%s, span<%.2fC=%s",
+        edge_diagnostics["invalid_edge_order_bin_count"],
+        MIN_TVDI_EDGE_SPAN_C,
+        edge_diagnostics["edge_span_below_threshold_bin_count"],
+    )
     if valid_bins == 0:
         raise ValueError(
             "Hiçbir NDVI bin'i için geçerli wet/dry edge üretilemedi. "
@@ -559,11 +701,22 @@ def main() -> dict | None:
     window_count = None
     with rasterio.open(CURRENT_LST_PATH) as src:
         window_count = count_windows(src.width, src.height, STEP5_WINDOW_SIZE)
+    current_end_dt = datetime.strptime(CURRENT_PERIOD_END_DATE, "%Y-%m-%d")
+    current_start_dt = current_end_dt - timedelta(days=CURRENT_PERIOD_DAYS)
+    current_year = current_end_dt.year
+    baseline_years_used = sorted({
+        int(str(extract_date_from_filename(path))[:4])
+        for path in baseline_ndvi_tifs
+    })
 
     metadata = {
         "step": "step5c_tvdi",
         "method": "ndvi_binned_dry_wet_edge_tvdi",
         "created_at": datetime.now().isoformat(),
+        "current_period_start": current_start_dt.strftime("%Y-%m-%d"),
+        "current_period_end": CURRENT_PERIOD_END_DATE,
+        "baseline_years_used": baseline_years_used,
+        "current_year_excluded_from_baseline": current_year not in baseline_years_used,
         "log_file": str(log_file),
         "inputs": {
             "current_lst": str(CURRENT_LST_PATH),
@@ -582,6 +735,7 @@ def main() -> dict | None:
             "dry_edge_percentile": TVDI_DRY_EDGE_PERCENTILE,
             "min_pixels_per_bin": TVDI_MIN_PIXELS_PER_BIN,
             "min_edge_span_celsius": TVDI_MIN_EDGE_SPAN_CELSIUS,
+            "min_tvdi_edge_span_c": MIN_TVDI_EDGE_SPAN_C,
             "tvdi_anomaly_formula": (
                 "tvdi_anomaly_zscore = (current_tvdi - baseline_tvdi_mean) "
                 "/ baseline_tvdi_std; masked where baseline_tvdi_std < "
@@ -613,14 +767,28 @@ def main() -> dict | None:
         },
         "edges": {
             "valid_bin_count": valid_bins,
+            "diagnostics": edge_diagnostics,
             "bin_records": bin_records,
         },
         "current_period": {
             "window_days": CURRENT_PERIOD_DAYS,
+            "start_date": current_start_dt.strftime("%Y-%m-%d"),
+            "end_date": CURRENT_PERIOD_END_DATE,
+            "current_period_start": current_start_dt.strftime("%Y-%m-%d"),
+            "current_period_end": CURRENT_PERIOD_END_DATE,
+        },
+        "baseline": {
+            "baseline_years_used": baseline_years_used,
+            "current_year_excluded_from_baseline": current_year not in baseline_years_used,
+            "baseline_window_count": len(baseline_ndvi_tifs),
         },
         "outputs": {
             "current_tvdi": str(current_tvdi_path),
             "current_tvdi_stats": current_tvdi_stats,
+            "tvdi_edge_diagnostics_csv": str(edge_csv_path),
+            "tvdi_edge_diagnostics_plot": (
+                None if edge_plot_path is None else str(edge_plot_path)
+            ),
             **baseline_result,
         },
         "notes": {

@@ -133,8 +133,11 @@ TVDI_DRY_EDGE_PERCENTILE = 98.0
 # Az örnekli bin'ler gürültülü edge üretir; bu bin'ler edge fit'ine alınmaz.
 TVDI_MIN_PIXELS_PER_BIN = 30
 
-# dry_edge - wet_edge bu eşiğin altındaysa TVDI NaN bırakılır (sıfıra bölme koruması).
-TVDI_MIN_EDGE_SPAN_CELSIUS = 0.5
+# dry_edge - wet_edge bu eşiğin altındaysa TVDI NaN bırakılır.
+MIN_TVDI_EDGE_SPAN_C = 1.0
+
+# Geriye dönük uyumluluk için eski isim; MIN_TVDI_EDGE_SPAN_C ile aynı değer.
+TVDI_MIN_EDGE_SPAN_CELSIUS = MIN_TVDI_EDGE_SPAN_C
 
 # Baseline TVDI std bu eşiğin altındaysa tvdi_anomaly_zscore NaN/maskeli bırakılır.
 # Çok küçük baseline std, z-score'u yapay olarak şişirir (küçük paydaya bölme).
@@ -215,7 +218,7 @@ VALIDATION_MAX_ROC_PREVIEW_POINTS = 500
 #
 # DİKKAT: Geçerli değerler yalnız "same_season" ve "pre_fire". Geçersiz bir değer
 # girilirse Step6 sessizce same_season'a düşmez; fail-fast hata verir.
-VALIDATION_MODE = "prefire"
+VALIDATION_MODE = "pre_fire"
 
 VALIDATION_VALID_MODES = ("same_season", "pre_fire")
 

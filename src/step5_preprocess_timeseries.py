@@ -43,7 +43,7 @@ import math
 import re
 import warnings
 from contextlib import ExitStack
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import numpy as np
 import rasterio
@@ -898,6 +898,11 @@ def write_metadata(
     tif_files = result["tif_files"]
     output_paths = result["output_paths"]
     baseline_netcdf = None  # NetCDF çıktısı henüz desteklenmiyor
+    current_end_dt = datetime.strptime(CURRENT_PERIOD_END_DATE, "%Y-%m-%d")
+    current_start_dt = current_end_dt - timedelta(days=CURRENT_PERIOD_DAYS)
+    current_year = current_end_dt.year
+    baseline_years_used = sorted({int(str(time)[:4]) for time in times})
+    current_year_excluded = current_year not in baseline_years_used
 
     if STEP5_WRITE_INTERPOLATED_NETCDF:
         log.warning(
@@ -910,6 +915,10 @@ def write_metadata(
         "step": "step5_preprocess_timeseries",
         "method": "windowed_zscore_anomaly",
         "created_at": datetime.now().isoformat(),
+        "current_period_start": current_start_dt.strftime("%Y-%m-%d"),
+        "current_period_end": CURRENT_PERIOD_END_DATE,
+        "baseline_years_used": baseline_years_used,
+        "current_year_excluded_from_baseline": current_year_excluded,
         "input_dirs": {
             "baseline_timeseries": str(BASELINE_INPUT_DIR),
             "qa_masks": str(QA_DIR),
@@ -938,6 +947,8 @@ def write_metadata(
         "baseline": {
             "time_count": len(tif_files),
             "date_range": f"{times[0]} to {times[-1]}",
+            "baseline_years_used": baseline_years_used,
+            "current_year_excluded_from_baseline": current_year_excluded,
             "interpolation_method": "none",
             "temporal_interpolation_used": False,
             "landsat_baseline_temporal_interpolation": False,
@@ -950,8 +961,11 @@ def write_metadata(
             "input_files": [path.name for path in tif_files],
         },
         "current_period": {
-            "window_days": CURRENT_PERIOD_DAYS,
+            "start_date": current_start_dt.strftime("%Y-%m-%d"),
             "end_date": CURRENT_PERIOD_END_DATE,
+            "current_period_start": current_start_dt.strftime("%Y-%m-%d"),
+            "current_period_end": CURRENT_PERIOD_END_DATE,
+            "window_days": CURRENT_PERIOD_DAYS,
             "input_file": current_path.name,
             "valid_count_band": (
                 "Current_Period_Valid_Count if present; otherwise legacy fallback"
