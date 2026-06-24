@@ -207,7 +207,6 @@ src/
 
 scripts/
 ├── main.py
-├── run_prefire_experiment.py
 └── standalone_step5.py
 
 ```
@@ -718,13 +717,24 @@ label window'a sızmaz. Config yüklemesi, predictor window'un label window'la
 Uçtan uca koşu (yeni klasör yapısına göre):
 
 ```bash
-# 1. core/config.py içinde: VALIDATION_MODE = "pre_fire"
+# 1. core/config.py içinde:
+#      VALIDATION_MODE   = "pre_fire"
+#      PREDICTOR_START_DATE = "2023-06-01"
+#      PREDICTOR_END_DATE   = "2023-07-31"
+#      LABEL_START_DATE     = "2023-08-01"
+#      LABEL_END_DATE       = "2023-10-31"
 # 2. (isteğe bağlı) same-season çıktılarını korumak için yedekleyin:
 cp -r outputs/step5  outputs/step5_sameseason_backup
 cp -r outputs/step5c outputs/step5c_sameseason_backup
 # 3. çalıştırın:
 python scripts/run_prefire_experiment.py
 ```
+
+Mode seçimi fail-fast'tir: `VALIDATION_MODE` geçersiz bir değer alırsa veya
+pre_fire'da predictor/label pencereleri çakışırsa (ve
+`VALIDATION_ALLOW_OVERLAPPING_WINDOWS=False` ise) config/Step6 net bir hata verir;
+sessizce same_season'a DÜŞMEZ. Step6 başlangıçta seçili modu ve pencereleri loglar
+("Running Step6 validation mode: pre_fire" vb.).
 
 Bu script Step3 -> Step4 -> Step4B -> Step5 -> Step5C -> Step6 sırasını predictor
 window için çalıştırır. GEE erişimi ve auth gerektirir. Sonuç ilk pre-fire

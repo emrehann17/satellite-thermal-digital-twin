@@ -212,20 +212,43 @@ VALIDATION_MAX_ROC_PREVIEW_POINTS = 500
 # --- Validation modu ---
 # "same_season": predictor ve label aynı sezon penceresinden (ilk association testi).
 # "pre_fire":    predictor window ve label window ayrı (yangın öncesi kuruluk sinyali).
-VALIDATION_MODE = "same_season"
+#
+# DİKKAT: Geçerli değerler yalnız "same_season" ve "pre_fire". Geçersiz bir değer
+# girilirse Step6 sessizce same_season'a düşmez; fail-fast hata verir.
+VALIDATION_MODE = "prefire"
+
+VALIDATION_VALID_MODES = ("same_season", "pre_fire")
 
 # pre_fire modunda predictor ve label pencereleri ayrı tanımlanır.
 # Predictor window: yangından ÖNCEKi kuruluk durumu.
 # Label window:     sonraki yanmış alan kayıtları.
-VALIDATION_PREFIRE_PREDICTOR_START = "2023-06-01"
-VALIDATION_PREFIRE_PREDICTOR_END = "2023-07-31"
-VALIDATION_PREFIRE_LABEL_START = "2023-08-01"
-VALIDATION_PREFIRE_LABEL_END = "2023-10-31"
+# Açık (explicit) isimler — Step6 pre_fire modunda bunları kullanır.
+PREDICTOR_START_DATE = "2023-06-01"
+PREDICTOR_END_DATE = "2023-07-31"
+LABEL_START_DATE = "2023-08-01"
+LABEL_END_DATE = "2023-10-31"
+
+# Geriye dönük uyumluluk: eski VALIDATION_PREFIRE_* isimleri açık isimlere işaret eder.
+VALIDATION_PREFIRE_PREDICTOR_START = PREDICTOR_START_DATE
+VALIDATION_PREFIRE_PREDICTOR_END = PREDICTOR_END_DATE
+VALIDATION_PREFIRE_LABEL_START = LABEL_START_DATE
+VALIDATION_PREFIRE_LABEL_END = LABEL_END_DATE
+
+# pre_fire modunda predictor ve label pencerelerinin çakışmasına bilerek izin
+# vermek istersen True yap. Varsayılan False: çakışma fail-fast hata verir.
+VALIDATION_ALLOW_OVERLAPPING_WINDOWS = False
 
 # FireCCI51 veri kapsamı (yaklaşık). Bu aralık dışındaki label window'ları için
 # FireCCI51 Earth Engine'e SORULMADAN skip edilir (2023 verisi yoktur).
 FIRECCI51_AVAILABLE_START = "2001-01-01"
 FIRECCI51_AVAILABLE_END = "2020-12-31"
+
+# Geçersiz mode'u erken yakala (sessizce same_season'a düşmeyi önler).
+if VALIDATION_MODE not in VALIDATION_VALID_MODES:
+    raise ValueError(
+        f"Geçersiz VALIDATION_MODE: '{VALIDATION_MODE}'. "
+        f"Geçerli değerler: {VALIDATION_VALID_MODES}."
+    )
 
 # =============================================================================
 # Pre-fire modunda current period'u predictor window'a hizala
@@ -236,28 +259,37 @@ FIRECCI51_AVAILABLE_END = "2020-12-31"
 # sızar ve pre-fire deneyi bilimsel olarak geçersiz olur.
 #
 # Burada CURRENT_PERIOD_END_DATE ve CURRENT_PERIOD_DAYS, predictor window'dan
-# TÜRETİLİR. Böylece tek kaynak (VALIDATION_PREFIRE_PREDICTOR_*) kullanılır ve
-# iki tarih tanımı arasında tutarsızlık olamaz. Baseline yılları aynı takvim
-# penceresini önceki yıllarda kullanmaya devam eder (Step3 bunu otomatik yapar).
+# TÜRETİLİR. Böylece tek kaynak (PREDICTOR_*_DATE) kullanılır ve iki tarih tanımı
+# arasında tutarsızlık olamaz. Baseline yılları aynı takvim penceresini önceki
+# yıllarda kullanmaya devam eder (Step3 bunu otomatik yapar).
 #
 # same_season modunda bu blok hiçbir şeyi değiştirmez; yukarıdaki varsayılan
 # CURRENT_PERIOD_* değerleri aynen korunur.
 if VALIDATION_MODE == "pre_fire":
     from datetime import datetime as _dt
 
-    _pred_start = _dt.strptime(VALIDATION_PREFIRE_PREDICTOR_START, "%Y-%m-%d")
-    _pred_end = _dt.strptime(VALIDATION_PREFIRE_PREDICTOR_END, "%Y-%m-%d")
+    _pred_start = _dt.strptime(PREDICTOR_START_DATE, "%Y-%m-%d")
+    _pred_end = _dt.strptime(PREDICTOR_END_DATE, "%Y-%m-%d")
+    _label_start = _dt.strptime(LABEL_START_DATE, "%Y-%m-%d")
+    _label_end = _dt.strptime(LABEL_END_DATE, "%Y-%m-%d")
 
     # Pencere gün sayısı (dahil): örn. 2023-06-01 -> 2023-07-31 = 61 gün.
     CURRENT_PERIOD_DAYS = (_pred_end - _pred_start).days
-    CURRENT_PERIOD_END_DATE = VALIDATION_PREFIRE_PREDICTOR_END
+    CURRENT_PERIOD_END_DATE = PREDICTOR_END_DATE
 
-    # Pre-fire predictor window ile label window çakışmamalı (sızıntı kontrolü).
-    _label_start = _dt.strptime(VALIDATION_PREFIRE_LABEL_START, "%Y-%m-%d")
-    if _pred_end > _label_start:
+    # Fail-fast: predictor ve label pencereleri aynı veya çakışıyorsa
+    # (VALIDATION_ALLOW_OVERLAPPING_WINDOWS açık değilse) hata ver.
+    _identical = (
+        PREDICTOR_START_DATE == LABEL_START_DATE
+        and PREDICTOR_END_DATE == LABEL_END_DATE
+    )
+    _overlapping = _pred_end > _label_start
+    if (_identical or _overlapping) and not VALIDATION_ALLOW_OVERLAPPING_WINDOWS:
         raise ValueError(
-            "pre_fire yapılandırması geçersiz: predictor window label window ile "
-            f"çakışıyor (predictor_end={VALIDATION_PREFIRE_PREDICTOR_END} > "
-            f"label_start={VALIDATION_PREFIRE_LABEL_START}). Predictor window "
-            "yangın/label döneminden ÖNCE bitmelidir."
+            "pre_fire yapılandırması geçersiz: predictor window ve label window "
+            f"aynı veya çakışıyor "
+            f"(predictor={PREDICTOR_START_DATE}->{PREDICTOR_END_DATE}, "
+            f"label={LABEL_START_DATE}->{LABEL_END_DATE}). "
+            "Predictor window yangın/label döneminden ÖNCE bitmelidir. "
+            "Bilerek çakışma istiyorsan VALIDATION_ALLOW_OVERLAPPING_WINDOWS=True yap."
         )

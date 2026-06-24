@@ -57,17 +57,19 @@ from core.config import (
     FIRECCI51_AVAILABLE_END,
     FIRECCI51_AVAILABLE_START,
     GEE_PROJECT,
+    LABEL_END_DATE,
+    LABEL_START_DATE,
+    PREDICTOR_END_DATE,
+    PREDICTOR_START_DATE,
     REGION_NAME,
+    VALIDATION_ALLOW_OVERLAPPING_WINDOWS,
     VALIDATION_BALANCED_UNBURNED_RATIO,
     VALIDATION_FIRMS_BRIGHTNESS_THRESHOLD,
     VALIDATION_INCLUDE_FIRMS,
     VALIDATION_LABEL_EXPORT_SCALE,
     VALIDATION_MAX_ROC_PREVIEW_POINTS,
     VALIDATION_MODE,
-    VALIDATION_PREFIRE_LABEL_END,
-    VALIDATION_PREFIRE_LABEL_START,
-    VALIDATION_PREFIRE_PREDICTOR_END,
-    VALIDATION_PREFIRE_PREDICTOR_START,
+    VALIDATION_VALID_MODES,
     VALIDATION_RANDOM_SEED,
     VALIDATION_SEASON_END,
     VALIDATION_SEASON_START,
@@ -829,18 +831,44 @@ def resolve_windows() -> dict:
     Validation moduna göre predictor ve label pencerelerini belirler.
 
     same_season: ikisi de VALIDATION_SEASON_START/END.
-    pre_fire:    predictor ve label pencereleri ayrı (VALIDATION_PREFIRE_*).
+    pre_fire:    predictor ve label pencereleri ayrı (PREDICTOR_*_DATE / LABEL_*_DATE).
+
+    Fail-fast:
+        - Geçersiz mode sessizce same_season'a DÜŞMEZ; ValidationError verir.
+        - pre_fire'da pencereler aynı/çakışıyorsa ve overlap'e izin verilmemişse
+          ValidationError verir.
     """
     mode = VALIDATION_MODE
+
+    if mode not in VALIDATION_VALID_MODES:
+        raise ValidationError(
+            f"Geçersiz VALIDATION_MODE: '{mode}'. Geçerli değerler: "
+            f"{VALIDATION_VALID_MODES}. (same_season'a sessizce düşülmez.)"
+        )
+
     if mode == "pre_fire":
+        identical = (
+            PREDICTOR_START_DATE == LABEL_START_DATE
+            and PREDICTOR_END_DATE == LABEL_END_DATE
+        )
+        overlapping = PREDICTOR_END_DATE > LABEL_START_DATE
+        if (identical or overlapping) and not VALIDATION_ALLOW_OVERLAPPING_WINDOWS:
+            raise ValidationError(
+                "pre_fire seçili ama predictor ve label pencereleri aynı/çakışıyor: "
+                f"predictor={PREDICTOR_START_DATE}->{PREDICTOR_END_DATE}, "
+                f"label={LABEL_START_DATE}->{LABEL_END_DATE}. "
+                "Predictor window label döneminden ÖNCE bitmelidir. Bilerek "
+                "çakışma istiyorsan VALIDATION_ALLOW_OVERLAPPING_WINDOWS=True yap."
+            )
         return {
             "mode": "pre_fire",
-            "predictor_start": VALIDATION_PREFIRE_PREDICTOR_START,
-            "predictor_end": VALIDATION_PREFIRE_PREDICTOR_END,
-            "label_start": VALIDATION_PREFIRE_LABEL_START,
-            "label_end": VALIDATION_PREFIRE_LABEL_END,
+            "predictor_start": PREDICTOR_START_DATE,
+            "predictor_end": PREDICTOR_END_DATE,
+            "label_start": LABEL_START_DATE,
+            "label_end": LABEL_END_DATE,
         }
-    # default: same_season
+
+    # same_season
     return {
         "mode": "same_season",
         "predictor_start": VALIDATION_SEASON_START,
@@ -885,12 +913,20 @@ def main() -> dict:
         )
 
     windows = resolve_windows()
-    log.info("Validation modu: %s", windows["mode"])
+    # İstenen net startup log (mode'un gerçekten ne olduğunu görünür kılar).
+    log.info("Running Step6 validation mode: %s", windows["mode"])
     log.info(
-        "Predictor window: %s -> %s | Label window: %s -> %s",
+        "Predictor window: %s -> %s",
         windows["predictor_start"], windows["predictor_end"],
+    )
+    log.info(
+        "Label window: %s -> %s",
         windows["label_start"], windows["label_end"],
     )
+    if windows["mode"] == "pre_fire":
+        log.info("Temporal relation: predictor before label (pre-fire)")
+    else:
+        log.info("Temporal relation: predictor and label same window (same-season)")
 
     # Referans grid + predictor'ları yükle (esnek dosya adı)
     ref_path = reference_predictor_path()
