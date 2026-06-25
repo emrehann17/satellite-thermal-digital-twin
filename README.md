@@ -25,7 +25,7 @@ Projede şu adımlar yer almaktadır:
 
 * çalışma bölgesinin tanımlanması
 * MODIS LST verisinin sorgulanması
-* MODIS için 5 yıllık yaz dönemi baseline üretimi
+* MODIS için 4 yıllık yaz dönemi (2019-2022) baseline üretimi
 * baseline için ortalama ve standart sapma hesaplanması
 * Landsat yüksek çözünürlüklü LST verisinin hazırlanması
 * Landsat günlük composite zaman serisi oluşturulması
@@ -50,8 +50,8 @@ Projede şu adımlar yer almaktadır:
 * proje yapısının modüler hale getirilmesi (`core/` yapısı)
 * ortak ayarların `config.py` altında toplanması
 * MODIS veri sorgulama
-* MODIS için 5 yıllık yaz dönemi **ortalama** üretimi
-* MODIS için 5 yıllık yaz dönemi **standart sapma** üretimi
+* MODIS için 4 yıllık yaz dönemi (2019-2022) **ortalama** üretimi
+* MODIS için 4 yıllık yaz dönemi (2019-2022) **standart sapma** üretimi
 * Landsat veri sorgulama
 * Landsat zaman serisi koleksiyonunun hazırlanması
 * current period ile aynı takvim penceresine sahip geçmiş yıl Landsat median composite'lerinin hazırlanması
@@ -64,7 +64,7 @@ Projede şu adımlar yer almaktadır:
 * Step5'in otomatik akış içinde çalıştırılması
 * baseline mean raster, baseline std raster, baseline valid count raster, current period median raster, current period valid count raster ve z-score anomaly raster çıktılarının üretilmesi
 * düşük baseline gözlem sayısı, düşük baseline standard deviation ve düşük current gözlem sayısı için tanı maskelerinin üretilmesi
-* MODIS 5 yıllık yaz mean/std rasterının Step5'te Landsat gridine yeniden örneklenmesi
+* MODIS 4 yıllık yaz mean/std rasterının Step5'te Landsat gridine yeniden örneklenmesi
 * MODIS mean/std üzerinden düşük çözünürlüklü bağlam z-score rasterı üretilmesi
 * Step5 raster çıktılarının windowed/chunked okuma ile düşük bellek kullanarak oluşturulması
 * NetCDF yerine daha hafif raster + metadata odaklı Step5 çıktı yapısına geçilmesi
@@ -139,10 +139,11 @@ Henüz tamamlanmamış veya ileride geliştirilecek başlıklar:
 
 Projede MODIS verisi, Doğu Akdeniz için düşük çözünürlüklü ama zamansal olarak daha düzenli bir referans termal davranış üretmek amacıyla kullanılmaktadır.
 
-Bu aşamada MODIS tarafında tam zaman serisi yerine 5 yıllık yaz dönemi ortalaması ve standart sapması alınmıştır. Bunun başlıca gerekçeleri şunlardır:
+Bu aşamada MODIS tarafında tam zaman serisi yerine 4 yıllık (2019-2022) yaz dönemi ortalaması ve standart sapması alınmıştır.
+(Not: The data period includes 2019–2023, but the baseline statistics exclude the current year and currently use 4 historical baseline years: 2019–2022.) Bunun başlıca gerekçeleri şunlardır:
 
 * MODIS, Landsat'a göre daha düzenli gözlem sıklığı sağlar.
-* 5 yıllık pencere, tek bir yıla göre daha kararlı bir baseline üretir.
+* 4 yıllık pencere, tek bir yıla göre daha kararlı bir baseline üretir.
 * Yaz aylarına odaklanılması, yüksek sıcaklık davranışını inceleme amacıyla uyumludur.
 * Ortalama tek başına yeterli olmadığı için, değişkenliği tanımlamak üzere standart sapma da eklenmiştir.
 * Bu yapı, Step5'te düşük çözünürlüklü MODIS bağlam z-score hesabı için kullanılmaktadır.
@@ -156,7 +157,7 @@ Bu nedenle MODIS çıktısı, Landsat'ın yerine geçen bir zaman serisi değild
 Projede genel akış şu şekildedir:
 
 1. Çalışma bölgesi GEE üzerinde tanımlanır.
-2. MODIS verisi kullanılarak 5 yıllık yaz dönemi baseline katmanları hazırlanır.
+2. MODIS verisi kullanılarak 4 yıllık yaz dönemi baseline katmanları hazırlanır.
 3. Bu baseline için ortalama ve standart sapma hesaplanır.
 4. Landsat verisi aynı bölge için filtrelenir.
 5. Current period için belirli bir temporal window tanımlanır.
@@ -221,7 +222,7 @@ GEE bağlantısını başlatır, çalışma bölgelerini tanımlar ve temel MODI
 
 ## Step 2
 
-MODIS verisini kullanarak 5 yıllık yaz dönemi baseline katmanlarını üretir. Bu aşamada ortalama ve standart sapma hesaplanır.
+MODIS verisini kullanarak 4 yıllık yaz dönemi baseline katmanlarını üretir. Bu aşamada ortalama ve standart sapma hesaplanır.
 
 ## Step 3
 

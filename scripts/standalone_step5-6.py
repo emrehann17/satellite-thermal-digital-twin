@@ -21,6 +21,7 @@ from core.paths import PROJECT_ROOT
 import src.step5_preprocess_timeseries as step5_preprocess_timeseries
 import src.step5b_diagnostic_report as step5b_diagnostic_report
 import src.step5c_tvdi as step5c_tvdi
+import src.step6_validate_fire_relation as step6_validate_fire_relation
 
 BASE_DIR = PROJECT_ROOT
 log, log_file = setup_logger("main")
@@ -41,7 +42,7 @@ def main() -> None:
     start_time = datetime.now()
 
     log.info("#" * 80)
-    log.info("STEP 5 PIPELINE BAŞLIYOR")
+    log.info("STEP 5-6 PIPELINE BAŞLIYOR")
     log.info(f"Başlangıç zamanı: {start_time.isoformat()}")
     log.info("#" * 80)
 
@@ -49,6 +50,7 @@ def main() -> None:
         run_step("STEP 5", step5_preprocess_timeseries.main)
         run_step("STEP 5C", step5c_tvdi.main)
         run_step("STEP 5B", step5b_diagnostic_report.main)
+        run_step("STEP 6", step6_validate_fire_relation.main)
 
         end_time = datetime.now()
         log.info("#" * 80)

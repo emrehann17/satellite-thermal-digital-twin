@@ -83,6 +83,7 @@ def ensure_step5_data_dirs() -> tuple[Path, Path, Path, Path, Path, Path]:
     modis_dir = BASE_DIR / "data" / "modis"
     ndvi_baseline_dir = BASE_DIR / "data" / "ndvi_timeseries"
     ndvi_current_dir = BASE_DIR / "data" / "ndvi_current_period"
+    landcover_dir = BASE_DIR / "data" / "landcover"
 
     lst_dir.mkdir(parents=True, exist_ok=True)
     qa_dir.mkdir(parents=True, exist_ok=True)
@@ -90,8 +91,9 @@ def ensure_step5_data_dirs() -> tuple[Path, Path, Path, Path, Path, Path]:
     modis_dir.mkdir(parents=True, exist_ok=True)
     ndvi_baseline_dir.mkdir(parents=True, exist_ok=True)
     ndvi_current_dir.mkdir(parents=True, exist_ok=True)
+    landcover_dir.mkdir(parents=True, exist_ok=True)
 
-    return lst_dir, qa_dir, current_dir, modis_dir, ndvi_baseline_dir, ndvi_current_dir
+    return lst_dir, qa_dir, current_dir, modis_dir, ndvi_baseline_dir, ndvi_current_dir, landcover_dir
 
 
 def copy_with_overwrite_control(source_path: Path, target_path: Path) -> None:
@@ -125,9 +127,13 @@ def classify_downloaded_tif(source_path: Path) -> tuple[str, Path] | None:
         modis_dir,
         ndvi_baseline_dir,
         ndvi_current_dir,
+        landcover_dir,
     ) = ensure_step5_data_dirs()
     name = source_path.name
     lower_name = name.lower()
+
+    if lower_name.startswith("landcover_esa_worldcover"):
+        return "landcover", landcover_dir / name
 
     if is_landsat_qa_export_name(name):
         return "baseline_qa", qa_dir / name
@@ -165,6 +171,7 @@ def place_downloaded_drive_tifs(staging_dir: Path) -> dict:
         "modis": [],
         "ndvi_baseline": [],
         "ndvi_current_period": [],
+        "landcover": [],
         "unmatched": [],
     }
 

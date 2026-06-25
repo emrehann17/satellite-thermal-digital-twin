@@ -28,8 +28,8 @@ DRIVE_DOWNLOAD_STAGING_SUBDIR = "drive_exports"
 DRIVE_DOWNLOAD_OVERWRITE = True
 
 MODIS_EXPORT = {
-    "description": "export_modis_lst_5y_summer_mean",
-    "file_name_prefix": "modis_lst_dogu_akdeniz_5y_summer_mean",
+    "description": "export_modis_lst_4y_summer_mean",
+    "file_name_prefix": "modis_lst_dogu_akdeniz_4y_summer_mean",
     "scale": 1000,
 }
 
@@ -47,6 +47,7 @@ LANDSAT_NDVI_EXPORT = {
 ENABLE_MODIS_EXPORT = True
 ENABLE_LANDSAT_EXPORT = True
 ENABLE_MODIS_STEP5_CONTEXT = True
+ENABLE_LANDCOVER_EXPORT = True
 
 # NDVI ve TVDI ürünleri (yeni bilimsel yön). Mevcut LST anomaly pipeline'ından bağımsız.
 ENABLE_NDVI_EXPORT = True

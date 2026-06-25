@@ -4,7 +4,7 @@ step2_modis_5year_mean.py
 Yapılanlar:
     - GEE bağlantısını başlatmak
     - Çalışma bölgelerini almak
-    - Doğu Akdeniz için 2019-2023 yaz ayları MODIS LST verisini sorgulamak
+    - Doğu Akdeniz için 2019-2022 yaz ayları MODIS LST verisini sorgulamak
     - Zaman ortalaması almak
     - DN -> Celsius dönüşümü yapmak
     - İşlenmiş görüntü ve metadata üretmek
@@ -43,7 +43,7 @@ log, log_file = setup_logger("step2")
 
 
 # =============================================================================
-# 1. 5 YILLIK YAZ LST GÖRÜNTÜSÜNÜ HAZIRLAMA
+# 1. 4 YILLIK YAZ LST GÖRÜNTÜSÜNÜ HAZIRLAMA
 # =============================================================================
 def process_summer_mean(
     region: ee.Geometry,
@@ -54,7 +54,7 @@ def process_summer_mean(
     month_end: int = SUMMER_MONTH_END,
     ) -> tuple[ee.Image, dict]:
     """
-    2019-2023 arası yaz aylarının (Haziran-Eylül) MODIS LST ortalamasını hesaplar.
+    2019-2022 arası yaz aylarının (Haziran-Eylül) MODIS LST ortalamasını hesaplar.
     Export yapmaz. Sadece işlenmiş ee.Image üretir.
     """
     log.info(

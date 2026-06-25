@@ -39,6 +39,7 @@ from core.config import (
     ENABLE_MODIS_EXPORT,
     ENABLE_LANDSAT_EXPORT,
     ENABLE_NDVI_EXPORT,
+    ENABLE_LANDCOVER_EXPORT,
     DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT,
     DRIVE_TASK_POLLING_ENABLED,
     DRIVE_TASK_POLL_INTERVAL_SECONDS,
@@ -660,6 +661,23 @@ def main(step3_result: dict | None = None) -> None:
     else:
         log.info("Landsat export devre dışı bırakıldı.")
 
+    landcover_export = None
+    if ENABLE_LANDCOVER_EXPORT:
+        log.info("\nESA WorldCover export ediliyor.")
+        worldcover = ee.ImageCollection("ESA/WorldCover/v200").first()
+        if worldcover is not None:
+            lc_image = worldcover.select("Map")
+            landcover_export = export_image_to_drive(
+                image=lc_image,
+                region=region,
+                description="export_esa_worldcover_2021",
+                folder=EXPORT_FOLDER,
+                file_name_prefix="landcover_esa_worldcover_v200",
+                scale=10
+            )
+        else:
+            log.warning("ESA WorldCover v200 bulunamadı, atlanıyor.")
+
     if DRIVE_TASK_POLLING_ENABLED and DRIVE_EXPORT_TASKS:
         drive_task_polling_metadata = poll_drive_export_tasks(DRIVE_EXPORT_TASKS)
         drive_download_metadata = {
@@ -701,7 +719,8 @@ def main(step3_result: dict | None = None) -> None:
         "enabled_exports": {
             "modis": ENABLE_MODIS_EXPORT,
             "landsat": ENABLE_LANDSAT_EXPORT,
-            "ndvi": ENABLE_NDVI_EXPORT
+            "ndvi": ENABLE_NDVI_EXPORT,
+            "landcover": ENABLE_LANDCOVER_EXPORT
         },
         "processing": {
             "modis": modis_processing_metadata,
@@ -715,7 +734,8 @@ def main(step3_result: dict | None = None) -> None:
             "landsat_baseline_timeseries": landsat_timeseries_exports,
             "landsat_current_period": current_period_export,
             "ndvi_baseline_timeseries": ndvi_timeseries_exports,
-            "ndvi_current_period": current_ndvi_export
+            "ndvi_current_period": current_ndvi_export,
+            "landcover": landcover_export
         },
         "drive_task_polling": drive_task_polling_metadata,
         "drive_download": drive_download_metadata,

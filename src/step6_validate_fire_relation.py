@@ -1353,6 +1353,28 @@ def write_summary_markdown(report: dict) -> Path:
         "changing product semantics.",
     ])
 
+    ndvi_06_08 = ndvi_stratified_auc.get("ndvi_0_6_0_8", {})
+    if ndvi_06_08:
+        lines.extend([
+            "",
+            "## NDVI-stratified AUC Highlights (NDVI 0.6–0.8)",
+            "",
+            "NDVI-stratified validation shows that TVDI signal depends strongly on vegetation density.",
+            "All-pixel TVDI AUC is lower and should not be interpreted alone.",
+            "The following results suggest TVDI is more meaningful over denser vegetation / burnable vegetation areas.",
+            "",
+        ])
+        for key in ["current_tvdi", "tvdi_difference"]:
+            val = ndvi_06_08.get(key)
+            if val and val.get("auc_full") is not None:
+                lines.append(f"- **{val['label']}**: AUC ≈ {fmt(val.get('auc_full'), 3)}")
+        lines.extend([
+            "",
+            "> **Note**: TVDI is not globally validated. Do not flip TVDI semantics.",
+            "",
+        ])
+
+
     # Koşullu yorumlar (AUC tabanlı)
     lst = per.get("thermal_anomaly_zscore")
     if lst is not None and lst.get("auc_full") is not None:
