@@ -36,10 +36,12 @@ from core.config import (
     MODIS_EXPORT,
     LANDSAT_EXPORT,
     LANDSAT_NDVI_EXPORT,
+    DEM_EXPORT,
     ENABLE_MODIS_EXPORT,
     ENABLE_LANDSAT_EXPORT,
     ENABLE_NDVI_EXPORT,
     ENABLE_LANDCOVER_EXPORT,
+    ENABLE_DEM_EXPORT,
     DRIVE_AUTO_DOWNLOAD_AFTER_EXPORT,
     DRIVE_TASK_POLLING_ENABLED,
     DRIVE_TASK_POLL_INTERVAL_SECONDS,
@@ -59,6 +61,7 @@ from core.paths import PROJECT_ROOT
 
 
 from src.step2_modis_5year_mean import process_summer_mean
+from src.step2b_dem import prepare_dem_products
 from src.step3_landsat_lst import prepare_landsat_anomaly_inputs
 
 
@@ -184,7 +187,13 @@ def export_image_to_drive(
         metadata_ref=metadata,
         description=description,
         file_name_prefix=file_name_prefix,
-        output_group="modis" if "modis" in file_name_prefix.lower() else "current_period",
+        output_group=(
+            "modis"
+            if "modis" in file_name_prefix.lower()
+            else "dem"
+            if file_name_prefix.lower().startswith("dem_")
+            else "current_period"
+        ),
     )
     return metadata
 
@@ -402,6 +411,54 @@ def export_ndvi_timeseries_to_drive(
         })
 
     return export_metadata
+
+
+# =============================================================================
+# 2c. DEM EXPORT (elevation + slope, statik yardımcı katman)
+# =============================================================================
+def export_dem_products_to_drive(
+    dem_image: ee.Image,
+    region: ee.Geometry,
+    folder: str,
+    scale: int = DEM_EXPORT["scale"],
+    crs: str = EXPORT_CRS,
+) -> dict:
+    """
+    DEM elevation ve slope bantlarını Landsat/MODIS ile aynı export mekanizması
+    (export_image_to_drive) üzerinden ayrı GeoTIFF'ler olarak Drive'a export eder.
+
+    Aynı Drive klasörü, aynı CRS, aynı region handling, aynı task yönetimi ve
+    aynı overwrite politikası kullanılır. Export kodu çoğaltılmaz.
+    """
+    elevation_cfg = DEM_EXPORT["elevation"]
+    slope_cfg = DEM_EXPORT["slope"]
+
+    log.info("DEM elevation export ediliyor.")
+    elevation_export = export_image_to_drive(
+        image=dem_image.select(elevation_cfg["band"]),
+        region=region,
+        description=elevation_cfg["description"],
+        folder=folder,
+        file_name_prefix=elevation_cfg["file_name_prefix"],
+        scale=scale,
+        crs=crs,
+    )
+
+    log.info("DEM slope export ediliyor.")
+    slope_export = export_image_to_drive(
+        image=dem_image.select(slope_cfg["band"]),
+        region=region,
+        description=slope_cfg["description"],
+        folder=folder,
+        file_name_prefix=slope_cfg["file_name_prefix"],
+        scale=scale,
+        crs=crs,
+    )
+
+    return {
+        "elevation": elevation_export,
+        "slope": slope_export,
+    }
 
 
 # =============================================================================
@@ -678,6 +735,23 @@ def main(step3_result: dict | None = None) -> None:
         else:
             log.warning("ESA WorldCover v200 bulunamadı, atlanıyor.")
 
+    dem_export = None
+    if ENABLE_DEM_EXPORT:
+        log.info("\nDEM (elevation + slope) export ediliyor.")
+        dem_image, dem_processing_metadata = prepare_dem_products(
+            region=region,
+            region_name=REGION_NAME,
+        )
+        dem_export = export_dem_products_to_drive(
+            dem_image=dem_image,
+            region=region,
+            folder=EXPORT_FOLDER,
+            scale=DEM_EXPORT["scale"],
+        )
+    else:
+        dem_processing_metadata = None
+        log.info("DEM export devre dışı bırakıldı.")
+
     if DRIVE_TASK_POLLING_ENABLED and DRIVE_EXPORT_TASKS:
         drive_task_polling_metadata = poll_drive_export_tasks(DRIVE_EXPORT_TASKS)
         drive_download_metadata = {
@@ -720,14 +794,16 @@ def main(step3_result: dict | None = None) -> None:
             "modis": ENABLE_MODIS_EXPORT,
             "landsat": ENABLE_LANDSAT_EXPORT,
             "ndvi": ENABLE_NDVI_EXPORT,
-            "landcover": ENABLE_LANDCOVER_EXPORT
+            "landcover": ENABLE_LANDCOVER_EXPORT,
+            "dem": ENABLE_DEM_EXPORT
         },
         "processing": {
             "modis": modis_processing_metadata,
             "landsat_baseline_timeseries": landsat_processing_metadata,
             "landsat_current_period": current_period_metadata,
             "ndvi_baseline_timeseries": ndvi_processing_metadata,
-            "ndvi_current_period": current_ndvi_metadata
+            "ndvi_current_period": current_ndvi_metadata,
+            "dem": dem_processing_metadata
         },
         "exports": {
             "modis": modis_export_metadata,
@@ -735,13 +811,16 @@ def main(step3_result: dict | None = None) -> None:
             "landsat_current_period": current_period_export,
             "ndvi_baseline_timeseries": ndvi_timeseries_exports,
             "ndvi_current_period": current_ndvi_export,
-            "landcover": landcover_export
+            "landcover": landcover_export,
+            "dem": dem_export
         },
         "drive_task_polling": drive_task_polling_metadata,
         "drive_download": drive_download_metadata,
         "notes": {
             "modis_download_mode": "drive_export_then_step4b_download",
             "landsat_download_mode": "drive_export_with_task_polling_then_step4b_download",
+            "dem_download_mode": "drive_export_then_step4b_download",
+            "dem_usage": "static_auxiliary_predictor_not_used_in_step5_yet",
             "anomaly_method": "window_symmetric_landsat_z_score",
             "landsat_generation_source": (
                 "step3_result" if used_external_step3_result else "step4_standalone"

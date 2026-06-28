@@ -21,6 +21,7 @@ from core.paths import PROJECT_ROOT
 
 import src.step1_fetch_modis as step1_fetch_modis
 import src.step2_modis_5year_mean as step2_modis_5year_mean
+import src.step2b_dem as step2b_dem
 import src.step3_landsat_lst as step3_landsat_lst
 import src.step4_export_geotiff as step4_export_geotiff
 import src.step4b_download_drive_export as step4b_download_drive_export
@@ -58,6 +59,7 @@ def main() -> None:
     try:
         run_step("STEP 1", step1_fetch_modis.main)
         run_step("STEP 2", step2_modis_5year_mean.main)
+        run_step("STEP 2B", step2b_dem.main)
         step3_result = run_step("STEP 3", step3_landsat_lst.main)
         run_step(
             "STEP 4",

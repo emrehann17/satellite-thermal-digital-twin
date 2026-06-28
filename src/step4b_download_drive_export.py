@@ -29,6 +29,7 @@ from core.config import (
     LANDSAT_EXPORT,
     LANDSAT_NDVI_EXPORT,
     MODIS_EXPORT,
+    DEM_EXPORT,
 )
 from core.io_utils import setup_logger
 from core.paths import PROJECT_ROOT
@@ -75,7 +76,7 @@ def resolve_drive_folder_reference() -> tuple[str | None, str | None]:
     return folder_url, folder_id
 
 
-def ensure_step5_data_dirs() -> tuple[Path, Path, Path, Path, Path, Path]:
+def ensure_step5_data_dirs() -> tuple[Path, Path, Path, Path, Path, Path, Path, Path]:
     """İndirilen rasterlar için Step5'in beklediği yerel veri klasörlerini hazırlar."""
     lst_dir = BASE_DIR / "data" / "landsat_timeseries"
     qa_dir = BASE_DIR / "data" / "landsat_qa"
@@ -84,6 +85,7 @@ def ensure_step5_data_dirs() -> tuple[Path, Path, Path, Path, Path, Path]:
     ndvi_baseline_dir = BASE_DIR / "data" / "ndvi_timeseries"
     ndvi_current_dir = BASE_DIR / "data" / "ndvi_current_period"
     landcover_dir = BASE_DIR / "data" / "landcover"
+    dem_dir = BASE_DIR / "data" / "dem"
 
     lst_dir.mkdir(parents=True, exist_ok=True)
     qa_dir.mkdir(parents=True, exist_ok=True)
@@ -92,8 +94,18 @@ def ensure_step5_data_dirs() -> tuple[Path, Path, Path, Path, Path, Path]:
     ndvi_baseline_dir.mkdir(parents=True, exist_ok=True)
     ndvi_current_dir.mkdir(parents=True, exist_ok=True)
     landcover_dir.mkdir(parents=True, exist_ok=True)
+    dem_dir.mkdir(parents=True, exist_ok=True)
 
-    return lst_dir, qa_dir, current_dir, modis_dir, ndvi_baseline_dir, ndvi_current_dir, landcover_dir
+    return (
+        lst_dir,
+        qa_dir,
+        current_dir,
+        modis_dir,
+        ndvi_baseline_dir,
+        ndvi_current_dir,
+        landcover_dir,
+        dem_dir,
+    )
 
 
 def copy_with_overwrite_control(source_path: Path, target_path: Path) -> None:
@@ -118,6 +130,30 @@ def is_landsat_qa_export_name(filename: str) -> bool:
     return bool(re.search(r"_qa($|[-_])", stem))
 
 
+def resolve_dem_target_name(filename: str, product: str) -> str:
+    """
+    DEM export dosyasını kanonik isme (elevation.tif / slope.tif) eşler.
+
+    GEE büyük export'ları parçalara böler ve dosya adına tile son ekleri ekler;
+    örn. dem_elevation_dogu_akdeniz-0000000000-0000000000.tif. Bu durumda
+    parçaların birbirini ezmemesi için tile son eki kanonik isme taşınır.
+    """
+    stem = Path(filename).stem
+    prefix = DEM_EXPORT[product]["file_name_prefix"]
+    suffix = stem[len(prefix):]  # tek parça için boş, parçalı için '-0000...-0000...'
+    return f"{product}{suffix}.tif"
+
+
+def classify_dem_tif(filename: str) -> str | None:
+    """İndirilen GeoTIFF DEM elevation mı slope mı ürünü, değilse None döner."""
+    lower_name = filename.lower()
+    if lower_name.startswith(DEM_EXPORT["elevation"]["file_name_prefix"].lower()):
+        return "elevation"
+    if lower_name.startswith(DEM_EXPORT["slope"]["file_name_prefix"].lower()):
+        return "slope"
+    return None
+
+
 def classify_downloaded_tif(source_path: Path) -> tuple[str, Path] | None:
     """İndirilen GeoTIFF'i Step5 data klasörlerinden doğru hedefe sınıflandırır."""
     (
@@ -128,12 +164,18 @@ def classify_downloaded_tif(source_path: Path) -> tuple[str, Path] | None:
         ndvi_baseline_dir,
         ndvi_current_dir,
         landcover_dir,
+        dem_dir,
     ) = ensure_step5_data_dirs()
     name = source_path.name
     lower_name = name.lower()
 
     if lower_name.startswith("landcover_esa_worldcover"):
         return "landcover", landcover_dir / name
+
+    dem_product = classify_dem_tif(name)
+    if dem_product is not None:
+        target_name = resolve_dem_target_name(name, dem_product)
+        return "dem", dem_dir / target_name
 
     if is_landsat_qa_export_name(name):
         return "baseline_qa", qa_dir / name
@@ -172,6 +214,7 @@ def place_downloaded_drive_tifs(staging_dir: Path) -> dict:
         "ndvi_baseline": [],
         "ndvi_current_period": [],
         "landcover": [],
+        "dem": [],
         "unmatched": [],
     }
 

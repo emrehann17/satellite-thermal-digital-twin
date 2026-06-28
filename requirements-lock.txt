@@ -47,6 +47,7 @@ ipython_pygments_lexers==1.1.1
 ipywidgets==8.1.8
 jedi==0.20.0
 Jinja2==3.1.6
+joblib==1.5.3
 jupyter-leaflet==0.20.0
 jupyterlab_widgets==3.0.16
 kiwisolver==1.5.0
@@ -83,12 +84,13 @@ python-dotenv==1.2.2
 rasterio==1.5.0
 ratelim==0.1.6
 requests==2.33.1
+scikit-learn==1.9.0
 scipy==1.17.1
 scooby==0.11.2
 six==1.17.0
 soupsieve==2.8.3
-spicy==0.16.0
 stack-data==0.6.3
+threadpoolctl==3.6.0
 tqdm==4.67.3
 traitlets==5.15.0
 traittypes==0.2.3

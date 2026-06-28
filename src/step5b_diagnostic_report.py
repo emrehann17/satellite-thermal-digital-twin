@@ -43,7 +43,7 @@ from core.paths import PROJECT_ROOT
 BASE_DIR = PROJECT_ROOT
 STEP5_OUTPUT_DIR = BASE_DIR / "outputs" / "step5"
 STEP5C_OUTPUT_DIR = BASE_DIR / "outputs" / "step5c"
-DIAGNOSTIC_DIR = BASE_DIR / "outputs" / "diagnostics"
+DIAGNOSTIC_DIR = BASE_DIR / "outputs" / "step5b_diagnostics"
 DIAGNOSTIC_DIR.mkdir(parents=True, exist_ok=True)
 
 log, log_file = setup_logger("step5b")

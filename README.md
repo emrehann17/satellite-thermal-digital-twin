@@ -198,6 +198,7 @@ core/
 src/
 ├── step1_fetch_modis.py
 ├── step2_modis_5year_mean.py
+├── step2b_dem.py
 ├── step3_landsat_lst.py
 ├── step4_export_geotiff.py
 ├── step4b_download_drive_export.py
@@ -223,6 +224,23 @@ GEE bağlantısını başlatır, çalışma bölgelerini tanımlar ve temel MODI
 ## Step 2
 
 MODIS verisini kullanarak 4 yıllık yaz dönemi baseline katmanlarını üretir. Bu aşamada ortalama ve standart sapma hesaplanır.
+
+## Step 2B
+
+DEM (statik yardımcı katman) hazırlama adımıdır. MODIS/Landsat ürünleriyle **aynı lifecycle'ı** izler: bu adım yalnızca veriyi hazırlar ve metadata yazar; export veya indirme yapmaz, `geemap.ee_export_image()` çağırmaz.
+
+DEM kaynağı olarak öncelikle **Copernicus DEM GLO-30** denenir; erişilemezse **USGS/SRTMGL1_003** fallback'ine düşülür. Hangi kaynağın kullanıldığı metadata'ya yazılır. İki ürün hazırlanır:
+
+* `elevation` — DEM yükseklik bandı (metre)
+* `slope` — `ee.Terrain.slope` ile elevation'dan türetilen eğim (derece)
+
+Yapılandırılmış AOI (`REGION_NAME`) ve `EXPORT_CRS` kullanılır. Çıktı metadata dosyası:
+
+```text
+outputs/step2b/step2b_dem_metadata.json
+```
+
+Metadata; dataset, fallback dataset, AOI, CRS, export çözünürlüğü, ürünler (elevation/slope), export dosya adları ve oluşturma zamanını içerir.
 
 ## Step 3
 
@@ -252,6 +270,8 @@ Current period çıktısı iki bantlıdır:
 
 Online export katmanıdır. MODIS ve Landsat rasterlarını GeoTIFF olarak Google Drive'a export eder ve export task'larını polling ile izler. Bu adım artık Drive klasörünü indirmez; indirme ve yerel klasörlere dağıtma sorumluluğu Step4b'ye ayrılmıştır.
 
+Step4 ayrıca DEM ürünlerini (`elevation`, `slope`) Landsat/MODIS ile **tamamen aynı export mekanizması** (`export_image_to_drive`) üzerinden export eder: aynı Drive klasörü, aynı CRS, aynı region handling, aynı task polling ve aynı overwrite politikası. DEM görüntüsü Step2B helper'ı (`prepare_dem_products`) ile üretilir; ayrı/yeni bir export yolu eklenmez.
+
 Step4 tek başına çalıştırıldığında da Step3 ile aynı pencere-simetrik baseline/current helper'ını kullanır. Böylece standalone export yolu eski günlük baseline mantığına düşmez; `REGION_NAME`, baseline yıl aralığı ve current period ayarları `core/config.py` üzerinden gelir.
 
 ## Step 4B
@@ -264,6 +284,9 @@ Yerel klasör yerleştirmesi şu şekildedir:
 * Baseline Landsat LST dosyaları -> `data/landsat_timeseries`
 * Current period median dosyası -> `data/current_period`
 * MODIS export dosyaları -> `data/modis`
+* DEM dosyaları -> `data/dem/elevation.tif` ve `data/dem/slope.tif`
+
+DEM indirme, Landsat/MODIS ile aynı akışı kullanır: zaten varsa atlama (`DRIVE_DOWNLOAD_OVERWRITE` kapalıyken mevcut dosya korunur), aksi halde indirme. DEM dosya adları kanonik (`elevation.tif`/`slope.tif`) hale getirilir; GEE parçalı export üretirse tile son ekleri korunarak çakışma önlenir.
 
 ## Step 5
 
@@ -519,6 +542,39 @@ Bu görseller, projenin mevcut geliştirme aşamasını temsil eden erken protot
 * Current thermal state, QA-temiz günlük Landsat composite yığını üzerinden tanımlanmaktadır. Bu yaklaşım, sahne-bazlı current tanımına göre daha kararlı bir yöntemdir.
 * MODIS bağlam z-score rasterı 1 km kaynak veriden üretildiği için 30 m Landsat ürünü gibi yorumlanmamalıdır.
 * Anomaly rasterındaki mavi/kırmızı alanlar doğrudan fiziksel yorumlanmamalıdır; `valid_count`, düşük güven maskeleri ve MODIS bağlam ürünü ile birlikte değerlendirilmelidir.
+
+---
+
+# DEM Aşaması (elevation + slope)
+
+DEM (Digital Elevation Model), pipeline'a mevcut mimariyi bozmadan, MODIS/Landsat ürünleriyle **birebir aynı lifecycle** üzerinden eklenmiştir:
+
+```text
+Step2B (prepare + metadata)
+   -> Step4 (Google Earth Engine export task)
+      -> Step4b (Drive export indirme)
+```
+
+İki statik ürün üretilir:
+
+* `elevation` — Copernicus DEM GLO-30 (fallback: USGS/SRTMGL1_003), metre
+* `slope` — `ee.Terrain.slope` ile elevation'dan türetilir, derece
+
+İndirilen dosyalar:
+
+```text
+data/dem/elevation.tif
+data/dem/slope.tif
+```
+
+## Önemli durum notları
+
+* **DEM artık indiriliyor.** Step2B hazırlar, Step4 export eder, Step4b `data/dem/` altına yerleştirir.
+* **DEM henüz Step5 içinde KULLANILMIYOR.** Step5/Step5B/Step5C/Step6 akışı değiştirilmemiştir; DEM bu adımlara hiçbir girdi sağlamaz.
+* **DEM, ileride RF/XGBoost tabanlı MODIS downscaling için hazırlanmaktadır.** Bu aşama henüz uygulanmamıştır; DEM şimdilik yalnızca veri olarak hazır bulundurulur.
+* **elevation ve slope statik yardımcı (auxiliary) predictor'lardır.** Zamanla değişmezler; gelecekteki downscaling modelinde sabit yardımcı değişkenler olarak kullanılmaları planlanmaktadır.
+
+Bu aşama RF, XGBoost, downscaling veya ESA WorldCover içermez ve mevcut bilimsel çıktıları (LST anomaly, TVDI, burned-area association) etkilemez.
 
 ---
 

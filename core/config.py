@@ -49,6 +49,36 @@ ENABLE_LANDSAT_EXPORT = True
 ENABLE_MODIS_STEP5_CONTEXT = True
 ENABLE_LANDCOVER_EXPORT = True
 
+# DEM (statik yükseklik/eğim yardımcı katmanı). MODIS/Landsat ile aynı lifecycle:
+# Step2B prepare + metadata, Step4 export task, Step4b Drive download.
+# DEM henüz Step5+ içinde KULLANILMAZ; ileride RF/XGBoost MODIS downscaling için
+# statik yardımcı predictor (elevation, slope) olarak hazırlanır.
+ENABLE_DEM_EXPORT = True
+
+# Tercih edilen DEM kaynağı: Copernicus DEM GLO-30 (ImageCollection, 30 m).
+# Fallback: USGS SRTMGL1 003 (tek Image, 30 m). Step2B tercih edileni dener,
+# bulunamazsa fallback'e düşer ve bunu metadata'ya yazar.
+DEM_COLLECTION = "COPERNICUS/DEM/GLO30"
+DEM_COLLECTION_BAND = "DEM"
+DEM_FALLBACK_DATASET = "USGS/SRTMGL1_003"
+DEM_FALLBACK_BAND = "elevation"
+
+# DEM export ayarları. Landsat ile aynı 30 m grid ve EXPORT_CRS kullanılır.
+# Her ürün (elevation, slope) ayrı GeoTIFF olarak export edilir.
+DEM_EXPORT = {
+    "elevation": {
+        "description": "export_dem_elevation_dogu_akdeniz",
+        "file_name_prefix": "dem_elevation_dogu_akdeniz",
+        "band": "elevation",
+    },
+    "slope": {
+        "description": "export_dem_slope_dogu_akdeniz",
+        "file_name_prefix": "dem_slope_dogu_akdeniz",
+        "band": "slope",
+    },
+    "scale": 30,
+}
+
 # NDVI ve TVDI ürünleri (yeni bilimsel yön). Mevcut LST anomaly pipeline'ından bağımsız.
 ENABLE_NDVI_EXPORT = True
 ENABLE_TVDI_STEP5 = True
