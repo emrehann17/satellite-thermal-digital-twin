@@ -71,6 +71,39 @@ Projede şu adımlar yer almaktadır:
 
 ---
 
+# Current pipeline status
+
+## Completed / validated
+- Landsat current-period and historical baseline LST products are generated for the Kozan AOI.
+- Current year is excluded from the historical baseline to avoid leakage.
+- Temporal interpolation was removed; insufficient observations are masked as NaN.
+- NDVI export was fixed/re-exported after stale local artifacts were detected.
+- Clean NDVI rasters now pass physical range validation: approximately [-1, 1].
+- Step4B GeoTIFF validation is manifest/metadata-driven and catches invalid active products. Baseline NDVI files referenced by `outputs/step5c/step5c_metadata.json` (`inputs.baseline_ndvi_files`) are registered as active required products, not legacy.
+- DEM elevation and slope products are generated and validated.
+- Step7A tiled/windowed raster processing test passed with exact reconstruction: max_abs_difference = 0.0.
+- TVDI products are generated with NDVI-binned wet/dry edges.
+- MCD64A1 burned-area validation is implemented in pre-fire mode.
+- FireCCI51 is skipped for 2023 because the requested period is outside dataset availability.
+
+## Important validation result
+- Clean NDVI changed the interpretation of the previous TVDI results.
+- Single-index TVDI association with later burned area is weak in this AOI/year.
+- In the clean pre-fire run, the strongest single-index TVDI result is only around NDVI 0.6-0.8 `tvdi_difference` AUC ≈ 0.522.
+- LST anomaly remains weakly positive, around AUC ≈ 0.53-0.55 depending on population.
+- Therefore the current scientific conclusion is **not** "TVDI alone predicts fire risk strongly."
+- The correct conclusion is: the NDVI/TVDI pipeline is now technically valid, but single-index predictors are weak; the next step is multi-feature modeling/downscaling.
+- This remains an **initial burned-area association experiment**, not a validated fire-risk model. No high-AUC claim is made.
+
+## Next step
+- Step7B: prepare MODIS downscaling training dataset.
+- Features should include NDVI, DEM elevation, slope, land cover, coordinates, MODIS LST context, and Landsat LST target.
+- Do not proceed to fire-risk RF/XGBoost until MODIS downscaling / gap filling is handled.
+
+> 3D / Cesium / Jetson / mobile components are later demo/application layers, not current scientific validation results.
+
+---
+
 # Şu Anda Gözlenen Sınırlılıklar
 
 Proje çalışıyor olsa da şu anda bazı önemli teknik sınırlılıklar bulunmaktadır:
@@ -435,8 +468,14 @@ MAX_LANDSAT_DAILY_EXPORTS = 12
 BASELINE_START_DATE = "2019-06-01"
 BASELINE_END_DATE = "2023-09-30"
 
-CURRENT_PERIOD_DAYS = 45
-CURRENT_PERIOD_END_DATE = "2023-08-31"
+VALIDATION_MODE = "pre_fire"
+PREDICTOR_START_DATE = "2023-06-01"
+PREDICTOR_END_DATE = "2023-07-31"
+LABEL_START_DATE = "2023-08-01"
+LABEL_END_DATE = "2023-10-31"
+
+CURRENT_PERIOD_DAYS = 60
+CURRENT_PERIOD_END_DATE = "2023-07-31"
 
 STEP5_MIN_BASELINE_STD_CELSIUS = 1.0
 STEP5_MIN_MODIS_STD_CELSIUS = 1.0
@@ -749,13 +788,30 @@ testidir**. Bu bir yangın-riski MODELİ değildir ve RF/XGBoost eğitmez.
 
 Step6 iki mod destekler (`VALIDATION_MODE`):
 
-* **same_season** — predictor rasterları ve yanmış alan etiketleri AYNI sezon
-  penceresinden alınır. İlk burned-area ilişki (association) testidir; predictor
-  ile label aynı dönemde çakıştırılır.
-* **pre_fire** — predictor window ve label window AYRIDIR. Yangından önceki
-  kuruluk sinyalinin, sonraki yanmış alanlarla ilişkisini test etmek içindir.
-  Varsayılan örnek: predictor window `2023-06-01 -> 2023-07-31`, label window
-  `2023-08-01 -> 2023-10-31`.
+* **pre_fire (PRIMARY / birincil)** — predictor window ve label window AYRIDIR.
+  Yangından önceki kuruluk sinyalinin, sonraki yanmış alanlarla ilişkisini test
+  eder. Bu, projenin **birincil doğrulama modudur**. Varsayılan örnek: predictor
+  window `2023-06-01 -> 2023-07-31`, label window `2023-08-01 -> 2023-10-31`.
+* **same_season (SECONDARY / diagnostic)** — predictor rasterları ve yanmış alan
+  etiketleri AYNI sezon penceresinden alınır. **İkincil / tanısal (diagnostic)**
+  bir moddur; predictor ile label aynı dönemde çakıştığı için nedensel önceliği
+  test etmez, yalnızca ilk association kontrolü sağlar.
+
+### Raporlama önceliği (supervisor feedback)
+
+Step6 raporu artık sonuçları bilimsel önemine göre sıralar:
+
+* **Birincil değerlendirme alanı = burnable / vegetated strata.** Ana bölümler
+  şu sırayı önceliklendirir: (1) land-cover burnable pikseller (varsa), (2)
+  NDVI > 0.3 vejetasyon pikselleri, (3) NDVI-stratified validation.
+* **All-pixel validation yalnızca DIAGNOSTIC'tir.** Tüm-piksel AUC'leri,
+  burnable vejetasyonu non-burnable sıcak/kuru yüzeylerle karıştırdığı için
+  başlık (headline) sonuç olarak KULLANILMAZ; "Diagnostic / confounding check"
+  bölümüne taşınmıştır.
+* **Anomaly z-score ürünleri** (`thermal_anomaly_zscore`, `tvdi_anomaly_zscore`)
+  şu an `current_tvdi` ve `tvdi_difference`'tan **daha zayıftır** ve fazla
+  iddialı (overclaim) sunulmamalıdır.
+* TVDI **flip edilmez**; all-pixel inversiyonu bir population-mixing artefaktıdır.
 
 pre_fire modu bilimsel olarak yalnızca predictor rasterları gerçekten o predictor
 window'a göre üretilmişse anlamlıdır. Mevcut Step5/Step5C çıktıları farklı bir
@@ -854,6 +910,93 @@ altında kalır.
   olarak raporlanır. 2023 validation için MCD64A1 ana label kaynağıdır.
 * Boş collection / bandsiz image kontrolleri (collection.size, bandNames().size)
   korunur; `.gt()` asla boş image üzerinde çağrılmaz.
+
+## Current scientific interpretation
+
+Projenin şu anki bilimsel hikayesi (overclaim olmadan):
+
+* Hikaye **"global anomaly predicts fire" DEĞİLDİR.**
+* Hikaye şudur: **burnable / vegetated alanlar içinde, mevcut kuruluk
+  (`current_tvdi`) ve TVDI farkı (`tvdi_difference`), sonraki yanmış alanla
+  (subsequent burned area) association gösterir.** En belirgin sinyal NDVI 0.6-0.8
+  (yoğun vejetasyon) stratumundadır.
+* All-pixel TVDI, burnable vejetasyonu non-burnable sıcak/kuru yüzeylerle
+  karıştırır; bu yüzden `current_tvdi` global ölçekte **inverted** görünür. Bu bir
+  population-mixing artefaktıdır, gerçek bir işaret tersine dönmesi değildir.
+* **TVDI flip edilmez.** Düşük all-pixel AUC, ürün semantiğini değiştirmek için
+  gerekçe değildir.
+* **LST/TVDI anomaly z-score'ları hâlâ zayıftır** ve fazla iddialı
+  sunulmamalıdır; `current_tvdi` ve `tvdi_difference`'tan daha düşük performans
+  gösterirler.
+* Tüm sonuçlar "candidate dryness indicator" / "first burned-area association
+  test" seviyesindedir; doğrulanmış yangın-riski modeli değildir.
+
+## Step4B GeoTIFF validation
+
+Step4B, Drive export'larını indirip yerel `data/` klasörlerine yerleştirdikten
+(veya dosyalar zaten varsa onları tespit ettikten) sonra her GeoTIFF için
+bütünlük (integrity) doğrulaması çalıştırır. Doğrulama mantığı generic
+`utils/geotiff_validation.py` modülündedir.
+
+Yakalanan kritik (loud fail) durumlar: dosya yok, okunamayan GeoTIFF,
+width/height = 0, CRS/transform yok, tüm pikseller NaN (`finite_count == 0`) ve
+ürün-spesifik imkânsız aralık (örn. slope tüm-NaN veya slope max > 200). Bu
+sayede daha önce yaşanan **all-NaN slope** rasterı gibi bir hata anında yakalanır
+ve pipeline net bir hata ile durur; Step4B rasterı **onarmaz**, yalnızca doğrular
+ve raporlar.
+
+Kritik olmayan durumlar uyarı olarak raporlanır ama akış devam eder: nodata
+değeri set edilmemiş, sabit raster, beklenenden düşük (ama sıfır olmayan)
+finite yüzdesi, küçük extent farkı, eksik opsiyonel ürün.
+
+Doğrulanan ürünler: Landsat LST, NDVI, MODIS, DEM (`data/dem/elevation.tif`,
+`data/dem/slope.tif`) ve varsa land-cover. Raporlar:
+
+```text
+outputs/step4b/geotiff_validation_summary.json
+outputs/step4b/geotiff_validation_summary.md
+```
+
+Step4b metadata'sına `geotiff_validation` bölümü eklenir (enabled, summary_path,
+products_checked/passed/failed, warnings_count).
+
+CLI bayrakları:
+
+```bash
+# yalnızca mevcut dosyaları doğrula (indirme yok) — slope fix sonrası kontrol için
+python src/step4b_download_drive_export.py --validation-only
+# indir ama doğrulama yapma
+python src/step4b_download_drive_export.py --skip-validation
+# warning'leri de failure say
+python src/step4b_download_drive_export.py --strict-validation
+```
+
+## Step7A Tiling infrastructure
+
+Step7A, büyük rasterların **pencere/tile-güvenli** (window-safe) işlenebildiğini
+doğrular. Bu altyapı, Kozan AOI'den Doğu Akdeniz'e ölçeklenmeden ve MODIS
+downscaling / gap filling'e geçilmeden önce gereklidir. Generic tiling
+yardımcıları `utils/tiling.py` içindedir (proje-spesifik ürün hardcode edilmez).
+
+Step7A **model eğitmez** ve **bilimsel ürün üretmez**. Yalnızca bir referans
+rasterı (öncelik: DEM elevation → current LST → current TVDI → anomaly zscore)
+pencere pencere okuyup tile dosyalarına yazar, tam rasterı yeniden birleştirir
+(mosaic) ve orijinaliyle karşılaştırır. Rasterın tamamı belleğe alınmaz;
+`rasterio` windows kullanılır.
+
+Çıktılar (yalnızca `outputs/step7a/` altında):
+
+```text
+outputs/step7a/tiling_test_reconstructed.tif
+outputs/step7a/tiling_test_difference.tif
+outputs/step7a/tiling_test_summary.json
+outputs/step7a/tiling_test_summary.md
+```
+
+Geçme kriteri: aynı CRS / transform / boyut / bounds ve max mutlak fark ≤ tolerans
+(NaN/nodata eşitliği doğru ele alınarak). CLI bayrakları: `--reference-raster`,
+`--tile-size`, `--overlap`, `--force`, `--tolerance`. Mevcut çıktılar yalnızca
+`--force` ile ezilir.
 
 ## Diğer ileri adımlar (Phase 2+)
 

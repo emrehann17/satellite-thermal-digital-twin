@@ -327,3 +327,7 @@ if VALIDATION_MODE == "pre_fire":
             "Predictor window yangın/label döneminden ÖNCE bitmelidir. "
             "Bilerek çakışma istiyorsan VALIDATION_ALLOW_OVERLAPPING_WINDOWS=True yap."
         )
+
+NDVI_DENOMINATOR_EPSILON = 1e-6     # 0.000001
+NDVI_VALID_MIN = -1.0
+NDVI_VALID_MAX = 1.0

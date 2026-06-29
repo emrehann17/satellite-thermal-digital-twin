@@ -36,6 +36,9 @@ from core.config import (
     LANDSAT_SR_OFFSET,
     LANDSAT_RED_BAND,
     LANDSAT_NIR_BAND,
+    NDVI_DENOMINATOR_EPSILON,
+    NDVI_VALID_MIN,
+    NDVI_VALID_MAX,
     REGION_NAME,
     CURRENT_PERIOD_DAYS,
     CURRENT_PERIOD_END_DATE,
@@ -97,15 +100,21 @@ def apply_qa_mask(image: ee.Image) -> ee.Image:
 
 def add_ndvi_band(image: ee.Image) -> ee.Image:
     """
-    Landsat 8 C2L2 yüzey yansıması (SR) bantlarından NDVI bandı üretir.
+    Landsat 8/9 C2L2 yüzey yansıması (SR) bantlarından geçerli NDVI bandı üretir.
 
     SR_B4 (Red) ve SR_B5 (NIR) DN değerleri önce reflectance'a çevrilir:
         reflectance = DN * LANDSAT_SR_SCALE + LANDSAT_SR_OFFSET
     Ardından:
         NDVI = (NIR - Red) / (NIR + Red)
 
-    NDVI bandı QA maskesini miras alır (apply_qa_mask önce çağrılmalı). LST ile
-    aynı QA mask / grid / composite mantığını paylaşması için ayrı maske kurulmaz.
+    Fiziksel olarak imkânsız NDVI değerlerini (ör. -270, +400) önlemek için:
+      - Red ve NIR sonlu (finite/valid) olmalı,
+      - payda |NIR + Red| < NDVI_DENOMINATOR_EPSILON olan pikseller maskelenir
+        (sıfıra bölme / patlama önlenir),
+      - hesap sonrası NDVI [NDVI_VALID_MIN, NDVI_VALID_MAX] dışındaki pikseller
+        MASKELENİR (sessizce clamp YAPILMAZ).
+
+    NDVI bandı QA maskesini miras alır (apply_qa_mask önce çağrılmalı).
     """
     red = (
         image.select(LANDSAT_RED_BAND)
@@ -117,8 +126,36 @@ def add_ndvi_band(image: ee.Image) -> ee.Image:
         .multiply(LANDSAT_SR_SCALE)
         .add(LANDSAT_SR_OFFSET)
     )
-    ndvi = nir.subtract(red).divide(nir.add(red)).rename("NDVI")
+
+    denominator = nir.add(red)
+
+    # Geçerli giriş maskesi: Red/NIR sonlu VE payda sıfıra yakın değil.
+    valid_input = (
+        red.mask()
+        .And(nir.mask())
+        .And(denominator.abs().gte(NDVI_DENOMINATOR_EPSILON))
+    )
+
+    ndvi = nir.subtract(red).divide(denominator).rename("NDVI")
+
+    # Fiziksel NDVI aralığı dışını maskele (clamp etme, maskele).
+    in_range = ndvi.gte(NDVI_VALID_MIN).And(ndvi.lte(NDVI_VALID_MAX))
+
+    ndvi = ndvi.updateMask(valid_input).updateMask(in_range)
     return image.addBands(ndvi)
+
+
+def mask_ndvi_physical_range(ndvi_band: ee.Image) -> ee.Image:
+    """
+    NDVI composite'ine fiziksel aralık maskesini (yeniden) uygular.
+
+    add_ndvi_band her sahnede aralık maskesi uygular; ancak median/compositing
+    sonrasında savunma amaçlı olarak bu maske tekrar uygulanır. Böylece
+    [NDVI_VALID_MIN, NDVI_VALID_MAX] dışındaki herhangi bir piksel CLAMP edilmez,
+    MASKELENİR (fiziksel olarak imkânsız NDVI değerleri ürüne sızmaz).
+    """
+    in_range = ndvi_band.gte(NDVI_VALID_MIN).And(ndvi_band.lte(NDVI_VALID_MAX))
+    return ndvi_band.updateMask(in_range)
 
 
 def get_landsat_daily_median_collection(
@@ -547,6 +584,8 @@ def get_current_period_ndvi_median(
         .rename("Current_Period_NDVI")
         .toFloat()
     )
+    # Savunma: composite sonrası fiziksel aralık dışını maskele (clamp değil).
+    ndvi_median = mask_ndvi_physical_range(ndvi_median).rename("Current_Period_NDVI")
 
     current_ndvi = (
         ndvi_median
@@ -646,6 +685,8 @@ def get_landsat_baseline_window_ndvi_collection(
 
         masked_collection = raw_collection.map(apply_qa_mask).map(add_ndvi_band)
         ndvi_median = masked_collection.select("NDVI").median().rename("NDVI")
+        # Savunma: composite sonrası fiziksel aralık dışını maskele (clamp değil).
+        ndvi_median = mask_ndvi_physical_range(ndvi_median).rename("NDVI")
         valid_count = (
             masked_collection
             .select("NDVI")

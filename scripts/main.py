@@ -29,6 +29,7 @@ import src.step5_preprocess_timeseries as step5_preprocess_timeseries
 import src.step5b_diagnostic_report as step5b_diagnostic_report
 import src.step5c_tvdi as step5c_tvdi
 import src.step6_validate_fire_relation as step6_validate_fire_relation
+import src.step7a_tiling_infrastructure as step7a_tiling_infrastructure
 
 
 BASE_DIR = PROJECT_ROOT
@@ -79,6 +80,8 @@ def main() -> None:
             log.warning(
                 "STEP 6 atlandı (burned-area validation başarısız): %s", exc
             )
+
+        run_step("STEP 7A", step7a_tiling_infrastructure.main)
 
         end_time = datetime.now()
 

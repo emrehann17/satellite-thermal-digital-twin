@@ -54,13 +54,13 @@ def main() -> None:
 
         end_time = datetime.now()
         log.info("#" * 80)
-        log.info("STEP 5 PIPELINE TAMAMLANDI")
+        log.info("STEP 5-6 PIPELINE TAMAMLANDI")
         log.info(f"Bitiş zamanı: {end_time.isoformat()}")
         log.info(f"Toplam süre: {(end_time - start_time)}")
         log.info("#" * 80)
 
     except Exception as e:
-        log.error("STEP 5 PIPELINE ÇALIŞIRKEN HATA OLUŞTU:")
+        log.error("STEP 5-6 PIPELINE ÇALIŞIRKEN HATA OLUŞTU:")
         log.error(traceback.format_exc())
 
 if __name__ == "__main__":

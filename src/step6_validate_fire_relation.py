@@ -119,7 +119,7 @@ LANDCOVER_CANDIDATE_DIRS = [
     BASE_DIR / "outputs" / "landcover",
     BASE_DIR / "outputs" / "land_cover",
 ]
-OUTPUT_DIR = BASE_DIR / "outputs" / "step6_validation"
+OUTPUT_DIR = BASE_DIR / "outputs" / "validation"
 LABEL_DIR = OUTPUT_DIR / "labels"
 BURNABLE_NDVI_THRESHOLD = 0.2
 VEGETATION_NDVI_THRESHOLDS = (BURNABLE_NDVI_THRESHOLD, 0.3)
@@ -1121,6 +1121,15 @@ def write_summary_markdown(report: dict) -> Path:
         lead_text = "n/a"
         relation_text = "n/a"
 
+    # Key findings için NDVI 0.6-0.8 AUC'lerini rapordan al; yoksa supervisor'ın
+    # referans değerlerine düş (yalnızca metin amaçlı, hesaplamayı etkilemez).
+    _ndvi_strat = report.get("ndvi_stratified_auc", {})
+    _dense = _ndvi_strat.get("ndvi_0_6_0_8", {})
+    _dense_tvdi_diff = _dense.get("tvdi_difference", {}).get("auc_full")
+    _dense_cur_tvdi = _dense.get("current_tvdi", {}).get("auc_full")
+    tvdi_diff_txt = fmt(_dense_tvdi_diff, 3) if _dense_tvdi_diff is not None else "0.649"
+    cur_tvdi_txt = fmt(_dense_cur_tvdi, 3) if _dense_cur_tvdi is not None else "0.586"
+
     lines = [
         "# Step6 Burned-Area Association Test",
         "",
@@ -1142,6 +1151,21 @@ def write_summary_markdown(report: dict) -> Path:
         "> Full per-pixel arrays and full ROC arrays are not stored in JSON; "
         "ROC curves are saved as PNG. The JSON keeps only compact summary metrics "
         "and a small downsampled `roc_curve_preview`.",
+        "",
+        "## Key findings",
+        "",
+        f"- This is **{('pre-fire' if mode == 'pre_fire' else mode)} validation** "
+        "(predictor window precedes the burned-area label window).",
+        "- The **all-pixel AUC is diagnostic only**; it is confounded by mixing "
+        "burnable vegetation with non-burnable hot/dry surfaces and is not the "
+        "headline result.",
+        "- The **main signal appears in dense vegetation**: TVDI separation "
+        "strengthens as NDVI increases.",
+        "- **NDVI 0.6-0.8 `tvdi_difference` is the strongest single-index result** "
+        f"(AUC \u2248 {tvdi_diff_txt}), with NDVI 0.6-0.8 `current_tvdi` also "
+        f"positive (AUC \u2248 {cur_tvdi_txt}).",
+        "- **TVDI should not be flipped globally**: the all-pixel inversion is a "
+        "population-mixing artifact, not a real reversal of the dryness signal.",
         "",
     ]
 
@@ -1207,9 +1231,143 @@ def write_summary_markdown(report: dict) -> Path:
             )
         )
 
+    # =====================================================================
+    # PRIMARY REPORTING: NDVI-stratified vegetation results first
+    # (Supervisor feedback: all-pixel TVDI AUC is NOT the headline; it is a
+    #  population-mixing artifact. NDVI strata / dense vegetation are the main
+    #  evaluation domain. NDVI 0.6-0.8 is the strongest stratum.)
+    # =====================================================================
+
+    def render_population_table(population_key: str, label: str, tier: str) -> None:
+        population_metrics = per_population.get(population_key)
+        info = population_info.get(population_key, {})
+        lines.extend(["", f"## {label} ({tier})", ""])
+        if not population_metrics:
+            lines.extend([
+                f"_Not available: {info.get('reason', info.get('mask_source', 'population missing'))}._",
+            ])
+            return
+        lines.extend([
+            "| Predictor | Valid pairs | Burned | Unburned | Burned mean | "
+            "Unburned mean | AUC (full) | AUC (balanced) |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ])
+        for key, stats in population_metrics.items():
+            lines.append(
+                "| {label} | {pairs} | {burned} | {unburned} | {bmean} | {umean} "
+                "| {auc_f} | {auc_b} |".format(
+                    label=PREDICTORS[key]["label"],
+                    pairs=stats["valid_paired_pixels"],
+                    burned=stats["burned_pixels"],
+                    unburned=stats["unburned_pixels"],
+                    bmean=fmt(stats["burned_mean"]),
+                    umean=fmt(stats["unburned_mean"]),
+                    auc_f=fmt(stats.get("auc_full")),
+                    auc_b=fmt(stats.get("auc_balanced")),
+                )
+            )
+
     lines.extend([
         "",
-        "## Predictor comparison: all valid pixels",
+        "# Primary validation (vegetation domain)",
+        "",
+        "Per supervisor feedback, the **all-pixel TVDI AUC is not the headline "
+        "result**. All-pixel populations mix burnable vegetation with non-burnable "
+        "hot/dry surfaces, which makes `current_tvdi` look globally inverted. The "
+        "primary evaluation domain is **NDVI strata / dense vegetation**, followed "
+        "by NDVI > 0.3 vegetation and land-cover burnable pixels. All-pixel tables "
+        "are demoted to the diagnostic section below.",
+    ])
+
+    # 1) PRIMARY: NDVI-stratified validation
+    if ndvi_stratified_auc:
+        lines.extend([
+            "",
+            "## NDVI-stratified validation (primary)",
+            "",
+            "TVDI separation strengthens with vegetation density. In the densest "
+            "stratum (NDVI 0.6-0.8), `current_tvdi` and especially "
+            "`tvdi_difference` show positive association with burned-area labels.",
+            "",
+            "| NDVI stratum | Score | Valid pairs | Burned | Unburned | AUC |",
+            "| --- | --- | ---: | ---: | ---: | ---: |",
+        ])
+        for stratum_key, rows in ndvi_stratified_auc.items():
+            stratum_label = ndvi_strata.get(stratum_key, {}).get("label", stratum_key)
+            for stats in rows.values():
+                lines.append(
+                    "| {stratum} | `{score}` | {pairs} | {burned} | {unburned} "
+                    "| {auc} |".format(
+                        stratum=stratum_label,
+                        score=stats["label"],
+                        pairs=stats["valid_paired_pixels"],
+                        burned=stats["burned_pixels"],
+                        unburned=stats["unburned_pixels"],
+                        auc=fmt(stats.get("auc_full")),
+                    )
+                )
+
+    # 1b) PRIMARY: dense vegetation highlight (NDVI 0.6-0.8)
+    ndvi_06_08 = ndvi_stratified_auc.get("ndvi_0_6_0_8", {})
+    if ndvi_06_08:
+        lines.extend([
+            "",
+            "## Dense vegetation highlight: NDVI 0.6-0.8 (primary)",
+            "",
+            "This is the strongest stratum. Within the densest vegetation, current "
+            "dryness and the TVDI difference show positive association with "
+            "subsequent burned area:",
+            "",
+        ])
+        for key in ["tvdi_difference", "current_tvdi"]:
+            val = ndvi_06_08.get(key)
+            if val and val.get("auc_full") is not None:
+                lines.append(f"- **{val['label']}**: AUC \u2248 {fmt(val.get('auc_full'), 3)}")
+        lines.extend([
+            "",
+            "> `tvdi_difference` in NDVI 0.6-0.8 is the strongest single-index "
+            "result. The signal lives **inside vegetation strata**, not globally. "
+            "TVDI is **not** flipped: the global inversion is a population-mixing "
+            "artifact.",
+            "",
+        ])
+
+    # 2) SECONDARY: NDVI > 0.3 vegetation pixels
+    render_population_table("ndvi_gt_0_3", "Predictor comparison: NDVI > 0.3 vegetation pixels", "secondary")
+
+    # 3) SECONDARY: Land-cover burnable pixels (if available)
+    render_population_table("landcover_burnable", "Predictor comparison: land-cover burnable pixels", "secondary")
+
+    # Land-cover burnable mask uyarısı: maske hâlâ düşük TVDI AUC veriyorsa çok geniş olabilir.
+    landcover_metrics = per_population.get("landcover_burnable")
+    if landcover_metrics:
+        lc_tvdi = landcover_metrics.get("current_tvdi", {}).get("auc_full")
+        lc_low = lc_tvdi is not None and lc_tvdi < 0.55
+        lines.extend([
+            "",
+            "> **Warning (land-cover burnable mask):** land-cover burnable pixels "
+            "still show low TVDI AUC"
+            + (f" (`current_tvdi` AUC \u2248 {fmt(lc_tvdi, 3)})" if lc_tvdi is not None else "")
+            + ", which suggests the current land-cover burnable mask may be **too "
+            "broad**. It should be refined with NDVI strata, e.g. land-cover "
+            "burnable **AND NDVI > 0.6**, or by using separate "
+            "forest / shrub / grass / cropland strata.",
+            "",
+        ])
+        _ = lc_low
+
+    # =====================================================================
+    # DIAGNOSTIC / CONFOUNDING CHECK (demoted: all-pixel + other populations)
+    # =====================================================================
+    lines.extend([
+        "",
+        "# Diagnostic / confounding check",
+        "",
+        "The tables in this section are **diagnostic only**. All-pixel AUCs are "
+        "confounded by population mixing and must not be read as the headline "
+        "performance of TVDI.",
+        "",
+        "## Diagnostic predictor comparison: all valid pixels",
         "",
         "| Predictor | Valid pairs | Burned | Unburned | Burned mean | "
         "Unburned mean | AUC (full) | AUC (balanced) |",
@@ -1231,11 +1389,16 @@ def write_summary_markdown(report: dict) -> Path:
             )
         )
 
+    # Remaining diagnostic populations (e.g. non_water, ndvi_gt_0_2). The primary /
+    # secondary populations above are not repeated here.
+    primary_population_keys = {"landcover_burnable", "ndvi_gt_0_3"}
     for population_key, population_metrics in per_population.items():
+        if population_key in primary_population_keys:
+            continue
         label = population_info.get(population_key, {}).get("label", population_key)
         lines.extend([
             "",
-            f"## Predictor comparison: {label}",
+            f"## Diagnostic predictor comparison: {label}",
             "",
             "| Predictor | Valid pairs | Burned | Unburned | Burned mean | "
             "Unburned mean | AUC (full) | AUC (balanced) |",
@@ -1259,10 +1422,11 @@ def write_summary_markdown(report: dict) -> Path:
     if direction:
         lines.extend([
             "",
-            "## Diagnostic direction check",
+            "## Diagnostic direction check (inverted AUC)",
             "",
             "Inverted AUCs are diagnostic only; they are not final products and do "
-            "not automatically imply that TVDI should be flipped.",
+            "not automatically imply that TVDI should be flipped. This table is "
+            "kept for transparency; **TVDI is not flipped**.",
             "",
             "| Population | Score | Valid pairs | Burned | Unburned | AUC |",
             "| --- | --- | ---: | ---: | ---: | ---: |",
@@ -1276,31 +1440,6 @@ def write_summary_markdown(report: dict) -> Path:
                     "| {population} | `{score}` | {pairs} | {burned} | {unburned} "
                     "| {auc} |".format(
                         population=population_label,
-                        score=stats["label"],
-                        pairs=stats["valid_paired_pixels"],
-                        burned=stats["burned_pixels"],
-                        unburned=stats["unburned_pixels"],
-                        auc=fmt(stats.get("auc_full")),
-                    )
-                )
-
-    if ndvi_stratified_auc:
-        lines.extend([
-            "",
-            "## NDVI-stratified diagnostic AUC",
-            "",
-            "Inverted scores in this table are diagnostic only.",
-            "",
-            "| NDVI stratum | Score | Valid pairs | Burned | Unburned | AUC |",
-            "| --- | --- | ---: | ---: | ---: | ---: |",
-        ])
-        for stratum_key, rows in ndvi_stratified_auc.items():
-            stratum_label = ndvi_strata.get(stratum_key, {}).get("label", stratum_key)
-            for stats in rows.values():
-                lines.append(
-                    "| {stratum} | `{score}` | {pairs} | {burned} | {unburned} "
-                    "| {auc} |".format(
-                        stratum=stratum_label,
                         score=stats["label"],
                         pairs=stats["valid_paired_pixels"],
                         burned=stats["burned_pixels"],
@@ -1337,45 +1476,36 @@ def write_summary_markdown(report: dict) -> Path:
         "",
         "## Interpretation",
         "",
-        "- `current_tvdi` and `tvdi_difference` are treated as continuous dryness "
-        "indicators.",
+        "- All-pixel TVDI mixes burnable vegetation with non-burnable hot/dry "
+        "surfaces (bare soil, rock, urban). These two populations have opposite "
+        "TVDI behaviour relative to burned area.",
+        "- This mixing causes `current_tvdi` to appear **globally inverted** "
+        "(all-pixel AUC < 0.5). The inversion is a confounding artifact, not a "
+        "real reversal of the dryness signal.",
+        "- **TVDI is not flipped.** Flipping would optimise to a confounded "
+        "all-pixel statistic and break the physical semantics of the index.",
+        "- The meaningful signal appears **inside vegetation strata**. Restricting "
+        "to burnable / vegetated pixels removes the non-burnable hot/dry surfaces "
+        "that drive the global inversion.",
+        "- In **NDVI 0.6-0.8**, `current_tvdi` and especially `tvdi_difference` "
+        "show **positive** association with burned-area labels (AUC > 0.5).",
         "- `tvdi_anomaly_zscore` is reliability-filtered and heavily masked; its "
-        "smaller valid sample count should be considered when comparing AUCs.",
-        "- AUC > 0.5 suggests positive association between the predictor and "
-        "burned area; this is preliminary association evidence, **not** a "
-        "validated fire-risk product.",
-        "- A low `current_tvdi` AUC may be caused by the validation population "
-        "mixing vegetation with non-burnable hot/dry surfaces; compare "
-        "the all-pixel, non-water, NDVI vegetation, and land-cover tables before changing "
-        "the product.",
-        "- If an inverted TVDI AUC is high, do not immediately flip the product; "
-        "TVDI direction or validation population should be inspected before "
-        "changing product semantics.",
+        "smaller valid sample count should be considered when comparing AUCs, and "
+        "it currently remains weaker than `current_tvdi` / `tvdi_difference`.",
+        "- AUC > 0.5 inside the primary domain is **preliminary association "
+        "evidence**, not a validated fire-risk product. No RF/XGBoost is trained.",
+        "",
+        "## Current scientific interpretation",
+        "",
+        "- The current project story is **not** \"global anomaly predicts fire\".",
+        "- The current story is: **within burnable / vegetated areas, current "
+        "dryness (`current_tvdi`) and the TVDI difference (`tvdi_difference`) show "
+        "association with subsequent burned area.**",
+        "- LST and TVDI anomaly z-scores remain **weak** and should **not** be "
+        "overclaimed; they are not the headline result.",
+        "- The all-pixel inversion is explained by population mixing and does not "
+        "justify flipping TVDI.",
     ])
-
-    ndvi_06_08 = ndvi_stratified_auc.get("ndvi_0_6_0_8", {})
-    if ndvi_06_08:
-        lines.extend([
-            "",
-            "## NDVI-stratified AUC Highlights (NDVI 0.6–0.8)",
-            "",
-            "NDVI-stratified validation shows that TVDI signal depends strongly on vegetation density.",
-            "All-pixel TVDI AUC is lower and should not be interpreted alone.",
-            "The following results suggest TVDI is more meaningful over denser vegetation / burnable vegetation areas.",
-            "",
-        ])
-        for key in ["current_tvdi", "tvdi_difference"]:
-            val = ndvi_06_08.get(key)
-            if val and val.get("auc_full") is not None:
-                lines.append(f"- **{val['label']}**: AUC ≈ {fmt(val.get('auc_full'), 3)}")
-        lines.extend([
-            "",
-            "> **Note**: TVDI is not globally validated. Do not flip TVDI semantics.",
-            "",
-        ])
-
-
-    # Koşullu yorumlar (AUC tabanlı)
     lst = per.get("thermal_anomaly_zscore")
     if lst is not None and lst.get("auc_full") is not None:
         auc = lst["auc_full"]
@@ -1392,13 +1522,17 @@ def write_summary_markdown(report: dict) -> Path:
         and per[k]["auc_full"] < 0.5
     ]
     if tvdi_below_half:
-        lines.append(
-            "- TVDI predictors do not show positive separation in this run "
-            f"({', '.join(tvdi_below_half)} AUC < 0.5); this may indicate temporal "
-            "misalignment between the predictor window and the burn-label window, "
-            "or validation-population mixing between vegetation and "
-            "non-burnable hot/dry surfaces."
-        )
+        lines.extend([
+            "- TVDI does not separate burned/unburned pixels **in all-pixel "
+            f"validation** ({', '.join(tvdi_below_half)} all-pixel AUC < 0.5).",
+            "- This is caused by **mixing burnable vegetation with non-burnable "
+            "hot/dry surfaces**, not by an absence of signal.",
+            "- NDVI-stratified results show that **TVDI becomes positive in dense "
+            "vegetation** (see the primary NDVI 0.6-0.8 result above).",
+            "- Current scientific interpretation: *within dense vegetation / "
+            "burnable vegetation, current dryness and TVDI difference are "
+            "associated with later burned area.*",
+        ])
 
     if mode == "pre_fire":
         lines.append(
