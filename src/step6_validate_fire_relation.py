@@ -65,6 +65,7 @@ from core.config import (
     VALIDATION_ALLOW_OVERLAPPING_WINDOWS,
     VALIDATION_BALANCED_UNBURNED_RATIO,
     VALIDATION_FIRMS_BRIGHTNESS_THRESHOLD,
+    VALIDATION_FIRMS_VIIRS_BRIGHTNESS_THRESHOLD,
     VALIDATION_INCLUDE_FIRMS,
     VALIDATION_LABEL_EXPORT_SCALE,
     VALIDATION_MAX_ROC_PREVIEW_POINTS,
@@ -90,6 +91,8 @@ try:
     from core.validation_burned_area import (
         get_firecci51_burned_area_safe,
         get_firms_active_fire,
+        get_firms_modis_active_fire,
+        get_firms_viirs_active_fire_safe,
         get_mcd64a1_burned_area_safe,
     )
     GEE_IMPORTS_OK = True
@@ -688,28 +691,10 @@ def fetch_labels(grid: dict, label_start: str, label_end: str) -> dict:
             reason = f"FireCCI51 unexpected error: {exc}"
             log.warning(reason)
             skipped_sources.append({"source": "FireCCI51", "reason": reason})
-        skipped_sources.append({"source": "FireCCI51", "reason": reason})
 
-    # FIRMS aktif yangın (opsiyonel)
-    if VALIDATION_INCLUDE_FIRMS:
-        try:
-            firms = get_firms_active_fire(region, start, end)
-            firms_binary = firms.gt(VALIDATION_FIRMS_BRIGHTNESS_THRESHOLD)
-            firms_path = export_label_to_grid(
-                firms_binary, region, grid, LABEL_DIR / "firms_active.tif", "firms"
-            )
-            if firms_path is not None:
-                with rasterio.open(firms_path) as src:
-                    label_arrays.append(src.read(1).astype("float32"))
-                sources_used.append("FIRMS")
-            else:
-                reason = "FIRMS GEE export/download failed."
-                log.warning(reason)
-                skipped_sources.append({"source": "FIRMS", "reason": reason})
-        except Exception as exc:  # noqa: BLE001
-            reason = f"FIRMS unexpected error: {exc}"
-            log.warning(reason)
-            skipped_sources.append({"source": "FIRMS", "reason": reason})
+    # NOT: FIRMS artık BİRİNCİL etikete dahil EDİLMEZ. FIRMS (MODIS+VIIRS) bağımsız
+    # bir aktif-yangın cross-check'idir ve run_firms_crosscheck() ile ayrı çalışır.
+    # Birincil yanmış etiket yalnızca MCD64A1 (+ uygunsa FireCCI51) üzerinden kurulur.
 
     burned = build_binary_label(label_arrays)
     if burned is None:
@@ -724,8 +709,9 @@ def fetch_labels(grid: dict, label_start: str, label_end: str) -> dict:
         raise ValidationError(
             f"Seçili AOI ({REGION_NAME}) ve sezonda ({start} - {end}) hiç yanmış "
             "piksel bulunamadı. Öneriler: (1) AOI'yi genişletin, (2) farklı/daha "
-            "geniş bir yangın sezonu seçin (VALIDATION_SEASON_START/END), "
-            "(3) FIRMS aktif yangını dahil edin (VALIDATION_INCLUDE_FIRMS=True)."
+            "geniş bir yangın sezonu seçin (VALIDATION_SEASON_START/END). "
+            "Not: FIRMS birincil etikete dahil değildir (yalnızca bağımsız "
+            "cross-check); burned piksel sayısı yalnızca MCD64A1/FireCCI51'e bağlıdır."
         )
 
     log.info(
@@ -742,6 +728,184 @@ def fetch_labels(grid: dict, label_start: str, label_end: str) -> dict:
         "label_window_start": start,
         "label_window_end": end,
         "burned_pixel_count": burned_count,
+    }
+
+
+def run_firms_crosscheck(
+    grid: dict,
+    label_start: str,
+    label_end: str,
+    predictors: dict,
+    predictor_sources: dict,
+    ndvi_strata_masks: dict,
+    rng: np.random.Generator,
+) -> dict:
+    """
+    FIRMS (MODIS + VIIRS) BAĞIMSIZ aktif-yangın cross-check'i.
+
+    ÖNEMLİ: FIRMS burada birincil yanmış etikete DAHİL EDİLMEZ. MCD64A1 birincil
+    etiket olarak kalır. Bu fonksiyon FIRMS aktif-yangın ikili (binary) maskesini
+    label window için ayrı üretir ve her predictor'ı bu maskeye karşı
+    predictor_label_stats() ile değerlendirir.
+
+    Aynı label penceresi kullanılır (pre_fire'da LABEL_START/END, same_season'da
+    sezon penceresi — çağıran resolve_windows ile verir).
+    """
+    result: dict = {
+        "enabled": True,
+        "available": False,
+        "label_window": {"start": label_start, "end": label_end},
+        "sources_used": [],
+        "sources_skipped": [],
+        "modis_detection_count": 0,
+        "viirs_detection_count": 0,
+        "combined_positive_pixels": 0,
+        "per_predictor": {},
+        "ndvi_stratified": {},
+        "outputs": [],
+        "reason": None,
+    }
+
+    regions = build_regions()
+    region = regions[REGION_NAME]
+
+    modis_arr = None
+    viirs_arr = None
+
+    # --- FIRMS MODIS ---
+    try:
+        firms_modis = get_firms_modis_active_fire(region, label_start, label_end)
+        modis_binary = firms_modis.gt(VALIDATION_FIRMS_BRIGHTNESS_THRESHOLD)
+        modis_path = export_label_to_grid(
+            modis_binary, region, grid,
+            LABEL_DIR / "firms_modis_active.tif", "firms_modis",
+        )
+        if modis_path is not None:
+            with rasterio.open(modis_path) as src:
+                modis_arr = src.read(1).astype("float32")
+            result["sources_used"].append("FIRMS_MODIS")
+            result["modis_detection_count"] = int(np.nansum(modis_arr > 0))
+            result["outputs"].append(str(modis_path))
+        else:
+            result["sources_skipped"].append(
+                {"source": "FIRMS_MODIS", "reason": "GEE export/download failed."}
+            )
+    except Exception as exc:  # noqa: BLE001
+        result["sources_skipped"].append(
+            {"source": "FIRMS_MODIS", "reason": f"FIRMS MODIS error: {exc}"}
+        )
+
+    # --- FIRMS VIIRS ---
+    try:
+        viirs_img, viirs_status = get_firms_viirs_active_fire_safe(
+            region, label_start, label_end
+        )
+        if viirs_img is None:
+            result["sources_skipped"].append(
+                {"source": "FIRMS_VIIRS", "reason": viirs_status}
+            )
+        else:
+            viirs_binary = viirs_img.gt(VALIDATION_FIRMS_VIIRS_BRIGHTNESS_THRESHOLD)
+            viirs_path = export_label_to_grid(
+                viirs_binary, region, grid,
+                LABEL_DIR / "firms_viirs_active.tif", "firms_viirs",
+            )
+            if viirs_path is not None:
+                with rasterio.open(viirs_path) as src:
+                    viirs_arr = src.read(1).astype("float32")
+                result["sources_used"].append("FIRMS_VIIRS")
+                result["viirs_detection_count"] = int(np.nansum(viirs_arr > 0))
+                result["outputs"].append(str(viirs_path))
+            else:
+                result["sources_skipped"].append(
+                    {"source": "FIRMS_VIIRS", "reason": "GEE export/download failed."}
+                )
+    except Exception as exc:  # noqa: BLE001
+        result["sources_skipped"].append(
+            {"source": "FIRMS_VIIRS", "reason": f"FIRMS VIIRS error: {exc}"}
+        )
+
+    # --- Combine MODIS OR VIIRS (cross-check binary; NOT the primary label) ---
+    layers = [a for a in (modis_arr, viirs_arr) if a is not None]
+    if not layers:
+        result["available"] = False
+        result["reason"] = "FIRMS cross-check unavailable/empty for this AOI/window."
+        log.warning(result["reason"])
+        return result
+
+    combined = np.zeros_like(layers[0], dtype="float32")
+    for arr in layers:
+        combined = np.where(np.isfinite(arr) & (arr > 0), 1.0, combined)
+    combined_positive = int(np.sum(combined > 0))
+    result["combined_positive_pixels"] = combined_positive
+
+    # Combined raster çıktısı (binary)
+    try:
+        ref_profile = _grid_profile(grid)
+        combined_path = LABEL_DIR / "firms_combined_active.tif"
+        with rasterio.open(combined_path, "w", **ref_profile) as dst:
+            dst.write(combined.astype("float32"), 1)
+        result["outputs"].append(str(combined_path))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("FIRMS combined raster yazılamadı: %s", exc)
+
+    if combined_positive == 0:
+        result["available"] = True
+        result["reason"] = "FIRMS cross-check has zero positive pixels in window."
+        log.warning(result["reason"])
+        return result
+
+    result["available"] = True
+
+    # --- Per-predictor cross-check (predictor_label_stats yeniden kullanılır) ---
+    for key, arr in predictors.items():
+        if arr.shape != combined.shape:
+            continue
+        summary, _ = predictor_label_stats(
+            arr, combined, rng,
+            population_mask=None,
+            include_roc_preview=False,
+            keep_roc_for_plot=False,
+        )
+        summary["predictor_name"] = key
+        summary["source_file"] = predictor_sources.get(key)
+        summary["label_type"] = "FIRMS_active_fire_crosscheck"
+        result["per_predictor"][key] = summary
+
+    # --- Opsiyonel NDVI-stratified cross-check (mevcut strata maskeleri) ---
+    target_strata = ["ndvi_0_2_0_4", "ndvi_0_4_0_6", "ndvi_0_6_0_8"]
+    for stratum_key in target_strata:
+        mask = ndvi_strata_masks.get(stratum_key)
+        if mask is None:
+            continue
+        rows = {}
+        for key in ("current_tvdi", "tvdi_difference"):
+            if key not in predictors or predictors[key].shape != combined.shape:
+                continue
+            rows[key] = auc_only(predictors[key], combined, mask)
+        if rows:
+            result["ndvi_stratified"][stratum_key] = rows
+
+    log.info(
+        "FIRMS cross-check: MODIS=%d VIIRS=%d combined=%d positive pixels.",
+        result["modis_detection_count"],
+        result["viirs_detection_count"],
+        combined_positive,
+    )
+    return result
+
+
+def _grid_profile(grid: dict) -> dict:
+    """Grid sözlüğünden binary raster yazımı için rasterio profile üretir."""
+    return {
+        "driver": "GTiff",
+        "width": grid["width"],
+        "height": grid["height"],
+        "count": 1,
+        "dtype": "float32",
+        "crs": grid["crs"],
+        "transform": grid["transform"],
+        "nodata": float("nan"),
     }
 
 
@@ -1084,6 +1248,103 @@ def write_stats_json(report: dict) -> Path:
     return path
 
 
+def _firms_sources_used(report: dict) -> list[str]:
+    """Report'tan FIRMS cross-check'te kullanılan kaynak adlarını döndürür."""
+    fc = report.get("firms_crosscheck", {})
+    if not fc.get("enabled") or not fc.get("available"):
+        return []
+    return list(fc.get("sources_used", []))
+
+
+def _render_firms_crosscheck_section(lines: list, report: dict) -> None:
+    """validation_summary.md'ye FIRMS bağımsız aktif-yangın cross-check bölümü ekler."""
+    fc = report.get("firms_crosscheck")
+    if not fc:
+        return
+
+    lines.extend([
+        "",
+        "## FIRMS active-fire cross-check",
+        "",
+        "**FIRMS is not used as the primary burned-area label.** "
+        "MCD64A1 remains the primary burned-area label. "
+        "FIRMS MODIS+VIIRS is used only as an independent active-fire cross-check "
+        "and is **not** OR-combined into the primary burned label.",
+        "",
+    ])
+
+    if not fc.get("enabled"):
+        lines.append(
+            "_FIRMS cross-check disabled (VALIDATION_INCLUDE_FIRMS=False)._"
+        )
+        return
+
+    if not fc.get("available"):
+        lines.append(
+            f"> **FIRMS cross-check unavailable/empty for this AOI/window.** "
+            f"Reason: {fc.get('reason', 'n/a')}"
+        )
+        return
+
+    lines.extend([
+        f"- Cross-check sources used: "
+        f"`{', '.join(fc.get('sources_used', [])) or 'none'}`",
+        f"- FIRMS MODIS detections: `{fc.get('modis_detection_count')}`",
+        f"- FIRMS VIIRS detections: `{fc.get('viirs_detection_count')}`",
+        f"- Combined positive pixels: `{fc.get('combined_positive_pixels')}`",
+    ])
+    skipped = fc.get("sources_skipped", [])
+    if skipped:
+        lines.append(
+            f"- Skipped: `{', '.join(s.get('source', '?') for s in skipped)}`"
+        )
+
+    per_pred = fc.get("per_predictor", {})
+    if per_pred:
+        lines.extend([
+            "",
+            "### Per-predictor AUC against FIRMS active-fire binary",
+            "",
+            "| Predictor | Valid pairs | FIRMS+ | FIRMS- | AUC (full) | AUC (balanced) |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ])
+        for key, stats in per_pred.items():
+            label = PREDICTORS.get(key, {}).get("label", key)
+            lines.append(
+                "| {label} | {pairs} | {pos} | {neg} | {auc_f} | {auc_b} |".format(
+                    label=label,
+                    pairs=stats.get("valid_paired_pixels"),
+                    pos=stats.get("burned_pixels"),
+                    neg=stats.get("unburned_pixels"),
+                    auc_f=fmt(stats.get("auc_full")),
+                    auc_b=fmt(stats.get("auc_balanced")),
+                )
+            )
+
+    ndvi_strat = fc.get("ndvi_stratified", {})
+    if ndvi_strat:
+        lines.extend([
+            "",
+            "### FIRMS cross-check, NDVI-stratified",
+            "",
+            "| NDVI stratum | Predictor | AUC |",
+            "| --- | --- | ---: |",
+        ])
+        for stratum_key, rows in ndvi_strat.items():
+            for key, stats in rows.items():
+                label = PREDICTORS.get(key, {}).get("label", key)
+                lines.append(
+                    f"| {stratum_key} | {label} | {fmt(stats.get('auc_full'))} |"
+                )
+
+    lines.extend([
+        "",
+        "> Interpretation is cautious: FIRMS active fire is an independent "
+        "detection signal, not the burned-area label; agreement here is a "
+        "consistency check, not a validated predictive result.",
+    ])
+
+
 def fmt(value, digits: int = 4) -> str:
     """Markdown için sayı formatlama."""
     if value is None:
@@ -1143,6 +1404,8 @@ def write_summary_markdown(report: dict) -> Path:
         f"Label sources (used): `{', '.join(used_sources) if used_sources else 'none'}`",
         f"Label sources (skipped): "
         f"`{', '.join(skipped_names) if skipped_names else 'none'}`",
+        f"Cross-check sources (used): "
+        f"`{', '.join(_firms_sources_used(report)) if _firms_sources_used(report) else 'none'}`",
         "",
         "> This is a **first burned-area association test / initial validation "
         "experiment**, not a validated fire-risk model. No RF/XGBoost is trained "
@@ -1540,6 +1803,8 @@ def write_summary_markdown(report: dict) -> Path:
             "rasters were generated for the configured predictor window."
         )
 
+    _render_firms_crosscheck_section(lines, report)
+
     lines.extend([
         "",
         "## Outputs",
@@ -1855,6 +2120,25 @@ def main() -> dict:
         ndvi_strata_masks,
     )
 
+    # FIRMS bağımsız aktif-yangın cross-check (birincil etikete DAHİL DEĞİL).
+    if VALIDATION_INCLUDE_FIRMS:
+        firms_crosscheck = run_firms_crosscheck(
+            grid,
+            windows["label_start"],
+            windows["label_end"],
+            compatible_predictors,
+            predictor_sources,
+            ndvi_strata_masks,
+            rng=np.random.default_rng(VALIDATION_RANDOM_SEED),
+        )
+    else:
+        firms_crosscheck = {
+            "enabled": False,
+            "available": False,
+            "reason": "VALIDATION_INCLUDE_FIRMS is False; FIRMS cross-check not run.",
+            "sources_used": [],
+        }
+
     # Görseller (full ROC array'leri yalnız burada, bellekten)
     png_outputs = []
     roc_png = plot_roc_comparison(
@@ -1905,6 +2189,7 @@ def main() -> dict:
         "diagnostic_direction_auc": direction_diagnostics,
         "ndvi_strata": ndvi_strata_summaries,
         "ndvi_stratified_auc": ndvi_stratified_auc,
+        "firms_crosscheck": firms_crosscheck,
         "png_outputs": png_outputs,
         "config": {
             "balanced_unburned_ratio": VALIDATION_BALANCED_UNBURNED_RATIO,

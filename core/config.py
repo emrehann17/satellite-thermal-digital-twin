@@ -93,6 +93,15 @@ LANDSAT_SR_OFFSET = -0.2
 LANDSAT_RED_BAND = "SR_B4"
 LANDSAT_NIR_BAND = "SR_B5"
 
+# NDVI = (NIR - RED) / (NIR + RED). Payda (NIR + RED) sıfıra yakınken bölme
+# fiziksel olmayan dev değerler (ör. -270, +400) üretir. Bu yüzden:
+#   - |NIR + RED| < NDVI_DENOMINATOR_EPSILON olan pikseller maskelenir,
+#   - hesap sonrası [NDVI_VALID_MIN, NDVI_VALID_MAX] dışındaki pikseller maskelenir
+#     (sessizce clamp YAPILMAZ; fiziksel olarak imkânsız değerler maskelenir).
+NDVI_DENOMINATOR_EPSILON = 1e-6
+NDVI_VALID_MIN = -1.0
+NDVI_VALID_MAX = 1.0
+
 REGION_NAME = "kozan_aoi"  # Test için küçük bölge kullan
 
 SUMMER_MONTH_START = 6
@@ -113,8 +122,8 @@ BASELINE_START_DATE = "2019-06-01"
 BASELINE_END_DATE = "2023-09-30"
 
 # Current period - anomali hesabı için kullanılacak güncel pencere
-CURRENT_PERIOD_DAYS = 45
-CURRENT_PERIOD_END_DATE = "2023-08-31"
+CURRENT_PERIOD_DAYS = 60
+CURRENT_PERIOD_END_DATE = "2023-07-31"
 
 # Step5 bellek kullanımı ayarları
 # Her seferinde okunacak raster pencere kenarı (piksel).
@@ -206,6 +215,17 @@ FIRECCI51_BURNDATE_BAND = "BurnDate"
 FIRMS_COLLECTION = "FIRMS"
 FIRMS_FIRE_BAND = "T21"
 
+# FIRMS VIIRS aktif yangın (375 m, günlük). MODIS'ten bağımsız ikinci aktif-yangın
+# kaynağıdır; cross-check için kullanılır. bright_ti4/bright_ti5 parlaklık bantları.
+FIRMS_VIIRS_COLLECTION = "FIRMS"  # MODIS T21 ile aynı arşiv; VIIRS ayrı koleksiyonla denenir
+FIRMS_VIIRS_COLLECTIONS = (
+    "NASA/LANCE/NOAA20_VIIRS/C2",
+    "NASA/LANCE/SNPP_VIIRS/C2",
+)
+FIRMS_VIIRS_FIRE_BAND = "Bright_ti4"
+# VIIRS bright_ti4 (parlaklık sıcaklığı, Kelvin) eşiği.
+VALIDATION_FIRMS_VIIRS_BRIGHTNESS_THRESHOLD = 330.0
+
 
 # =============================================================================
 # Step6: burned-area association testing (ilk doğrulama)
@@ -220,8 +240,11 @@ FIRMS_FIRE_BAND = "T21"
 VALIDATION_SEASON_START = "2023-06-01"
 VALIDATION_SEASON_END = "2023-10-31"
 
-# FIRMS aktif yangını da bir etiket kaynağı olarak dahil et (opsiyonel).
-VALIDATION_INCLUDE_FIRMS = False
+# FIRMS aktif yangını BAĞIMSIZ CROSS-CHECK olarak çalıştır (opsiyonel).
+# ÖNEMLİ: True olması FIRMS'i birincil yanmış-alan etiketine DAHİL ETMEZ.
+# MCD64A1 birincil etiket olarak kalır; FIRMS (MODIS+VIIRS) yalnızca bağımsız
+# aktif-yangın çapraz kontrolü olarak ayrı bir bölümde raporlanır.
+VALIDATION_INCLUDE_FIRMS = True
 
 # Sınıf dengesizliği: yanmış pikseller genelde çok azdır. Dengeli metrikler için
 # yanmayan pikseller bu oranda (burned_count * ratio) rastgele alt-örneklenir.
@@ -328,6 +351,23 @@ if VALIDATION_MODE == "pre_fire":
             "Bilerek çakışma istiyorsan VALIDATION_ALLOW_OVERLAPPING_WINDOWS=True yap."
         )
 
-NDVI_DENOMINATOR_EPSILON = 1e-6     # 0.000001
-NDVI_VALID_MIN = -1.0
-NDVI_VALID_MAX = 1.0
+
+# =============================================================================
+# Step7B: MODIS downscaling training dataset builder
+# =============================================================================
+# Step7B, MODIS->Landsat LST downscaling için pencere/tile-bazlı bir EĞİTİM
+# VERİSETİ hazırlar. Model EĞİTMEZ, fire-risk modeli ÜRETMEZ; yalnızca temiz,
+# hizalanmış tabular örnekler (target=Landsat LST, features=MODIS context, NDVI,
+# DEM, slope, land cover, koordinatlar) üretir.
+STEP7B_TILE_SIZE = 512
+STEP7B_MAX_SAMPLES = 500000
+STEP7B_RANDOM_SEED = 42
+STEP7B_SAMPLE_FRACTION = None
+STEP7B_STRATIFY_BY_MODIS_PIXEL = True
+STEP7B_MIN_TARGET_CELSIUS = -20.0
+STEP7B_MAX_TARGET_CELSIUS = 80.0
+STEP7B_REQUIRE_NDVI = True
+STEP7B_REQUIRE_DEM = True
+STEP7B_OUTPUT_FORMATS = ["parquet", "csv"]
+STEP7B_INCLUDE_OPTIONAL_TVDI_FEATURES = True
+STEP7B_INCLUDE_OPTIONAL_ANOMALY_FEATURES = True

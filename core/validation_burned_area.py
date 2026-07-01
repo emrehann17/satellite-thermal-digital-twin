@@ -209,10 +209,10 @@ def get_firms_active_fire(
     end: str,
 ) -> ee.Image:
     """
-    FIRMS aktif yangın yoğunluğu taslağı.
+    FIRMS (MODIS) aktif yangın yoğunluğu taslağı.
 
     T21 (parlaklık sıcaklığı) bandının maksimumu alınır; aktif yangın sinyalinin
-    mekansal izini verir. Phase 2'de eşikleme/temizleme eklenebilir.
+    mekansal izini verir. MODIS tabanlıdır; VIIRS için get_firms_viirs_active_fire.
     """
     collection = (
         ee.ImageCollection(FIRMS_COLLECTION)
@@ -222,6 +222,63 @@ def get_firms_active_fire(
     )
     active_fire = collection.max().rename("FIRMS_active_fire").clip(region)
     return active_fire
+
+
+# MODIS FIRMS için açık isim (cross-check kodu netliği için).
+def get_firms_modis_active_fire(
+    region: ee.Geometry,
+    start: str,
+    end: str,
+) -> ee.Image:
+    """FIRMS MODIS (T21) aktif yangın görüntüsü. get_firms_active_fire ile aynı."""
+    return get_firms_active_fire(region, start, end)
+
+
+def get_firms_viirs_active_fire_safe(
+    region: ee.Geometry,
+    start: str,
+    end: str,
+) -> tuple["ee.Image | None", str]:
+    """
+    FIRMS VIIRS aktif yangın görüntüsünü güvenli şekilde döndürür.
+
+    NOAA-20 ve S-NPP VIIRS koleksiyonları sırayla denenir; ilk bant içereni
+    kullanılır. Hiçbiri kullanılabilir değilse (None, reason) döner. Boş/bandsiz
+    koleksiyonlarda .max() çağrısı band üretmez; bu durumda skip edilir.
+    """
+    from core.config import FIRMS_VIIRS_COLLECTIONS, FIRMS_VIIRS_FIRE_BAND
+
+    last_reason = "FIRMS VIIRS: no collection available."
+    for coll_id in FIRMS_VIIRS_COLLECTIONS:
+        try:
+            collection = (
+                ee.ImageCollection(coll_id)
+                .filterBounds(region)
+                .filterDate(start, end)
+            )
+            size = collection.size().getInfo()
+            if not size:
+                last_reason = f"FIRMS VIIRS: empty collection {coll_id} for window."
+                continue
+            band_names = collection.first().bandNames().getInfo()
+            if FIRMS_VIIRS_FIRE_BAND not in band_names:
+                last_reason = (
+                    f"FIRMS VIIRS: band {FIRMS_VIIRS_FIRE_BAND} not in {coll_id} "
+                    f"(bands={band_names})."
+                )
+                continue
+            active_fire = (
+                collection.select(FIRMS_VIIRS_FIRE_BAND)
+                .max()
+                .rename("FIRMS_VIIRS_active_fire")
+                .clip(region)
+            )
+            _get_log().info("FIRMS VIIRS kaynağı seçildi: %s", coll_id)
+            return active_fire, f"FIRMS VIIRS source: {coll_id}"
+        except Exception as exc:  # noqa: BLE001
+            last_reason = f"FIRMS VIIRS error on {coll_id}: {exc}"
+            continue
+    return None, last_reason
 
 
 def build_validation_inputs(

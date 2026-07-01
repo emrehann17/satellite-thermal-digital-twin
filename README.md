@@ -780,9 +780,11 @@ testidir**. Bu bir yangın-riski MODELİ değildir ve RF/XGBoost eğitmez.
 
 ## Etiket kaynakları (GEE)
 
-* **MCD64A1** — MODIS yanmış alan (500 m, aylık)
-* **FireCCI51** — ESA CCI FireCCI 5.1 yanmış alan (250 m, varsa)
-* **FIRMS / MCD14ML** — aktif yangın (opsiyonel, `VALIDATION_INCLUDE_FIRMS`)
+* **MCD64A1** — MODIS yanmış alan (500 m, aylık). **Birincil (primary) yanmış-alan etiketidir.**
+* **FireCCI51** — ESA CCI FireCCI 5.1 yanmış alan (250 m, varsa). Label window dataset kapsamındaysa MCD64A1 ile birleştirilebilir.
+* **FIRMS MODIS + VIIRS** — bağımsız aktif-yangın **cross-check** (opsiyonel, `VALIDATION_INCLUDE_FIRMS=True`).
+
+**MCD64A1 is the primary burned-area label. FIRMS MODIS+VIIRS is an independent active-fire cross-check and is not OR-combined into the primary burned label.** `VALIDATION_INCLUDE_FIRMS=True` yalnızca FIRMS bağımsız cross-check'ini çalıştırır; birincil etiketi (ve dolayısıyla ana ROC/AUC, NDVI strata, popülasyon metrikleri, direction diagnostics) değiştirmez. FIRMS cross-check sonuçları `validation_stats.json` içinde ayrı `firms_crosscheck` anahtarında ve `validation_summary.md` içinde ayrı "FIRMS active-fire cross-check" bölümünde raporlanır. FIRMS koleksiyonları boş/erişilemezse ana MCD64A1 doğrulaması etkilenmez; cross-check `available=false` olarak işaretlenir.
 
 ## Validation modları
 
@@ -997,6 +999,52 @@ Geçme kriteri: aynı CRS / transform / boyut / bounds ve max mutlak fark ≤ to
 (NaN/nodata eşitliği doğru ele alınarak). CLI bayrakları: `--reference-raster`,
 `--tile-size`, `--overlap`, `--force`, `--tolerance`. Mevcut çıktılar yalnızca
 `--force` ile ezilir.
+
+## Step7B MODIS downscaling training dataset
+
+Step7B, MODIS→Landsat LST downscaling için pencere/tile-bazlı bir **eğitim
+veriseti** hazırlar. **Step7B model EĞİTMEZ ve fire-risk modeli ÜRETMEZ;** yalnızca
+temiz, hizalanmış tabular örnekler üretir. Step5/Step5C/Step6 bilimsel çıktıları
+değişmez. Fire-risk RF/XGBoost, MODIS downscaling'den ayrı tutulur.
+
+Amaç (bilimsel): hedef = yüksek çözünürlüklü Landsat LST (Celsius), öznitelikler =
+kaba MODIS context + yüksek çözünürlüklü yardımcı değişkenler.
+
+Girdiler:
+* **Target**: Landsat LST (`outputs/step5/current_period_median_celsius.tif`, yoksa
+  `data/current_period/landsat_current_period_*days.tif` band 1) — `landsat_lst_celsius`.
+* **MODIS context**: `data/modis/modis_lst_dogu_akdeniz_4y_summer_mean.tif` (ve varsa
+  step5 resampled mean/std/zscore).
+* **NDVI**: `data/ndvi_current_period/current_ndvi_median.tif`.
+* **DEM**: `data/dem/elevation.tif`, `data/dem/slope.tif`.
+* **Land cover** (varsa): `data/landcover/landcover_esa_worldcover_v200.tif` (nearest).
+* **Koordinatlar**: lon, lat (+ opsiyonel modis_pixel_row/col/id).
+* **Opsiyonel** (varsa; zorunlu değil): `current_tvdi`, `tvdi_difference`,
+  `anomaly_zscore`.
+
+Tüm öznitelikler target grid'ine hizalanır/yeniden örneklenir: sürekli rasterlar
+bilinear, kategorik (land cover) ve binary maskeler nearest. İşlem `rasterio`
+windows ile yapılır; rasterlar aynı anda RAM'e alınmaz. Değerler **clamp edilmez**;
+geçersiz/NaN/aralık-dışı satırlar yalnızca **drop** edilir. Örnekleme deterministiktir
+(`STEP7B_RANDOM_SEED`); `STEP7B_STRATIFY_BY_MODIS_PIXEL=True` iken tek bir kaba MODIS
+pikselinden aşırı örnek alınmaz.
+
+Çıktılar:
+
+```text
+outputs/step7b/downscaling_training_samples.parquet   (pyarrow varsa)
+outputs/step7b/downscaling_training_samples.csv
+outputs/step7b/downscaling_dataset_stats.json
+outputs/step7b/downscaling_dataset_summary.md
+```
+
+pyarrow yoksa CSV yine yazılır ve metadata'da `parquet_written=false` kaydedilir;
+en az bir format başarılı olduğu sürece hata verilmez. CLI: `--max-samples`,
+`--tile-size`, `--output-format csv|parquet|both`, `--force`, `--no-optional-tvdi`,
+`--no-optional-anomaly`. Mevcut çıktılar yalnız `--force` ile ezilir.
+
+Step7B'den sonraki aşama, bu veriseti üzerinde MODIS downscaling için model
+eğitimidir (Step7C / Step8). Fire-risk modellemesi bundan ayrı bir hattır.
 
 ## Diğer ileri adımlar (Phase 2+)
 

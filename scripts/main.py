@@ -30,6 +30,7 @@ import src.step5b_diagnostic_report as step5b_diagnostic_report
 import src.step5c_tvdi as step5c_tvdi
 import src.step6_validate_fire_relation as step6_validate_fire_relation
 import src.step7a_tiling_infrastructure as step7a_tiling_infrastructure
+import src.step7b_prepare_downscaling_dataset as step7b_prepare_downscaling_dataset
 
 
 BASE_DIR = PROJECT_ROOT
@@ -53,7 +54,7 @@ def main() -> None:
     start_time = datetime.now()
 
     log.info("#" * 80)
-    log.info("PIPELINE BAŞLIYOR (STEP1 -> STEP5)")
+    log.info("PIPELINE BAŞLIYOR (STEP1 -> STEP7B)")
     log.info(f"Başlangıç zamanı: {start_time.isoformat()}")
     log.info("#" * 80)
 
@@ -82,7 +83,7 @@ def main() -> None:
             )
 
         run_step("STEP 7A", step7a_tiling_infrastructure.main)
-
+        run_step("STEP 7B", step7b_prepare_downscaling_dataset.main)
         end_time = datetime.now()
 
         log.info("#" * 80)
