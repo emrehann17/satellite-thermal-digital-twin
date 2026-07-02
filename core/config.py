@@ -371,3 +371,62 @@ STEP7B_REQUIRE_DEM = True
 STEP7B_OUTPUT_FORMATS = ["parquet", "csv"]
 STEP7B_INCLUDE_OPTIONAL_TVDI_FEATURES = True
 STEP7B_INCLUDE_OPTIONAL_ANOMALY_FEATURES = True
+
+# =============================================================================
+# Step7C: Pure MODIS-to-Landsat LST downscaling model training
+# =============================================================================
+# Step7C, Step7B veri setini kullanarak SAF bir MODIS->Landsat LST downscaling
+# modeli eğitir. Fire-risk modeli DEĞİLDİR; MCD64A1/FIRMS etiketi KULLANMAZ.
+# Target-turevi ozellikler (anomaly_zscore, current_tvdi, tvdi_difference,
+# modis_context_zscore) leakage riski nedeniyle egitim ozellik setinden haric
+# tutulur (bkz. STEP7C_EXCLUDE_LEAKAGE_FEATURES).
+# STEP7C_SPLIT_MODE secenekleri: "spatial_block" (varsayilan, saglam mekansal
+# blok grouping; row//BLOCK, col//BLOCK), "modis_pixel_group" (modis_pixel_id;
+# Step7B ciktisinda bu ID pratikte ornek-basina benzersiz olabilir, bu durumda
+# grouped split ETKISIZ hale gelir), "tile_group" (source_tile_id),
+# "random" (yalniz --allow-random-split ile, uyariyla).
+STEP7C_RANDOM_SEED = 42
+STEP7C_MODEL_TYPE = "random_forest"
+STEP7C_TEST_SIZE = 0.15
+STEP7C_VAL_SIZE = 0.15
+STEP7C_SPLIT_MODE = "spatial_block"
+STEP7C_SPATIAL_BLOCK_SIZE_PIXELS = 64
+STEP7C_EXCLUDE_LEAKAGE_FEATURES = True
+STEP7C_MAX_TRAIN_SAMPLES = None
+STEP7C_FAST_N_ESTIMATORS = 50
+STEP7C_RF_N_ESTIMATORS = 200
+STEP7C_RF_MIN_SAMPLES_LEAF = 2
+STEP7C_OUTPUT_DIR = "outputs/step7c"
+
+
+# =============================================================================
+# Step7D: Apply Step7C model to full raster grid (30 m downscaled LST)
+# =============================================================================
+# Step7D, egitilmis Step7C modelini TAM raster gridine uygulayarak 30 m
+# Landsat-benzeri downscaled LST GeoTIFF uretir. Fire-risk modeli DEGILDIR;
+# MCD64A1/FIRMS etiketi KULLANMAZ; Step7C leakage guard'ina uyar.
+STEP7D_TILE_SIZE = 512
+STEP7D_OUTPUT_DIR = "outputs/step7d"
+STEP7D_MODEL_PATH = "outputs/step7c/downscaling_model.joblib"
+STEP7D_MODEL_METADATA_PATH = "outputs/step7c/downscaling_model_metadata.json"
+STEP7D_MIN_PREDICTED_CELSIUS = -20.0
+STEP7D_MAX_PREDICTED_CELSIUS = 80.0
+STEP7D_WRITE_RESIDUAL_PRODUCTS = True
+STEP7D_PLOT_SAMPLE_SIZE = 50000
+
+
+# =============================================================================
+# Step7E: Fuse observed Landsat LST with Step7D downscaled LST (gap-filling)
+# =============================================================================
+# Step7E, gozlemlenen Landsat current-period LST ile Step7D downscaled LST'yi
+# BİRLEŞTİRİR (fusion/gap-filling). MODEL EĞİTMEZ, fire-risk modeli DEĞİLDİR,
+# yanmis alan etiketi KULLANMAZ. Gozlemlenen Landsat HER ZAMAN ONCELIKLIDIR;
+# downscaled LST YALNIZCA gozlem eksik oldugunda kullanilir (ortalama/blend YOK).
+STEP7E_OUTPUT_DIR = "outputs/step7e"
+STEP7E_TILE_SIZE = 512
+STEP7E_MIN_CELSIUS = -20.0
+STEP7E_MAX_CELSIUS = 80.0
+STEP7E_OBSERVED_LST_PATH = "outputs/step5/current_period_median_celsius.tif"
+STEP7E_DOWNSCALED_LST_PATH = "outputs/step7d/downscaled_lst_celsius.tif"
+STEP7E_DOWNSCALED_VALID_MASK_PATH = "outputs/step7d/downscaled_lst_valid_mask.tif"
+STEP7E_WRITE_DIAGNOSTICS = True

@@ -52,7 +52,7 @@ from core.config import (
 )
 from core.io_utils import setup_logger
 from core.paths import PROJECT_ROOT
-from utils.tiling import iter_windows
+from core.utils.tiling import iter_windows
 
 BASE_DIR = PROJECT_ROOT
 OUTPUTS_DIR = BASE_DIR / "outputs" / "step7b"

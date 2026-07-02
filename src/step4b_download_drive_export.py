@@ -35,7 +35,7 @@ from core.config import (
 )
 from core.io_utils import setup_logger
 from core.paths import PROJECT_ROOT
-from utils.geotiff_validation import validate_geotiff_basic
+from core.utils.geotiff_validation import validate_geotiff_basic
 
 
 BASE_DIR = PROJECT_ROOT

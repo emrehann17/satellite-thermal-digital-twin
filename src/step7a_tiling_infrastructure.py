@@ -36,7 +36,7 @@ import rasterio
 
 from core.io_utils import setup_logger
 from core.paths import PROJECT_ROOT
-from utils.tiling import (
+from core.utils.tiling import (
     make_tile_grid,
     summarize_tile_grid,
     iter_windows,

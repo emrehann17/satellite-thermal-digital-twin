@@ -1046,6 +1046,169 @@ en az bir format başarılı olduğu sürece hata verilmez. CLI: `--max-samples`
 Step7B'den sonraki aşama, bu veriseti üzerinde MODIS downscaling için model
 eğitimidir (Step7C / Step8). Fire-risk modellemesi bundan ayrı bir hattır.
 
+## Step7C: MODIS→Landsat LST downscaling model eğitimi
+
+Step7C, Step7B veri setini kullanarak **saf** bir MODIS→Landsat LST downscaling
+modeli eğitir. **Step7C'de fire-risk modeli EĞİTİLMEZ; MCD64A1 veya FIRMS
+etiketleri KULLANILMAZ.** Step5/Step5C/Step6/Step7B çıktıları değişmez.
+
+**Amaç:** hedef = `landsat_lst_celsius` (Step7B'nin ürettiği yüksek çözünürlüklü
+Landsat LST); girdi = MODIS context + NDVI + DEM + land cover + koordinatlar.
+
+**Leakage koruması (kritik):** Target'tan türetilebilecek özellikler eğitim
+setinden **hariç tutulur**: `anomaly_zscore`, `current_tvdi`, `tvdi_difference`,
+`modis_context_zscore`. Bunlar mevcut Landsat LST'den (veya onu içeren
+ürünlerden) hesaplanmış olabileceğinden, downscaling hedefini tahmin etmede
+kullanılırsa metrikleri yapay şekilde şişirir (leakage). Bu dört özellik
+metadata'da `excluded_leakage_features` altında kayıtlıdır ama eğitime girmez.
+
+**Güvenli (leakage-free) özellikler:** `modis_lst_mean_celsius`,
+`modis_lst_std_celsius`, `ndvi`, `elevation`, `slope`, `landcover`, `lon`, `lat`,
+`row`, `col`, ve normalize `row_norm`/`col_norm`. Veri setinde bulunmayanlar
+sessizce atlanır.
+
+**Split:** Rastgele piksel split birincil doğrulama olarak KULLANILMAZ.
+Birincil split (**varsayılan**) `spatial_block`'tur: örnekler `row//BLOCK`,
+`col//BLOCK` ile `STEP7C_SPATIAL_BLOCK_SIZE_PIXELS` (varsayılan 64) piksellik
+mekansal bloklara (`spatial_block_id`) gruplanır ve her blok tamamen tek bir
+split'e (train/val/test) atanır — bu, AOI içindeki **görülmemiş mekansal
+bölgelere** genelleme testidir, yalnızca görülmemiş piksellere değil.
+`modis_pixel_group` (`modis_pixel_id`) ve `tile_group` (`source_tile_id`)
+alternatif modlardır; `modis_pixel_id` Step7B çıktısında **örnek-başına
+neredeyse benzersiz çıkabilir** (bu durumda gruplama etkisizdir). Step7C bunu
+otomatik tespit eder: `grup_sayısı == örnek_sayısı` ise
+*"Group split is ineffective because each sample is its own group."* uyarısı
+loglanır ve metadata/summary'ye yazılır (`samples_per_group`: min/median/
+mean/max ile birlikte). Grup kolonu kurulamazsa yalnızca `--allow-random-split`
+ile rastgele piksel split'e düşülür (net uyarıyla). Gruplar deterministik seed
+ile train/val/test = %70/%15/%15 oranında ayrılır. CLI: `--split
+spatial_block|modis_pixel_group|tile_group|random`, `--spatial-block-size`.
+
+**Model:** varsayılan `RandomForestRegressor` (sklearn-only, `n_estimators=200,
+min_samples_leaf=2`). Opsiyonel `hist_gradient_boosting` (sklearn) ve
+`xgboost` (yalnızca kuruluysa; requirements'a otomatik eklenmez, kurulu
+değilse net hata verir). `--fast` ile küçük model (`n_estimators=50`) hızlı
+test için.
+
+Çıktılar:
+
+```text
+outputs/step7c/downscaling_model.joblib
+outputs/step7c/downscaling_model_metadata.json
+outputs/step7c/downscaling_model_metrics.json
+outputs/step7c/downscaling_model_summary.md
+outputs/step7c/feature_importance.csv
+outputs/step7c/predicted_vs_actual.png
+outputs/step7c/residual_histogram.png
+outputs/step7c/residual_by_feature_summary.csv
+outputs/step7c/per_split_predictions_sample.csv
+```
+
+Metrikler (train/val/test): RMSE, MAE, R², bias, medyan mutlak hata, residual
+std, örnek sayısı. **MODIS baseline** (doğrudan `modis_lst_mean_celsius`'u
+tahmin olarak kullanma) ve **train-mean baseline** ile karşılaştırılır;
+MODIS baseline'a göre RMSE/MAE/R² iyileşmesi raporlanır — model baseline'dan
+kötüyse bu **gizlenmez**, açıkça uyarı olarak yazılır. Train/test RMSE arasında
+büyük fark varsa overfitting uyarısı; gruplu split'te grup sayısı azsa kararsız
+split uyarısı verilir.
+
+> `modis_lst_mean_celsius`, güncel günlük bir MODIS gözlemi değil, çok yıllık
+> yaz-ortalaması context katmanıdır. Bu nedenle Step7C şu an **mekansal
+> downscaling/context kalibrasyonu prototipi**dir, henüz günlük MODIS
+> downscaling değildir.
+
+CLI: `--model random_forest|hist_gradient_boosting|xgboost`, `--fast`,
+`--max-train-samples`, `--force`, `--allow-random-split`, `--input`,
+`--output-dir`. Mevcut çıktılar yalnız `--force` ile ezilir.
+
+Sonraki aşama Step7D: raster tahmin/mozaik üretimi, gap filling ve MODIS
+gerçek zamanlı füzyonu. Fire-risk RF/XGBoost, MODIS downscaling hattından
+tamamen ayrı tutulur.
+
+## Step7D: Downscaled LST raster tahmin üretimi
+
+Step7D, eğitilmiş Step7C modelini **tam referans raster gridine** uygulayarak
+30 m Landsat-benzeri downscaled LST GeoTIFF üretir. **Fire-risk modeli
+DEĞİLDİR; MCD64A1 veya FIRMS etiketleri KULLANILMAZ.** Step5/Step5C/Step6/
+Step7B/Step7C çıktıları değişmez; Step7C leakage guard'ına uyulur.
+
+**Leakage koruması:** `anomaly_zscore`, `current_tvdi`, `tvdi_difference`,
+`modis_context_zscore` rasterları **diskte mevcut olsalar bile hiç açılmaz**
+(hard safety net — Step7C'nin `safe_feature_columns` listesinde bu özellikler
+bulunursa Step7D işlemi tamamen durdurur).
+
+**Süreç:** model + Step7C metadata yüklenir → leakage guard doğrulanır →
+referans grid (`outputs/step5/current_period_median_celsius.tif`, fallback
+current-period LST) ve gerekli feature rasterları çözülür → **tüm feature
+rasterlarının referans gridle (width/height/CRS/transform) birebir eşleştiği**
+doğrulanır (uyuşmazlıkta **sessizce resample edilmez**, net hata verir) →
+pencere/tile bazlı (`rasterio` windows, bellek dostu) tahmin üretilir → aynı
+kolon sırası (Step7C metadata'sındaki `safe_feature_columns`) ile model
+`predict()` çağrılır.
+
+**Çıktılar:**
+
+```text
+outputs/step7d/downscaled_lst_celsius.tif
+outputs/step7d/downscaled_lst_valid_mask.tif
+outputs/step7d/downscaling_prediction_metadata.json
+outputs/step7d/downscaling_prediction_stats.json
+outputs/step7d/downscaling_prediction_summary.md
+outputs/step7d/downscaling_residual_observed_minus_predicted.tif  (gözlem varsa)
+outputs/step7d/downscaling_absolute_error.tif                     (gözlem varsa)
+```
+
+Tahmin rasterı float32/NaN-nodata, aynı CRS/transform/boyut; geçerli maske
+uint8 (1=geçerli, 0=eksik feature). Aralık dışı tahminler (`[-20, 80]` °C
+dışı) **clamp edilmez**, yalnızca sayılır ve dürüstçe raporlanır.
+
+**Önemli:** gözlem-örtüşme residual metrikleri (aynı current-period Landsat
+LST rasterıyla karşılaştırma) **in-sample/current-window tanı amaçlıdır,
+bağımsız doğrulama DEĞİLDİR.** Gerçek model doğrulama referansı Step7C'nin
+**spatial_block** test metrikleridir (summary.md'de ayrıca raporlanır).
+`modis_lst_mean_celsius` çok-yıllık yaz-ortalaması context katmanıdır, güncel
+günlük MODIS gözlemi değildir — Step7D bu nedenle mekansal downscaling/context
+kalibrasyonu prototipidir.
+
+CLI: `--model`, `--model-metadata`, `--output-dir`, `--tile-size`, `--force`,
+`--no-residual-products`, `--plot`. Mevcut çıktılar yalnız `--force` ile ezilir.
+
+## Step7E: Gözlem + downscaled LST füzyonu (gap-filling)
+
+Step7E, gözlemlenen Landsat current-period LST ile Step7D downscaled LST'yi
+**füzyonlar** (birleştirir). **Model EĞİTİLMEZ; fire-risk modeli DEĞİLDİR;
+MCD64A1/FIRMS etiketi KULLANILMAZ; bağımsız model doğrulaması DEĞİLDİR.**
+
+**Füzyon kuralı (öncelik sırası, ortalama/blend YOK):**
+1. Gözlemlenen Landsat LST geçerliyse (finite, `[-20,80]°C` içinde) →
+   **her zaman** kullanılır (`source_mask=1`). Geçerli gözlem pikselleri
+   **asla** model tahminiyle değiştirilmez.
+2. Gözlem eksik/geçersizse VE Step7D downscaled LST geçerliyse (finite,
+   `valid_mask==1`, aynı aralıkta) → yalnızca o zaman gap-fill olarak
+   kullanılır (`source_mask=2`).
+3. Her ikisi de geçersizse piksel NaN kalır (`source_mask=0`).
+
+Çıktılar:
+
+```text
+outputs/step7e/fused_lst_celsius.tif
+outputs/step7e/fused_lst_source_mask.tif        (0=invalid, 1=observed, 2=gap-fill)
+outputs/step7e/fused_lst_gapfill_amount.tif      (yalnız gap-fill pikselinde değer)
+outputs/step7e/fused_lst_metadata.json
+outputs/step7e/fused_lst_stats.json
+outputs/step7e/fused_lst_summary.md
+```
+
+Rapor: gözlem kapsamı, fused kapsamı, kapsam kazanımı, gap-fill piksel sayısı.
+`fused_minus_observed_on_overlap` yalnızca bir **sağlamlık kontrolüdür**
+(gözlem kullanılan piksellerde tanım gereği sıfır olmalı) — model doğrulama
+metriği değildir. Step7D/Step7C limitasyonu (MODIS'in çok-yıllık yaz-ortalaması
+context katmanı olduğu, henüz günlük MODIS gap-filling olmadığı) özetlenir.
+
+CLI: `--observed`, `--downscaled`, `--downscaled-mask`, `--output-dir`,
+`--tile-size`, `--force`, `--no-diagnostics`, `--plot`. Diğer Step7D/7C gibi,
+grid uyumsuzluğunda Step7E **sessizce resample etmez**, net hata verir.
+
 ## Diğer ileri adımlar (Phase 2+)
 
 * **DEM** (SRTM/Copernicus): yükseklik + eğim hem değişken hem downscaling girdisi.
