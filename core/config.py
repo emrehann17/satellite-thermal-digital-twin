@@ -430,3 +430,109 @@ STEP7E_OBSERVED_LST_PATH = "outputs/step5/current_period_median_celsius.tif"
 STEP7E_DOWNSCALED_LST_PATH = "outputs/step7d/downscaled_lst_celsius.tif"
 STEP7E_DOWNSCALED_VALID_MASK_PATH = "outputs/step7d/downscaled_lst_valid_mask.tif"
 STEP7E_WRITE_DIAGNOSTICS = True
+
+
+# =============================================================================
+# Step8A: native-MCD64A1-grid (500 m) burned-area modeling dataset preparation
+# =============================================================================
+# Step8A, 30 m predictor rasterlarini MCD64A1'in NATIVE ~500 m gridine agregat
+# eder. ONEMLI (label-resolution honesty): onceki validation (Step6) MCD64A1
+# etiketini predictor 30 m gridine (nearest-neighbor) resample ediyordu; bu her
+# native 500 m yanmis hucreyi cok sayida 30 m piksele COGALTIYOR ve piksel
+# sayilarini/anlamli confidence-p-value hesaplarini YANILTICI hale getiriyordu.
+# Step8A MODEL EGITMEZ, RF/XGBoost calistirmaz, nihai fire-risk dogrulamasi
+# YAPMAZ; yalnizca her satirin bir native 500 m MCD64A1 hucresi oldugu temiz
+# bir modelleme tablosu hazirlar. MCD64A1 birincil yanmis-alan etiketi olarak
+# kalir; FIRMS Step8A'da hedef olarak KULLANILMAZ (yok sayilir).
+STEP8A_OUTPUT_DIR = "outputs/step8a"
+STEP8A_MIN_30M_VALID_FRACTION = 0.3
+STEP8A_BURNABLE_FRACTION_THRESHOLD = 0.5
+STEP8A_WRITE_CSV = True
+STEP8A_WRITE_PARQUET = True
+STEP8A_RANDOM_SEED = 42
+
+# MCD64A1'in yaklasik native hucre boyutu (m) ve mevcut 30 m referans predictor
+# gridinin nominal piksel boyutu (m). Yerelde gercek native-CRS'li 500 m
+# MCD64A1 rasteri SAKLANMADIGI icin (Step6 etiketi GEE'den dogrudan 30 m
+# olcekte export eder), Step8A native gridi, bu iki degerin oranindan turetilen
+# kare piksel-blok boyutuyla (round(500/30)) referans 30 m grid uzerinde
+# yaklasik olarak yeniden olusturur. Bu, native 500 m hucre etiketini (mode ile)
+# tek deger olarak geri toplayarak duplikasyon sorununu duzeltir.
+STEP8A_MCD64A1_NATIVE_CELL_SIZE_M = 500.0
+STEP8A_REFERENCE_PIXEL_SIZE_M = 30.0
+
+
+# =============================================================================
+# Step8B: baseline vs baseline+thermal burned-area modeling (determining test)
+# =============================================================================
+# Step8B, supervisor'in istedigi BELIRLEYICI deneyi calistirir: Step8A'nin
+# 500 m MCD64A1-grid modelleme tablosu uzerinde, spatial-block CV ile, Model A
+# (baseline: elevation+slope+landcover+NDVI) ile Model B (baseline+thermal:
+# +current TVDI+LST anomaly+TVDI difference+fused/downscaled LST) AUC/PR-AUC
+# karsilastirir. MCD64A1 tek etikettir; FIRMS hedef olarak KULLANILMAZ. 30 m
+# piksel ORNEK OLARAK KULLANILMAZ (yalnizca Step8A'nin 500 m hucreleri). Random
+# split KULLANILMAZ; yalnizca spatial-block (StratifiedGroupKFold) CV.
+STEP8B_OUTPUT_DIR = "outputs/step8b"
+STEP8B_INPUT_DATASET = "outputs/step8a/step8a_500m_modeling_dataset.parquet"
+STEP8B_RANDOM_SEED = 42
+STEP8B_N_SPLITS = 5
+STEP8B_SPATIAL_BLOCK_SIZE_CELLS = 2
+STEP8B_MIN_POSITIVES_PER_POPULATION = 30
+STEP8B_MIN_MONTH_POSITIVES = 10
+STEP8B_PRIMARY_POPULATION = "all_valid"
+
+
+# =============================================================================
+# Step8C: spatial-block bootstrap uncertainty for Step8B delta metrics
+# =============================================================================
+# Step8C, Step8B'nin nokta tahminlerine (delta_auc, delta_pr_auc, delta_brier)
+# belirsizlik/duyarlilik analizi ekler. YENI MODEL EGITMEZ; Step8B'nin mevcut
+# out-of-fold tahminlerini (outputs/step8b/step8b_predictions.parquet)
+# kullanir. Bootstrap birimi SATIR DEGIL, spatial_block_id'dir (500 m
+# hucrelerin mekansal bloklari) -- boylece mekansal bagimlilik saygi gorur.
+# FIRMS KULLANILMAZ, 30 m piksel KULLANILMAZ. Klasik p-value/anlamlilik testi
+# İDDİA EDİLMEZ; yalnizca bootstrap guven araligi (CI) destegi raporlanir.
+STEP8C_OUTPUT_DIR = "outputs/step8c"
+STEP8C_INPUT_PREDICTIONS = "outputs/step8b/step8b_predictions.parquet"
+STEP8C_N_BOOTSTRAP = 1000
+STEP8C_RANDOM_SEED = 42
+STEP8C_CI_LOWER = 2.5
+STEP8C_CI_UPPER = 97.5
+STEP8C_MIN_POSITIVES = 30
+STEP8C_MIN_MONTH_POSITIVES = 10
+
+
+# =============================================================================
+# Step8D: thermal feature ablation study for Step8B burned-area modeling
+# =============================================================================
+# Step8D, Step8B'nin baseline+thermal iyilesmesine HANGI termal ozellik
+# grubunun/ozelligin en cok katki sagladigini belirlemek icin ablation
+# calismasidir. Step8A'nin 500 m MCD64A1-grid veri setini, ayni spatial-block
+# CV stratejisini (Step8B ile birebir) ve MCD64A1 burned hedefini kullanir.
+# FIRMS hedef olarak KULLANILMAZ; 30 m piksel ORNEK OLARAK KULLANILMAZ.
+# Random split KULLANILMAZ. Her populasyon icin: baseline + 10 termal
+# ozellik grubu/tekil ozellik (toplam 11 model), AYNI CV fold'lariyla
+# egitilir; delta_pr_auc (birincil, cunku burned nadir) ve delta_auc'a gore
+# siralanir. Varsayilan calisma yalnizca nokta tahmini uretir; spatial-block
+# bootstrap CI --bootstrap bayragi ile opsiyonel (yavas olabilecegi icin
+# varsayilan KAPALI, yalnizca top-K grup icin calisir).
+STEP8D_OUTPUT_DIR = "outputs/step8d"
+STEP8D_INPUT_DATASET = "outputs/step8a/step8a_500m_modeling_dataset.parquet"
+STEP8D_RANDOM_SEED = 42
+STEP8D_N_SPLITS = 5
+STEP8D_SPATIAL_BLOCK_SIZE_CELLS = 2
+STEP8D_MIN_POSITIVES_PER_POPULATION = 30
+STEP8D_MIN_MONTH_POSITIVES = 10
+STEP8D_N_ESTIMATORS = 300
+STEP8D_BOOTSTRAP_DEFAULT = False
+STEP8D_BOOTSTRAP_N = 500
+STEP8D_BOOTSTRAP_TOP_K = 3
+
+
+# =============================================================================
+# Step8E: final burned-area modeling report (aggregation only, no new science)
+# =============================================================================
+# Step8E YENI MODEL EGITMEZ, ONCEKI CIKTILARI DEGISTIRMEZ. Yalnizca Step8A-8D
+# ciktilarini (stats JSON'lari) okuyup tek bir tutarli bilimsel ozet raporuna
+# birlestirir (markdown + JSON + Excel + CSV).
+STEP8E_OUTPUT_DIR = "outputs/step8e"

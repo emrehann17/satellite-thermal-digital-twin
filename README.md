@@ -85,6 +85,10 @@ Projede şu adımlar yer almaktadır:
 - TVDI products are generated with NDVI-binned wet/dry edges.
 - MCD64A1 burned-area validation is implemented in pre-fire mode.
 - FireCCI51 is skipped for 2023 because the requested period is outside dataset availability.
+- Step7B-7E (MODIS downscaling training dataset, model training, raster
+  prediction, and observation+downscaled fusion/gap-filling) are implemented.
+  None of these train or validate a fire-risk model; MCD64A1/FIRMS labels are
+  never used in Step7B-7E.
 
 ## Important validation result
 - Clean NDVI changed the interpretation of the previous TVDI results.
@@ -96,9 +100,15 @@ Projede şu adımlar yer almaktadır:
 - This remains an **initial burned-area association experiment**, not a validated fire-risk model. No high-AUC claim is made.
 
 ## Next step
-- Step7B: prepare MODIS downscaling training dataset.
-- Features should include NDVI, DEM elevation, slope, land cover, coordinates, MODIS LST context, and Landsat LST target.
-- Do not proceed to fire-risk RF/XGBoost until MODIS downscaling / gap filling is handled.
+- Step7B-7E (MODIS downscaling training dataset, model training, raster
+  prediction, observation+downscaled fusion) are implemented; see the
+  Step7B/7C/7D/7E sections below.
+- Step8A prepares a native ~500 m MCD64A1-grid modeling dataset (fixes the
+  30 m label-duplication issue from resampling MCD64A1 onto the predictor
+  grid); see the Step8A section below.
+- Do not proceed to fire-risk RF/XGBoost (Step8B) until the Step8A dataset
+  has been reviewed; class balancing/model training belongs to Step8B, not
+  Step8A.
 
 > 3D / Cesium / Jetson / mobile components are later demo/application layers, not current scientific validation results.
 
@@ -226,7 +236,11 @@ core/
 ├── gee_utils.py
 ├── io_utils.py
 ├── paths.py
-└── regions.py
+├── regions.py
+├── validation_burned_area.py
+└── utils/
+    ├── geotiff_validation.py
+    └── tiling.py
 
 src/
 ├── step1_fetch_modis.py
@@ -238,11 +252,23 @@ src/
 ├── step5_preprocess_timeseries.py
 ├── step5b_diagnostic_report.py
 ├── step5c_tvdi.py
-└── step6_validate_fire_relation.py
+├── step6_validate_fire_relation.py
+├── step7a_tiling_infrastructure.py
+├── step7b_prepare_downscaling_dataset.py
+├── step7c_train_downscaling_model.py
+├── step7d_predict_downscaled_lst.py
+├── step7e_fuse_landsat_downscaled_lst.py
+├── step8a_prepare_500m_modeling_dataset.py
+├── step8b_train_baseline_vs_thermal_model.py
+├── step8c_spatial_block_bootstrap_uncertainty.py
+├── step8d_thermal_feature_ablation.py
+└── step8e_final_report.py
 
 scripts/
 ├── main.py
-└── standalone_step5.py
+├── export_mcd64a1_raw_burndate.py
+├── run_prefire_experiment.py
+└── standalone_step5-6.py
 
 ```
 
@@ -344,7 +370,54 @@ Mevcut Step5 çıktıları üzerinde tanı raporu üretir. Yeni preprocessing ya
 
 ## main.py
 
-`main.py`, Step1'den Step5'e kadar olan akışı organize biçimde çalıştırır. Güncel akışta Step4 export/polling sürecini tamamlar, Step4b ile Drive çıktılarını indirip yerel klasörlere dağıtır ve Step5 ile Landsat anomaly ve MODIS bağlam ürünlerini üretir.
+`main.py`, **Step1'den Step8E'ye kadar TÜM pipeline'ı** uçtan uca çalıştırır:
+GEE erişimi gereken online kısım (Step1-7B: veri çekme, export/polling,
+Landsat anomaly/TVDI, Step6 burned-area testi, downscaling eğitim verisi),
+ardından yerel/offline devam (Step7C downscaling model eğitimi -> Step7D
+downscaled LST tahmini -> Step7E füzyon -> raw MCD64A1 BurnDate export ->
+Step8A native 500 m modelleme verisi -> Step8B baseline vs thermal
+belirleyici deney -> Step8C spatial-block bootstrap -> Step8D termal
+özellik ablation -> Step8E nihai birleşik rapor).
+
+```bash
+python scripts/main.py            # ilk çalıştırma
+python scripts/main.py --force    # Step7C/7D/7E ve Step8A-8E çıktıları
+                                   # zaten varsa üzerine yaz
+```
+
+**Hata toleransı:** Step6 (burned-area association testi) hata-toleranslıdır
+— GEE/veri erişimi başarısız olursa yalnızca uyarı verir, pipeline'ın geri
+kalanı etkilenmez (hiçbir sonraki adım Step6'nın çıktısına bağımlı değildir).
+**Raw MCD64A1 BurnDate export ise ZORUNLUDUR ve hata-toleranslı DEĞİLDİR** —
+başarısız olursa pipeline burada durur, çünkü Step8A geçerli DOY etiketi
+olmadan (yalnızca binary maskeyle) doğru çalışamaz ve zaten kendi içinde net
+hata ile durur.
+
+**Üzerine yazma güvenliği:** Step7C/7D/7E ve Step8A-8E, önceki bir
+çalıştırmadan kalan çıktılar zaten varsa varsayılan olarak **net hata ile
+durur**. `python scripts/main.py --force` ile tüm bu adımlara `force=True`
+iletilir.
+
+**Runtime notu:** Step7C (model eğitimi) ve özellikle Step8D (popülasyon
+başına 11 model x spatial-block CV) gerçek AOI verisiyle uzun sürebilir
+(Step8D tek başına gerçek ~48k satırlık veride tahminen 15-40 dakika). Bu,
+tüm zinciri tek komutla çalıştırmanın doğal maliyetidir.
+
+Adımları ayrı ayrı, elle çalıştırmak isterseniz (örn. yalnızca belirli bir
+adımı yeniden çalıştırmak için) aşağıdaki komutları da kullanabilirsiniz:
+
+```bash
+python src/step7c_train_downscaling_model.py
+python src/step7d_predict_downscaled_lst.py
+python src/step7e_fuse_landsat_downscaled_lst.py
+# Step8A raw MCD64A1 BurnDate rasteri gerektirir (binary maske degil):
+python scripts/export_mcd64a1_raw_burndate.py --also-binary
+python src/step8a_prepare_500m_modeling_dataset.py --force
+python src/step8b_train_baseline_vs_thermal_model.py --force
+python src/step8c_spatial_block_bootstrap_uncertainty.py --force
+python src/step8d_thermal_feature_ablation.py --force
+python src/step8e_final_report.py --force
+```
 
 ---
 
@@ -501,6 +574,8 @@ Production veya daha kapsamlı denemelerde baseline yıl aralığı ve pencere s
 
 ```bash
 python scripts/main.py
+# veya ciktilar zaten varsa (Step7C/7D/7E, Step8A-8E) uzerine yazmak icin:
+python scripts/main.py --force
 
 ```
 
@@ -508,21 +583,72 @@ Bu komut güncel akışta sırasıyla şunları yürütür:
 
 * Step1: GEE bağlantısı ve temel veri sorguları
 * Step2: MODIS baseline üretimi
+* Step2B: DEM (elevation/slope) hazırlığı
 * Step3: Landsat günlük composite ve current period hazırlığı
 * Step4: Drive export ve task polling
 * Step4b: Drive klasörü indirme ve dosya yerleştirme
 * Step5: windowed/chunked raster ön işleme, Landsat anomaly ve MODIS bağlam üretimi
+* Step5C: TVDI hesaplama
+* Step5B: tanı raporu
+* Step6: burned-area association testi (hata-toleranslı; GEE/veri yoksa akışın geri kalanını durdurmaz)
+* Step7A: tiling/windowed altyapı testi
+* Step7B: MODIS downscaling eğitim verisetinin hazırlanması
+* Step7C: downscaling model eğitimi
+* Step7D: Step7C modelinin tam raster gridine uygulanması (downscaled LST)
+* Step7E: gözlemlenen + downscaled LST füzyonu/gap-filling
+* Raw MCD64A1 BurnDate export (GEE, **zorunlu** — hata-toleranslı değil)
+* Step8A: native 500 m MCD64A1-grid modelleme verisetinin hazırlanması
+* Step8B: baseline vs baseline+thermal belirleyici deney (spatial-block CV)
+* Step8C: Step8B delta metrikleri için spatial-block bootstrap belirsizlik analizi
+* Step8D: termal özellik ablation çalışması
+* Step8E: Step8A-8D'yi birleştiren nihai bilimsel özet rapor
+
+`scripts/main.py` artık **Step8E'ye kadar** çalışır (önceki sürümlerde
+Step7B'de duruyordu). Step6 dışındaki hiçbir adım atlanmaz; Step7C-7E ve
+Step8A-8E önceki çıktılar zaten varsa `--force` verilmedikçe net hata ile
+durur (bkz. yukarıdaki "main.py" bölümü).
 
 ## Adım Adım Çalıştırma
+
+Adımları tek tek, elle çalıştırmak isterseniz (örneğin yalnızca belirli bir
+adımı yeniden çalıştırmak için):
 
 ```bash
 python src/step1_fetch_modis.py
 python src/step2_modis_5year_mean.py
+python src/step2b_dem.py
 python src/step3_landsat_lst.py
 python src/step4_export_geotiff.py
 python src/step4b_download_drive_export.py
 python src/step5_preprocess_timeseries.py
+python src/step5c_tvdi.py
 python src/step5b_diagnostic_report.py
+python src/step6_validate_fire_relation.py
+python src/step7a_tiling_infrastructure.py
+python src/step7b_prepare_downscaling_dataset.py
+
+# main.py'de de calisir, ama tek tek de calistirilabilir:
+python src/step7c_train_downscaling_model.py
+python src/step7d_predict_downscaled_lst.py
+python src/step7e_fuse_landsat_downscaled_lst.py
+
+# Step8A icin GERCEK raw MCD64A1 BurnDate rasteri gerekir (binary maske DEGIL).
+# Step6 yalnizca binary mcd64a1_burned.tif ve (binary) mcd64a1_raw.tif uretir;
+# raw DOY degerlerini asagidaki GEE script'i ile export edin (GEE gerekir):
+python scripts/export_mcd64a1_raw_burndate.py --also-binary
+python src/step8a_prepare_500m_modeling_dataset.py --force
+
+# Step8B: belirleyici deney (baseline vs baseline+thermal, spatial-block CV):
+python src/step8b_train_baseline_vs_thermal_model.py --force
+
+# Step8C: Step8B delta metrikleri icin spatial-block bootstrap belirsizlik analizi:
+python src/step8c_spatial_block_bootstrap_uncertainty.py --force
+
+# Step8D: hangi termal ozellik/grubun Step8B iyilesmesini surukledigini bulan ablation:
+python src/step8d_thermal_feature_ablation.py --force
+
+# Step8E: Step8A-8D'yi tek bilimsel ozet raporunda birlestirir (egitim/hesaplama YOK):
+python src/step8e_final_report.py --force
 
 ```
 
@@ -1208,6 +1334,420 @@ context katmanı olduğu, henüz günlük MODIS gap-filling olmadığı) özetle
 CLI: `--observed`, `--downscaled`, `--downscaled-mask`, `--output-dir`,
 `--tile-size`, `--force`, `--no-diagnostics`, `--plot`. Diğer Step7D/7C gibi,
 grid uyumsuzluğunda Step7E **sessizce resample etmez**, net hata verir.
+
+## Step8A: Native 500 m MCD64A1-grid modeling dataset
+
+**Neden (label-resolution honesty):** MCD64A1 yanmış-alan etiketi native
+~500 m çözünürlüktedir. Step6, bu etiketi Earth Engine'den doğrudan 30 m
+ölçekte (`VALIDATION_LABEL_EXPORT_SCALE`) export ediyordu; bu her native
+500 m yanmış hücreyi ~250-300 adet 30 m piksele **çoğaltır** ve piksel
+sayılarına/olası confidence-p-value tarzı istatistiklere dayalı yorumları
+yanıltıcı hale getirir (pseudo-replication). Step8A, 30 m predictor
+rasterlarını MCD64A1'in native gridine agregat ederek bunu düzeltir.
+
+**Step8A NE YAPMAZ:** model **eğitmez**, RF/XGBoost **çalıştırmaz**, nihai
+fire-risk doğrulaması **yapmaz**. FIRMS hedef olarak **kullanılmaz**
+(tamamen göz ardı edilir). MCD64A1 birincil yanmış-alan etiketi olarak
+kalır. Step5/Step5C/Step6/Step7B/Step7C/Step7D/Step7E çıktıları
+değiştirilmez (yalnızca salt-okunur girdi olarak kullanılır). TVDI formülü
+ve FIRMS semantiği değişmez.
+
+**Native 500 m grid — uygulama notu:** Repoda gerçek native-CRS'li 500 m
+MCD64A1 rasteri yerelde saklanmaz (Step6 BurnDate'i GEE'den doğrudan 30 m
+ölçekte indirir, bu da native pikseli zaten 30 m'ye çoğaltılmış olarak
+export eder). Step8A, native gridi, referans 30 m grid üzerinde
+`round(STEP8A_MCD64A1_NATIVE_CELL_SIZE_M / STEP8A_REFERENCE_PIXEL_SIZE_M)`
+(varsayılan `round(500/30) = 17`) piksellik kare bloklara ayırarak yaklaşık
+olarak yeniden oluşturur ve her bloğun BurnDate etiketini **mode**
+(çoğunluk değer) ile tek bir değere indirger — 30 m alt-pikseller bağımsız
+örnek olarak sayılmaz. Bu, gerçek MODIS sinüzoidal native gridin birebir
+aynısı değildir, ama depoda halihazırda mevcut veriyle duplikasyon
+sorununu doğrudan düzeltir.
+
+**MCD64A1 etiket rasteri keşfi (raw tercihli, robust):** Step8A **raw
+BurnDate** (gün-of-year değerleri) rasterini güçlü şekilde tercih eder; binary
+yanmış maske yalnızca son çare fallback'tir. Sıra: `outputs/validation/labels/
+mcd64a1_raw.tif`, `outputs/step6/mcd64a1_raw.tif`, `outputs/**/*mcd64*raw*.tif`
+(raw), ardından SON ÇARE olarak binary maske (`mcd64a1_burned.tif` vb.).
+`--label-raster` ile açık yol verilebilir. Hiçbiri yoksa net hata ile durur.
+
+**Etiket rasteri denetimi ve fail-fast (ÖNEMLİ):** Agregasyondan ÖNCE seçilen
+etiket rasteri incelenir (dtype, nodata, min/max, benzersiz değerler, 0/1/DOY
+sayımları — stats JSON'da `label_raster_diagnostics`). "Raw" olduğu iddia
+edilen bir raster aslında **binary** ise (yalnızca {0,1} değerleri, ya da tüm
+pozitifler 1.0, ya da Ağustos-Ekim DOY aralığında [213-304] hiç değer yok),
+Step8A **sıfır-yanmış geçersiz veri seti üretmek yerine** şu hatayla durur:
+`"Selected MCD64A1 raw raster does not contain BurnDate DOY values. It appears
+to be binary. Re-export raw MCD64A1 BurnDate."`
+
+**DİKKAT — Step6 binary maske üretir:** Step6'nın `export_label_to_grid()`
+fonksiyonu `mosaic.gt(0)` (binary) yazar; `_raw` son eki binary image'in ham
+*indirmesini* ifade eder, DOY değerlerini değil. Bu yüzden Step8A için gerçek
+raw BurnDate'i `scripts/export_mcd64a1_raw_burndate.py` ile ayrıca export edin
+(MODIS/061/MCD64A1 `BurnDate` bandı, `BurnDate.gt(0)` DEĞİL):
+
+```bash
+python scripts/export_mcd64a1_raw_burndate.py --also-binary
+```
+
+Bu script raw DOY rasterini `outputs/validation/labels/mcd64a1_raw.tif` (ve
+`--also-binary` ile binary maskeyi `mcd64a1_burned.tif`) olarak yazar ve
+export sonrası değerlerin gerçekten DOY olduğunu (yalnızca {0,1} değil) kontrol
+eder.
+
+**Etiket kuralı ve modelleme geçerliliği:** Bir 500 m hücre `burned=1` yalnızca
+raw BurnDate'i Ağustos 1 - Ekim 31 penceresine düşerse; aksi halde `burned=0`
+(BurnDate 0/NaN/masked/pencere-dışı hepsi unburned). Pencere dışı pozitif
+BurnDate hücreleri `out_of_window_burndate_cells` olarak sayılır ama bu label
+penceresi için unburned kalır. **Modelleme geçerliliği (`valid_for_modeling`)
+yalnızca predictor + landcover + baseline özellik uygunluğuna dayanır; ETİKETE
+BAĞLI DEĞİLDİR** — unburned hücreler (negatif sınıf) ve tamamen-nodata etiket
+blokları veri setinde KALIR, düşürülmez.
+
+**Agregasyon:** Her satır bir native ~500 m hücredir. NDVI, DEM
+(elevation/slope), LST anomaly, current TVDI, TVDI difference, Step7D
+downscaled LST, Step7E fused LST (+ `fused_lst_source_mask`) her hücre
+içindeki 30 m piksellerden mean/median/std/valid_count/valid_fraction ile
+özetlenir. Landcover (ESA WorldCover), Step7D ile **aynı** şekilde yalnızca
+kategorik istisna olarak nearest-neighbor ile referans gride hizalanır;
+başka hiçbir raster **sessizce resample edilmez** — uyumsuzlukta net hata
+verilir. Opsiyonel rasterlar (ör. Step7E henüz çalıştırılmamışsa
+`fused_lst`) eksikse ilgili sütunlar NaN bırakılır, satırlar **düşürülmez**;
+zorunlu rasterlar (NDVI/elevation/slope/referans grid) eksikse net hata ile
+durur.
+
+**Burnable maskeler (supervisor talebi):** `burnable_tree_shrub_grass`
+(tree cover + shrubland + grassland) ve `burnable_tree_shrub` (tree cover +
+shrubland), `STEP8A_BURNABLE_FRACTION_THRESHOLD` (varsayılan 0.5) eşiğiyle.
+**Cropland bu maskelerin dışında tutulur**, yalnızca kendi fraction'ı
+(`landcover_cropland_fraction`) raporlanır.
+
+**Çıktılar:**
+
+```text
+outputs/step8a/step8a_500m_modeling_dataset.parquet
+outputs/step8a/step8a_500m_modeling_dataset.csv
+outputs/step8a/step8a_dataset_stats.json
+outputs/step8a/step8a_dataset_summary.md
+outputs/step8a/step8a_500m_grid_burned_label.tif   (diagnostik, 500 m çözünürlük)
+outputs/step8a/step8a_500m_grid_valid_mask.tif     (diagnostik, 500 m çözünürlük)
+outputs/step8a/step8a_500m_cell_preview.geojson    (diagnostik, ilk 5000 hücre)
+outputs/step8a/step8a_label_raster_diagnostics.json (yalnızca etiket denetimi FAIL-FAST ile durursa yazılır)
+```
+
+Stats JSON ayrıca `label_raster_diagnostics` (etiket rasterinin dtype/nodata/
+min/max/benzersiz değerler/0-1-DOY sayımları), `label_kind`,
+`label_source_description`, `burn_month_available` ve
+`out_of_window_burndate_cells` alanlarını içerir.
+
+Sütunlar arasında: `cell_id`, `row_500m`, `col_500m`, `lon`, `lat`, `burned`,
+`burn_date`, `burn_month`, `burn_day_of_year`, `label_source`,
+baseline özellikler (`ndvi_mean`, `elevation_mean`, `slope_mean`,
+`landcover_dominant`, landcover fraction'ları), thermal özellikler
+(`lst_anomaly_mean`, `current_lst_mean`, `current_tvdi_mean`,
+`tvdi_difference_mean`, `downscaled_lst_mean`, `fused_lst_mean`), coverage/
+provenance (`valid_30m_pixel_count`, `valid_30m_fraction`,
+`observed_fraction`, `gapfilled_fraction`, `invalid_source_fraction`,
+`source_mask_majority`) ve `valid_for_modeling`/`invalid_reason`/
+`out_of_window_burndate` (Step8B'nin filtreleme yapabilmesi için; geçersiz
+veya unburned hücreler dataset'ten **silinmez**, işaretlenir). Sınıf
+dengeleme/undersampling burada **yapılmaz** — bu Step8B'ye aittir.
+
+CLI: `--output-dir`, `--force`, `--write-csv`/`--no-write-csv`,
+`--write-parquet`/`--no-write-parquet`, `--min-valid-fraction`,
+`--burnable-threshold`, `--label-raster`, `--reference-30m`,
+`--allow-all-burned` (yalnızca gerçekten çoğunluk-yanmış / düşük-kapsama bir
+veri seti bekleniyorsa fail-fast kontrollerini gevşetir). Mevcut çıktılar
+yalnız `--force` ile ezilir.
+
+Sonraki aşama Step8B: bu dataset üzerinden **baseline model**
+(elevation + slope + landcover + NDVI) ile **thermal model**
+(baseline + current TVDI + LST anomaly + TVDI difference + fused thermal)
+karşılaştırması; lead-time değerlendirmesi `burn_month` (Ağustos/Eylül/
+Ekim) stratalarıyla yapılacaktır.
+
+## Step8B: Baseline vs Baseline+Thermal Burned-Area Modeling (belirleyici deney)
+
+**Bu, süpervizörün istediği BELİRLEYİCİ deneydir:** Termal/kuraklık
+özellikleri, baseline (termal olmayan) özelliklerin ötesinde yanmış-alan
+ayrımını iyileştiriyor mu? Step8A'nın 500 m MCD64A1-grid veri seti üzerinde,
+**aynı spatial-block CV ve aynı popülasyon altında**, **Model A (baseline:**
+elevation + slope + landcover + NDVI**)** ile **Model B (baseline+thermal:**
+Model A + current TVDI + LST anomaly + TVDI difference + downscaled/fused
+LST**)** karşılaştırılır. Ana sonuç: `delta_auc = AUC(Model B) - AUC(Model A)`.
+
+**Kritik kısıtlar:**
+- Örnekler Step8A'nın 500 m hücreleridir; **30 m piksel örnek olarak
+  KULLANILMAZ.**
+- Hedef yalnızca MCD64A1 (`burned`); **FIRMS hedef olarak KULLANILMAZ.**
+- **Spatial-block CV** (`StratifiedGroupKFold`, `groups=spatial_block_id`)
+  zorunludur; **random split ASLA kullanılmaz.** `spatial_block_id`,
+  `row_500m`/`col_500m`'in `STEP8B_SPATIAL_BLOCK_SIZE_CELLS` (varsayılan 2x2
+  hücre, ~1 km x 1 km) ile bloklanmasından türetilir.
+- `burn_month`, `burn_date`, `burned`, `label_source` ve diğer etiket/metadata
+  kolonları; `source_mask_majority`/`observed_fraction`/`gapfilled_fraction`/
+  `invalid_source_fraction` (yalnızca duyarlılık tanısında kullanılır);
+  `lon`/`lat` (yalnızca spatial block oluşturmak için, varsayılan olarak
+  özellik DEĞİLDİR) — hiçbiri özellik setine girmez. Bu, çalışma zamanında
+  `check_no_forbidden_features()` ile de doğrulanır.
+- Eksik değerler pipeline İÇİNDE (`SimpleImputer`: sayısal=medyan,
+  kategorik=en sık) impute edilir; `landcover_dominant` `OneHotEncoder
+  (handle_unknown="ignore")` ile, tamamı `ColumnTransformer`/`Pipeline`
+  içinde (fold'lar arası sızıntı yok).
+- Varsayılan model: `RandomForestClassifier(n_estimators=300,
+  min_samples_leaf=3, class_weight="balanced", random_state=42)`.
+  `--model hist_gradient_boosting` da desteklenir; `--model xgboost`
+  yalnızca xgboost kuruluysa çalışır (zorunlu bağımlılık değildir).
+
+**Popülasyonlar:**
+1. `all_valid` — **birincil analiz** (cropland-hariç burnable maskesinde
+   yeterli pozitif olmadığı için).
+2. `cropland_dominant` — yanmış hücrelerin büyük çoğunluğu cropland-dominant
+   olduğu için ayrıca değerlendirilir.
+3. `burnable_tree_shrub_grass`, 4. `burnable_tree_shrub` — **yalnızca
+   tanı/duyarlılık amaçlı**; pozitif sayısı `STEP8B_MIN_POSITIVES_PER_
+   POPULATION` (varsayılan 30) altındaysa **varsayılan olarak atlanır**
+   (`--allow-low-positive-strata` ile zorlanabilir, ama alt sınır yine de
+   en az 2 pozitif/negatif gerektirir).
+
+**Lead-time (aylık) değerlendirme:** Ayrı aylık modeller **eğitilmez**; tek
+Ağustos-Ekim modelinin out-of-fold tahminleri `burn_month` ile Ağustos/
+Eylül/Ekim stratalarına bölünerek değerlendirilir (ay-vs-unburned).
+Bir ayda pozitif sayısı `STEP8B_MIN_MONTH_POSITIVES` (varsayılan 10)
+altındaysa metrik `null` ve uyarı raporlanır.
+
+**Gap-fill duyarlılık tanısı:** `all_valid` ve `cropland_dominant` için,
+**yeniden eğitim yapılmadan**, mevcut out-of-fold tahminleri
+`gapfilled_fraction < 0.25` ve `< 0.50` alt kümelerinde yeniden değerlendirilir.
+
+**İstatistiksel anlamlılık:** Bu çalıştırmada delta_auc/delta_pr_auc için
+**hiçbir güven aralığı veya p-değeri hesaplanmaz** — sonuçlar yalnızca nokta
+tahminidir; stats JSON ve summary bunu açıkça belirtir.
+
+**Çıktılar:**
+
+```text
+outputs/step8b/step8b_model_comparison_metrics.json
+outputs/step8b/step8b_fold_metrics.csv
+outputs/step8b/step8b_predictions.parquet
+outputs/step8b/step8b_predictions.csv
+outputs/step8b/step8b_feature_importance.csv
+outputs/step8b/step8b_summary.md
+outputs/step8b/step8b_roc_curves.png              (opsiyonel)
+outputs/step8b/step8b_pr_curves.png               (opsiyonel)
+outputs/step8b/step8b_delta_auc_by_population.csv (opsiyonel)
+outputs/step8b/step8b_monthly_leadtime_metrics.csv (opsiyonel)
+```
+
+CLI: `--input`, `--output-dir`, `--force`, `--n-splits` (varsayılan 5, geçerli
+fold üretilemezse otomatik 3'e düşer, yine olmazsa net hata ile durur),
+`--spatial-block-size-cells`, `--min-positives`, `--min-month-positives`,
+`--allow-low-positive-strata`, `--model {random_forest,
+hist_gradient_boosting, xgboost}`.
+
+Kalite kontrolleri: girdi Step8A veri seti yoksa, `burned` kolonu yoksa,
+`all_valid` icin `burned` tek sınıf içeriyorsa, birincil popülasyon için
+spatial-block CV kurulamıyorsa, veya yasak bir etiket/metadata kolonu
+özellik setine sızmışsa **net hata ile durur** (random split'e ASLA
+düşülmez). `cropland_dominant`'ın neredeyse tüm pozitifleri içermesi,
+burnable maskelerinin 30'un altında pozitif içermesi, Ekim pozitiflerinin
+düşük olması, veya gapfill kolonlarının eksik olması durumlarında uyarı
+verir.
+
+## Step8C: Spatial-Block Bootstrap Uncertainty (Step8B belirsizlik analizi)
+
+Step8B yalnızca nokta tahmini (delta_auc, delta_pr_auc) raporlar; güven
+aralığı veya p-değeri yoktur. Step8C, **yeni model eğitmeden**, Step8B'nin
+mevcut out-of-fold tahminlerini (`outputs/step8b/step8b_predictions.parquet`)
+kullanarak bu nokta tahminlerine **spatial-block bootstrap** ile
+belirsizlik/duyarlılık analizi ekler.
+
+**Kritik kısıtlar:**
+- **Model eğitilmez.** Yalnızca Step8B'nin mevcut tahminleri kullanılır.
+- **Bootstrap birimi satır DEĞİL, `spatial_block_id`'dir** (Step8B'nin CV
+  gruplarıyla aynı 500 m mekansal bloklar). Her iterasyonda benzersiz
+  bloklar yerine koyarak örneklenir; bir blok birden fazla çekilirse TÜM
+  satırları o kadar tekrarlanır. **Random satır bootstrap ASLA
+  kullanılmaz.**
+- `spatial_block_id` tahmin tablosunda yoksa, Step8A veri setinden
+  (`row_500m`/`col_500m`, `cell_id` üzerinden join) yeniden oluşturulur;
+  bu da mümkün değilse net hata ile durur.
+- **FIRMS kullanılmaz; 30 m piksel kullanılmaz** (örnekler Step8B'den
+  değişmeden gelen Step8A 500 m hücreleridir).
+- **Klasik p-değeri veya "istatistiksel olarak anlamlı" iddiası YAPILMAZ.**
+  Yalnızca %95 bootstrap yüzdelik aralığının sıfırı dışlayıp dışlamadığı
+  raporlanır: `"bootstrap-supported positive delta"` (aralık tamamen >0)
+  veya `"point estimate positive but CI overlaps zero"` (aralık sıfırı
+  kapsıyor). Bu ayrım stats JSON, özet ve kodun kendisinde tutarlı şekilde
+  vurgulanır.
+
+**Popülasyonlar:** `all_valid` ve `cropland_dominant` her zaman
+değerlendirilir. `burnable_tree_shrub_grass`/`burnable_tree_shrub` yalnızca
+tahmin tablosunda mevcutsa VE pozitif sayısı `STEP8C_MIN_POSITIVES`
+(varsayılan 30) üzerindeyse dahil edilir — Step8B'de zaten atlanmış
+popülasyonlar Step8C'de de değerlendirilmez.
+
+**Aylık lead-time:** Ayrı aylık model eğitilmez; mevcut tam-sezon OOF
+tahminleri `burn_month`'a göre filtrelenip bootstrap'lanır. Bir ayda pozitif
+< `STEP8C_MIN_MONTH_POSITIVES` (varsayılan 10) ise o ay için CI
+`unavailable` olarak işaretlenir (Ekim'de tipik olarak beklenir).
+
+**Gap-fill duyarlılığı:** `all_valid` ve `cropland_dominant` için
+`no_filter`, `gapfilled_fraction < 0.25`, `< 0.50` alt kümelerinde **yeniden
+eğitim yapılmadan** bootstrap tekrarlanır.
+
+**Çıktılar:**
+
+```text
+outputs/step8c/step8c_bootstrap_metrics.json
+outputs/step8c/step8c_bootstrap_samples.csv
+outputs/step8c/step8c_summary.md
+outputs/step8c/step8c_delta_auc_distribution.png    (opsiyonel)
+outputs/step8c/step8c_delta_pr_auc_distribution.png (opsiyonel)
+outputs/step8c/step8c_monthly_bootstrap_metrics.csv (opsiyonel)
+```
+
+CLI: `--input`, `--output-dir`, `--force`, `--n-bootstrap` (varsayılan 1000),
+`--random-seed`, `--min-positives`, `--min-month-positives`.
+
+Kalite kontrolleri: girdi tahmin dosyası yoksa, `burned`/`y_prob_baseline`/
+`y_prob_thermal`/`population` kolonları yoksa, `spatial_block_id` yok ve
+yeniden oluşturulamıyorsa, `all_valid` tahmin tablosunda yoksa veya tek
+sınıf içeriyorsa **net hata ile durur**. `cropland_dominant`'ın neredeyse
+tüm pozitifleri içermesi, Ekim pozitiflerinin düşük olması, `gapfilled_
+fraction` eksikliği (bu durumda gap-fill duyarlılığı atlanır), veya
+`fold_id` eksikliği (tahminlerin gerçekten out-of-fold olduğu
+doğrulanamıyor) durumlarında uyarı verir.
+
+## Step8D: Thermal Feature Ablation (Step8B'nin iyileşmesinin kaynağı)
+
+Step8B, termal özelliklerin baseline'ı iyileştirdiğini gösterdi ama HANGİ
+termal özelliğin/grubun bu iyileşmeyi sağladığını söylemiyor. Step8D,
+Step8B ile **aynı spatial-block CV**'yi kullanarak, her popülasyon için
+`baseline` + 10 termal özellik grubu/tekil özelliği (toplam 11 model)
+eğitip, her grubu baseline'a karşı `delta_pr_auc`/`delta_auc`/`delta_brier`
+ile karşılaştırır.
+
+**Termal ablation grupları (baseline'a eklenir):**
+`lst_anomaly_only`, `current_lst_only`, `tvdi_only`, `tvdi_difference_only`,
+`downscaled_only`, `fused_lst_only` (tekil özellikler); `lst_anomaly_group`
+(anomaly+current_lst), `tvdi_group` (tvdi+tvdi_difference),
+`fused_downscaled_group` (downscaled+fused); `all_thermal` (Step8B'nin
+thermal modeliyle birebir aynı özellik seti — çapraz kontrol için).
+
+**Kritik kısıtlar:** Step8B ile birebir aynı — MCD64A1 tek hedef, FIRMS
+kullanılmaz, 30 m piksel kullanılmaz, spatial-block CV zorunlu (random
+split'e asla düşülmez), yasak etiket/provenance kolonları özellik setine
+giremez (`check_no_forbidden_features()` ile doğrulanır).
+
+**Sıralama:** Öncelikle `delta_pr_auc`'a göre (burned nadir olduğu için
+PR-AUC daha duyarlı), ikincil olarak `delta_auc`'a göre. Her popülasyon
+için her 11 model **AYNI CV fold'larıyla** eğitilir, böylece karşılaştırma
+adil olur.
+
+**Popülasyonlar:** `all_valid` birincil, `cropland_dominant` önemli
+ikincil; `burnable_tree_shrub_grass`/`burnable_tree_shrub` yalnızca tanı
+amaçlı, pozitif < 30 ise atlanır (Step8A/8B ile aynı eşik).
+
+**Aylık lead-time:** Ayrı aylık model eğitilmez; her ablation modelinin
+mevcut OOF tahminleri `burn_month`'a göre filtrelenip baseline'a karşı
+değerlendirilir.
+
+**Bootstrap (opsiyonel, varsayılan KAPALI):** `--bootstrap` bayrağıyla,
+yalnızca her popülasyonun en iyi top-K (varsayılan 3) ablation grubu için
+spatial-block bootstrap CI hesaplanır (yavaş olabileceği için varsayılan
+kapalı; `--bootstrap` verilmezse çıktı yalnızca **nokta tahminidir**, özet
+bunu açıkça belirtir).
+
+**Step8B ile çapraz kontrol:** `all_thermal` sonucu, mevcutsa
+`outputs/step8b/step8b_model_comparison_metrics.json`'daki Step8B'nin
+kendi thermal modeliyle karşılaştırılır; `delta_auc` farkı 0.01'i aşarsa
+uyarı verilir (iki script arasında konfigürasyon kayması/rastgelelik
+sinyali).
+
+**Çıktılar:**
+
+```text
+outputs/step8d/step8d_ablation_metrics.json
+outputs/step8d/step8d_ablation_fold_metrics.csv
+outputs/step8d/step8d_ablation_predictions.parquet
+outputs/step8d/step8d_ablation_predictions.csv
+outputs/step8d/step8d_ablation_feature_importance.csv
+outputs/step8d/step8d_ablation_summary.md
+outputs/step8d/step8d_ablation_barplot.png                    (opsiyonel)
+outputs/step8d/step8d_ablation_delta_auc_by_population.csv    (opsiyonel)
+outputs/step8d/step8d_ablation_delta_pr_auc_by_population.csv (opsiyonel)
+```
+
+Tahmin tablosu **uzun formattadır** (her hücre × popülasyon × model_name
+için bir satır; `y_prob` tek kolon, `model_name`/`ablation_group` ile
+hangi model olduğu ayırt edilir) — Step8B'nin geniş formatından (y_prob_
+baseline/y_prob_thermal) farklıdır, çünkü burada 11 model karşılaştırılır.
+
+CLI: `--input`, `--output-dir`, `--force`, `--n-splits`, `--spatial-block-
+size-cells`, `--min-positives`, `--min-month-positives`, `--model
+{random_forest,hist_gradient_boosting}`, `--n-estimators`, `--bootstrap`,
+`--n-bootstrap`, `--top-k-bootstrap`, `--random-seed`.
+
+Özet, her popülasyon için şunları açıkça belirtir: en iyi tekil termal
+özellik, en iyi termal grup, `all_thermal`'ın daha küçük gruplardan daha
+mı iyi olduğu, ve fused/downscaled özelliklerin daha basit LST/TVDI
+gruplarının ötesinde katkı sağlayıp sağlamadığı.
+
+## Step8E: Final Burned-Area Modeling Report (Step8A-8D özet paketi)
+
+Step8E, **hiçbir model eğitmez, hiçbir önceki çıktıyı değiştirmez ve hiçbir
+istatistiği yeniden hesaplamaz** — yalnızca Step8A/8B/8C/8D'nin stats
+JSON'larını okuyup tek bir tutarlı bilimsel özet raporuna birleştirir.
+Bir grup diğerinden büyük/küçük diye cümle kurmak gibi salt biçimlendirme
+amaçlı karşılaştırmalar dışında hiçbir yeni analiz yapılmaz.
+
+**Girdi (salt okunur):**
+- `outputs/step8a/step8a_dataset_stats.json` (**zorunlu**)
+- `outputs/step8b/step8b_model_comparison_metrics.json` (**zorunlu**)
+- `outputs/step8c/step8c_bootstrap_metrics.json` (opsiyonel — yoksa
+  bootstrap bölümü raporda "not available" olarak işaretlenir, çalışma
+  durmaz)
+- `outputs/step8d/step8d_ablation_metrics.json` (opsiyonel — yoksa ablation
+  bölümü "not available" olarak işaretlenir)
+
+**Rapor yapısı:** (1) Step8A-8D pipeline özeti, (2) dataset istatistikleri,
+(3) Step8B model karşılaştırma tablosu, (4) Step8C bootstrap özeti (%95 CI +
+yorumlama), (5) Step8D ablation sıralaması + en iyi tekil özellik/grup +
+TVDI/downscaled/fusion katkı yorumu, (6) aylık lead-time tablosu (Ağustos/
+Eylül/Ekim + güven düzeyi), (7) ana bulgular, (8) sınırlamalar, (9) sonraki
+adımlar, ve genel sonuç paragrafı. Tüm anlatı cümleleri (en iyi grup hangisi,
+`all_thermal` daha mı iyi, fusion katkı sağlıyor mu, genel sonuç metni)
+**gerçek yüklenen sayılara göre dinamik olarak üretilir** — sabit şablon
+metni değildir; Step8C/8D mevcut değilse ilgili cümleler otomatik olarak
+atlanır/"not available" olarak işaretlenir.
+
+**Çıktılar:**
+
+```text
+outputs/step8e/step8e_summary.md
+outputs/step8e/step8e_summary.json
+outputs/step8e/step8e_results_tables.xlsx
+outputs/step8e/step8e_key_findings.csv
+outputs/step8e/step8e_feature_ranking.csv      (opsiyonel)
+outputs/step8e/step8e_monthly_results.csv      (opsiyonel)
+outputs/step8e/step8e_population_summary.csv   (opsiyonel)
+```
+
+Excel çalışma kitabı (`step8e_results_tables.xlsx`) sayfaları: `dataset`,
+`populations`, `model_comparison`, `bootstrap`, `ablation`, `monthly`,
+`limitations` (profesyonel Arial font, koyu mavi başlık dolgusu, donmuş
+başlık satırı). Değerler doğrudan yazılır (formül değil), çünkü bu bir
+finansal model değil, önceden hesaplanmış Step8A-8D sonuçlarının statik bir
+anlık görüntüsüdür — "yeniden hesaplama yok, yalnızca birleştirme" ilkesiyle
+tutarlıdır.
+
+CLI: `--output-dir`, `--force`.
+
+Kalite kontrolleri: `outputs/step8a/step8a_dataset_stats.json` veya
+`outputs/step8b/step8b_model_comparison_metrics.json` yoksa **net hata ile
+durur**; Step8C/8D çıktıları eksikse yalnızca uyarır ve ilgili bölümü
+"not available" işaretler.
 
 ## Diğer ileri adımlar (Phase 2+)
 

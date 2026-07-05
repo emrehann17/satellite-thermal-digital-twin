@@ -19,6 +19,7 @@ cycler==0.12.1
 decorator==5.2.1
 earthengine-api==1.7.22
 eerepr==0.1.2
+et_xmlfile==2.0.0
 executing==2.2.1
 filelock==3.29.0
 folium==0.20.0
@@ -57,6 +58,8 @@ matplotlib-inline==0.2.2
 narwhals==2.21.0
 netCDF4==1.7.4
 numpy==2.4.4
+nvidia-nccl-cu12==2.30.7
+openpyxl==3.1.5
 packaging==26.2
 pandas==3.0.2
 parso==0.8.7
@@ -70,6 +73,7 @@ psutil==7.2.2
 psygnal==0.15.1
 ptyprocess==0.7.0
 pure_eval==0.2.3
+pyarrow==24.0.0
 pyasn1==0.6.3
 pyasn1_modules==0.4.2
 pycparser==3.0
@@ -100,4 +104,5 @@ urllib3==2.6.3
 wcwidth==0.7.0
 widgetsnbextension==4.0.15
 xarray==2026.4.0
+xgboost==3.3.0
 xyzservices==2026.3.0

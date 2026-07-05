@@ -122,7 +122,7 @@ LANDCOVER_CANDIDATE_DIRS = [
     BASE_DIR / "outputs" / "landcover",
     BASE_DIR / "outputs" / "land_cover",
 ]
-OUTPUT_DIR = BASE_DIR / "outputs" / "validation"
+OUTPUT_DIR = BASE_DIR / "outputs" / "step6"
 LABEL_DIR = OUTPUT_DIR / "labels"
 BURNABLE_NDVI_THRESHOLD = 0.2
 VEGETATION_NDVI_THRESHOLDS = (BURNABLE_NDVI_THRESHOLD, 0.3)

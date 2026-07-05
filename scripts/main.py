@@ -2,8 +2,36 @@
 main.py
 
 Yapılanlar:
-    - Step1'den Step5'e kadar olan akışı sırasıyla çalıştırır
-    - GEE tarafındaki online pipeline'ı tek yerden yönetir
+    - Step1'den Step8E'ye kadar TÜM pipeline'ı sırasıyla çalıştırır: GEE
+      erişimi gereken online kısım (Step1-7B), ardından yerel/offline kısım
+      (Step7C downscaling model eğitimi -> Step7D downscaled LST tahmini ->
+      Step7E füzyon -> raw MCD64A1 BurnDate export -> Step8A native 500 m
+      modelleme verisi -> Step8B baseline vs thermal belirleyici deney ->
+      Step8C spatial-block bootstrap -> Step8D termal özellik ablation ->
+      Step8E nihai birleşik rapor).
+
+NOTLAR:
+    - Step6 (burned-area association testi) hata-toleranslıdır: GEE/veri
+      erişimi başarısız olursa yalnızca uyarı verir, pipeline'ın geri
+      kalanını DURDURMAZ (Step6'nın çıktısı sonraki adımların hiçbiri için
+      zorunlu girdi değildir).
+    - Raw MCD64A1 BurnDate export (scripts/export_mcd64a1_raw_burndate.py)
+      Step8A için ZORUNLU bir GEE adımıdır ve hata-toleranslı DEĞİLDİR:
+      başarısız olursa pipeline burada durur, çünkü Step8A gerçek BurnDate
+      DOY değerleri olmadan (yalnızca binary maskeyle) yanlış/geçersiz bir
+      etiket kullanmaya çalışır ve zaten kendi içinde net hata ile durur.
+    - Step7C/7D/7E ve Step8A-8E, önceki çalıştırmadan kalan çıktılar zaten
+      varsa varsayılan olarak NET HATA ile durur (üzerine yazma güvenliği).
+      Bu betiği tekrar/yeniden çalıştırmak için `--force` verin; bu, ilgili
+      tüm adımlara iletilir.
+    - Step7C (model eğitimi) ve özellikle Step8D (popülasyon başına 11
+      model x spatial-block CV) gerçek AOI verisiyle uzun sürebilir
+      (Step8D tek başına gerçek ~48k satırlık veride tahminen 15-40 dakika).
+      Bu, tüm zinciri tek komutla çalıştırmanın doğal maliyetidir.
+
+KULLANIM:
+    python scripts/main.py            # ilk calistirma
+    python scripts/main.py --force    # ciktilar zaten varsa uzerine yaz
 """
 
 from pathlib import Path as _Path
@@ -13,6 +41,7 @@ _PROJECT_ROOT = _Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_PROJECT_ROOT))
 
+import argparse
 from datetime import datetime
 import traceback
 
@@ -31,6 +60,15 @@ import src.step5c_tvdi as step5c_tvdi
 import src.step6_validate_fire_relation as step6_validate_fire_relation
 import src.step7a_tiling_infrastructure as step7a_tiling_infrastructure
 import src.step7b_prepare_downscaling_dataset as step7b_prepare_downscaling_dataset
+import src.step7c_train_downscaling_model as step7c_train_downscaling_model
+import src.step7d_predict_downscaled_lst as step7d_predict_downscaled_lst
+import src.step7e_fuse_landsat_downscaled_lst as step7e_fuse_landsat_downscaled_lst
+import scripts.export_mcd64a1_raw_burndate as export_mcd64a1_raw_burndate
+import src.step8a_prepare_500m_modeling_dataset as step8a_prepare_500m_modeling_dataset
+import src.step8b_train_baseline_vs_thermal_model as step8b_train_baseline_vs_thermal_model
+import src.step8c_spatial_block_bootstrap_uncertainty as step8c_spatial_block_bootstrap_uncertainty
+import src.step8d_thermal_feature_ablation as step8d_thermal_feature_ablation
+import src.step8e_final_report as step8e_final_report
 
 
 BASE_DIR = PROJECT_ROOT
@@ -50,12 +88,18 @@ def run_step(step_name: str, step_func) -> None:
     return result
 
 
-def main() -> None:
+def main(force: bool = False) -> None:
     start_time = datetime.now()
 
     log.info("#" * 80)
-    log.info("PIPELINE BAŞLIYOR (STEP1 -> STEP7B)")
+    log.info("PIPELINE BAŞLIYOR (STEP1 -> STEP8E, uçtan uca)")
     log.info(f"Başlangıç zamanı: {start_time.isoformat()}")
+    log.info(f"force={force}")
+    log.info(
+        "NOT: Step6 hata-toleranslıdır (basarisiz olursa yalnizca uyarir). "
+        "Raw MCD64A1 BurnDate export ise ZORUNLUDUR; basarisiz olursa "
+        "pipeline burada durur (Step8A gecerli DOY etiketi olmadan calisamaz)."
+    )
     log.info("#" * 80)
 
     try:
@@ -73,8 +117,9 @@ def main() -> None:
         run_step("STEP 5B", step5b_diagnostic_report.main)
 
         # Step6 burned-area association testi. Yangın etiketleri GEE'den çekilir;
-        # veri yoksa veya GEE erişimi başarısızsa pipeline'ın geri kalanı
-        # etkilenmesin diye hata-toleranslı çağrılır.
+        # veri yoksa veya GEE erişimi başarısız olursa pipeline'ın geri kalanı
+        # etkilenmesin diye hata-toleranslı çağrılır (hiçbir sonraki adım
+        # Step6'nın çıktısına bağımlı değildir).
         try:
             run_step("STEP 6", step6_validate_fire_relation.main)
         except Exception as exc:  # noqa: BLE001
@@ -84,12 +129,36 @@ def main() -> None:
 
         run_step("STEP 7A", step7a_tiling_infrastructure.main)
         run_step("STEP 7B", step7b_prepare_downscaling_dataset.main)
+
+        # --- Offline/yerel devam: downscaling model + füzyon + Step8 ailesi ---
+        run_step("STEP 7C", lambda: step7c_train_downscaling_model.main(force=force))
+        run_step("STEP 7D", lambda: step7d_predict_downscaled_lst.main(force=force))
+        run_step("STEP 7E", lambda: step7e_fuse_landsat_downscaled_lst.main(force=force))
+
+        # Raw MCD64A1 BurnDate export (GEE) -- ZORUNLU, hata-toleranslı DEĞİL.
+        run_step(
+            "RAW MCD64A1 BURNDATE EXPORT",
+            lambda: export_mcd64a1_raw_burndate.main(argv=["--also-binary"]),
+        )
+
+        run_step("STEP 8A", lambda: step8a_prepare_500m_modeling_dataset.main(force=force))
+        run_step("STEP 8B", lambda: step8b_train_baseline_vs_thermal_model.main(force=force))
+        run_step("STEP 8C", lambda: step8c_spatial_block_bootstrap_uncertainty.main(force=force))
+        run_step("STEP 8D", lambda: step8d_thermal_feature_ablation.main(force=force))
+        run_step("STEP 8E", lambda: step8e_final_report.main(force=force))
+
         end_time = datetime.now()
 
         log.info("#" * 80)
-        log.info("ONLINE PIPELINE TAMAMLANDI")
+        log.info("PIPELINE TAMAMLANDI (STEP1 -> STEP8E)")
         log.info(f"Bitiş zamanı: {end_time.isoformat()}")
+        log.info(f"Toplam sure: {end_time - start_time}")
         log.info(f"Log dosyası: {log_file}")
+        log.info(
+            "Nihai rapor: outputs/step8e/step8e_summary.md, "
+            "step8e_summary.json, step8e_results_tables.xlsx, "
+            "step8e_key_findings.csv."
+        )
         log.info("#" * 80)
 
     except Exception as e:
@@ -105,5 +174,18 @@ def main() -> None:
         print("=" * 80 + "\n")
 
 
+def parse_args(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="satellite-thermal-digital-twin: Step1'den Step8E'ye "
+        "kadar tüm pipeline'ı çalıştırır."
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Step7C/7D/7E ve Step8A-8E icin ciktilar zaten varsa uzerine yaz.",
+    )
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(force=args.force)
