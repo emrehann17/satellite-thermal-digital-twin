@@ -815,5 +815,72 @@ def main() -> dict | None:
     return metadata
 
 
+def run_step5c(ctx: dict | None = None) -> dict | None:
+    """
+    Step5C TVDI pipeline'ını çalıştırır.
+
+    ctx: None ise (varsayılan) `main()` BİREBİR (legacy Kozan davranışı)
+        çalışır.
+
+    Verilirse (bkz. core/experiment_context.py:build_experiment_context),
+    bu fonksiyon modülün kendi path/tarih sabitlerini (STEP5_OUTPUT_DIR,
+    NDVI_BASELINE_DIR, NDVI_CURRENT_DIR, OUTPUT_DIR, CURRENT_LST_PATH,
+    BASELINE_LST_MEAN_PATH, CURRENT_PERIOD_END_DATE, CURRENT_PERIOD_DAYS)
+    GEÇİCİ olarak ctx değerleriyle değiştirir, mevcut `main()` mantığını
+    (TAMAMEN AYNI TVDI hesaplama kodu -- NDVI bin edge, wet/dry percentile,
+    reliability-filtered z-score -- iki farklı/divergent implementasyon
+    YOKTUR) çalıştırır, ve `finally` bloğunda ORİJİNAL (Kozan) değerlere
+    GERİ YÜKLER. 800+ satırlık TVDI mantığını yeniden yazmadan deney-farkında
+    hale getirmenin güvenli ve tersine-çevrilebilir yoludur; Kozan'ın
+    legacy davranışı bu fonksiyon çağrılmadığında (veya ctx=None ile
+    çağrıldığında) HİÇ ETKİLENMEZ.
+    """
+    if ctx is None:
+        return main()
+
+    global STEP5_OUTPUT_DIR, NDVI_BASELINE_DIR, NDVI_CURRENT_DIR, OUTPUT_DIR
+    global CURRENT_LST_PATH, BASELINE_LST_MEAN_PATH
+    global CURRENT_PERIOD_END_DATE, CURRENT_PERIOD_DAYS
+
+    saved = {
+        "STEP5_OUTPUT_DIR": STEP5_OUTPUT_DIR,
+        "NDVI_BASELINE_DIR": NDVI_BASELINE_DIR,
+        "NDVI_CURRENT_DIR": NDVI_CURRENT_DIR,
+        "OUTPUT_DIR": OUTPUT_DIR,
+        "CURRENT_LST_PATH": CURRENT_LST_PATH,
+        "BASELINE_LST_MEAN_PATH": BASELINE_LST_MEAN_PATH,
+        "CURRENT_PERIOD_END_DATE": CURRENT_PERIOD_END_DATE,
+        "CURRENT_PERIOD_DAYS": CURRENT_PERIOD_DAYS,
+    }
+    try:
+        STEP5_OUTPUT_DIR = ctx["step5_output_dir"]
+        NDVI_BASELINE_DIR = ctx["ndvi_baseline_dir"]
+        NDVI_CURRENT_DIR = ctx["ndvi_current_dir"]
+        OUTPUT_DIR = ctx["step5c_output_dir"]
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        CURRENT_LST_PATH = STEP5_OUTPUT_DIR / "current_period_median_celsius.tif"
+        BASELINE_LST_MEAN_PATH = STEP5_OUTPUT_DIR / "baseline_lst_mean_celsius.tif"
+        CURRENT_PERIOD_END_DATE = ctx["current_period_end_date"]
+        CURRENT_PERIOD_DAYS = ctx["current_period_days"]
+
+        log.info(
+            "[experiment=%s] Step5C ctx override aktif. OUTPUT_DIR=%s, "
+            "CURRENT_LST_PATH=%s", ctx["experiment_id"], OUTPUT_DIR, CURRENT_LST_PATH,
+        )
+        result = main()
+        if result is not None:
+            result["experiment_id"] = ctx["experiment_id"]
+        return result
+    finally:
+        STEP5_OUTPUT_DIR = saved["STEP5_OUTPUT_DIR"]
+        NDVI_BASELINE_DIR = saved["NDVI_BASELINE_DIR"]
+        NDVI_CURRENT_DIR = saved["NDVI_CURRENT_DIR"]
+        OUTPUT_DIR = saved["OUTPUT_DIR"]
+        CURRENT_LST_PATH = saved["CURRENT_LST_PATH"]
+        BASELINE_LST_MEAN_PATH = saved["BASELINE_LST_MEAN_PATH"]
+        CURRENT_PERIOD_END_DATE = saved["CURRENT_PERIOD_END_DATE"]
+        CURRENT_PERIOD_DAYS = saved["CURRENT_PERIOD_DAYS"]
+
+
 if __name__ == "__main__":
     main()

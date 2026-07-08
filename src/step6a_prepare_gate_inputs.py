@@ -68,7 +68,7 @@ WORLDCOVER_COLLECTION = "ESA/WorldCover/v200"
 WORLDCOVER_BAND = "Map"
 # WorldCover kaynak cozunurlugu ~10 m'dir; kaynak export'u da bu olcekte
 # yapilir, referans gride hizalama nearest-neighbor ile ayrica yapilir.
-WORLDCOVER_EXPORT_SCALE_M = 30
+WORLDCOVER_EXPORT_SCALE_M = 10
 
 
 class Step6AError(SystemExit):

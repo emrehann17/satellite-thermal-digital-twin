@@ -17,6 +17,7 @@ _PROJECT_ROOT = _Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_PROJECT_ROOT))
 
+import argparse
 import json
 import math
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from core.config import (
     STEP5_MIN_BASELINE_VALID_COUNT,
     STEP5_MIN_CURRENT_VALID_COUNT,
 )
+from core.experiment_context import build_experiment_context, log_context_summary
 from core.io_utils import setup_logger
 from core.paths import PROJECT_ROOT
 
@@ -47,6 +49,21 @@ DIAGNOSTIC_DIR = BASE_DIR / "outputs" / "step5b_diagnostics"
 DIAGNOSTIC_DIR.mkdir(parents=True, exist_ok=True)
 
 log, log_file = setup_logger("step5b")
+
+# Legacy Kozan paylaşılan dizinleri: Kozan-dışı deneyler bunlara ASLA
+# yazamaz/okuyamaz (bkz. _assert_paths_are_safely_namespaced).
+_LEGACY_SHARED_DIRS = [
+    (BASE_DIR / "outputs" / "step5").resolve(),
+    (BASE_DIR / "outputs" / "step5c").resolve(),
+    (BASE_DIR / "outputs" / "step5b_diagnostics").resolve(),
+    (BASE_DIR / "outputs" / "diagnostics").resolve(),
+    (BASE_DIR / "outputs" / "step5b").resolve(),
+]
+
+
+class Step5BError(SystemExit):
+    """Fail-fast error for Step5B (diğer step'lerle aynı konvansiyon)."""
+
 
 MAX_EDGE_MASK_DENSITY_PERCENT = 20.0
 EVIDENCE_STRONG_THRESHOLD = 30.0
@@ -714,11 +731,11 @@ def seam_source_interpretation(
         if not items:
             items.append("No strong same-grid edge evidence by current thresholds.")
 
-    return {
-        "seam_candidate_pixel_count": int(np.sum(seam_candidates)),
-        "seam_evidence_scores": evidence_scores,
-        "classification": evidence,
-        "interpretation": [
+    modis_context_layer = comparable_layer(layers, "modis_context")
+    modis_context_available = modis_context_layer is not None
+
+    if modis_context_available:
+        interpretation_text = (
             "After removing temporal interpolation, Landsat baseline statistics "
             "are computed only from observed QA-clean pixels. Baseline valid-count "
             "does not support the seam as a primary source. Baseline std shows "
@@ -727,7 +744,26 @@ def seam_source_interpretation(
             "remains mixed-source and should be further checked for MODIS z-score "
             "construction, resampling/grid alignment, denominator effects, and "
             "tiling safety before being masked as artefact."
-        ],
+        )
+    else:
+        # MODIS context rasterları bu koşuda mevcut değil (örn. Manavgat:
+        # ENABLE_MODIS_STEP5_CONTEXT / ctx["enable_modis_context"]=False).
+        # MODIS'e dair "strong/weak evidence" gibi ifadeler MODIS verisi
+        # HİÇ yokken YANLIŞ ve YANILTICI olur -- bu yüzden MODIS'ten hiç
+        # bahsetmeyen, yalnızca gerçekten mevcut olan Landsat kanıtına
+        # dayanan bir cümle kullanılır.
+        interpretation_text = (
+            "MODIS context is unavailable for this run, so seam-source "
+            "attribution is based only on Landsat current coverage, baseline "
+            "valid-count, and baseline std diagnostics."
+        )
+
+    return {
+        "seam_candidate_pixel_count": int(np.sum(seam_candidates)),
+        "seam_evidence_scores": evidence_scores,
+        "classification": evidence,
+        "modis_context_available": modis_context_available,
+        "interpretation": [interpretation_text],
     }
 
 
@@ -1497,26 +1533,315 @@ def write_summary_markdown(report: dict[str, Any]) -> Path:
     return summary_path
 
 
-def main() -> None:
-    """CLI entry point."""
-    log.info("=" * 60)
-    log.info("STEP 5B DIAGNOSTIC REPORT BAŞLIYOR")
-    log.info("=" * 60)
+STEP5_REQUIRED_FILES = [
+    "current_period_median_celsius.tif",
+    "baseline_lst_mean_celsius.tif",
+    "baseline_lst_std_celsius.tif",
+    "anomaly_zscore.tif",
+    "baseline_valid_count.tif",
+    "current_period_valid_count.tif",
+    "step5_metadata.json",
+]
+STEP5C_REQUIRED_FILES = [
+    "current_tvdi.tif",
+    "tvdi_difference.tif",
+    "tvdi_anomaly_zscore.tif",
+    "baseline_tvdi_mean.tif",
+    "baseline_tvdi_std.tif",
+    "step5c_metadata.json",
+]
 
-    report = build_report()
-    stats_path = DIAGNOSTIC_DIR / "diagnostic_stats.json"
-    stats_path.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False),
-        encoding="utf-8",
+# Bu esikten yuksek low_tvdi_std_masked_ratio, tvdi_anomaly_zscore'un
+# pikselerin buyuk cogunlugunda maskelendigi (dusuk baseline std nedeniyle)
+# anlamina gelir -- yorumlarken agir maskeleme acikca belirtilmelidir.
+TVDI_ZSCORE_HEAVY_MASKING_THRESHOLD = 0.8
+
+
+def resolve_step5b_paths(ctx: dict | None = None) -> dict:
+    """
+    Step5B'nin okuyacagi (Step5/Step5C) ve yazacagi (kendi diagnostic)
+    dizinlerini cozer.
+
+    ctx None ise VEYA ctx Kozan'a aitse (ctx["is_kozan"]=True): legacy
+    Kozan yollari BIREBIR korunur -- STEP5_OUTPUT_DIR/STEP5C_OUTPUT_DIR/
+    DIAGNOSTIC_DIR (outputs/step5, outputs/step5c, outputs/step5b_diagnostics).
+    Bilerek core/experiment_context.py'nin Kozan icin hesapladigi
+    ctx["step5b_output_dir"] (outputs/step5b) KULLANILMAZ -- bu, gercek
+    legacy diagnostic dizininden (outputs/step5b_diagnostics) FARKLI bir
+    isimdir ve kullanilirsa Kozan'in mevcut ciktilarini SESSIZCE farkli bir
+    konuma tasirdi. Bu yuzden Kozan icin path cozumu HER ZAMAN script'in
+    kendi sabitlerinden gelir.
+
+    Kozan-disi bir ctx verilirse (or. manavgat_2021): TAMAMEN namespaced
+    (outputs/experiments/<experiment_id>/step5, step5c, step5b) kullanilir.
+    """
+    if ctx is None or ctx.get("is_kozan"):
+        return {
+            "step5_dir": STEP5_OUTPUT_DIR,
+            "step5c_dir": STEP5C_OUTPUT_DIR,
+            "output_dir": DIAGNOSTIC_DIR,
+            "experiment_id": ctx["experiment_id"] if ctx else None,
+        }
+    return {
+        "step5_dir": ctx["step5_output_dir"],
+        "step5c_dir": ctx["step5c_output_dir"],
+        "output_dir": ctx["step5b_output_dir"],
+        "experiment_id": ctx["experiment_id"],
+    }
+
+
+def _assert_paths_are_safely_namespaced(ctx: dict, paths: dict) -> None:
+    """
+    GÜVENLİK KONTROLÜ (Kozan-dışı deneyler için ZORUNLU):
+        1) Hiçbir okuma/yazma yolu legacy paylaşılan dizinlerin altına
+           DÜŞMEMELİDİR (outputs/step5, outputs/step5c,
+           outputs/step5b_diagnostics, outputs/diagnostics, outputs/step5b).
+        2) Tüm yollar outputs/experiments/<experiment_id>/ altında OLMALIDIR.
+    İhlal varsa Step5BError fırlatır; hiçbir okuma/yazma yapılmaz.
+    """
+    experiment_id = ctx["experiment_id"]
+    experiments_root = (BASE_DIR / "outputs" / "experiments" / experiment_id).resolve()
+
+    for key in ("step5_dir", "step5c_dir", "output_dir"):
+        resolved = Path(paths[key]).resolve()
+        for legacy_dir in _LEGACY_SHARED_DIRS:
+            if resolved == legacy_dir or legacy_dir in resolved.parents:
+                raise Step5BError(
+                    f"GÜVENLİK İHLALİ: '{experiment_id}' deneyi için '{key}' yolu "
+                    f"({resolved}) Kozan'ın legacy paylaşılan dizinine ({legacy_dir}) "
+                    "düşüyor. Bu deney bu dizine ASLA yazamaz/okuyamaz. İşlem DURDURULDU."
+                )
+        if resolved != experiments_root and experiments_root not in resolved.parents:
+            raise Step5BError(
+                f"GÜVENLİK İHLALİ: '{experiment_id}' deneyi için '{key}' yolu "
+                f"({resolved}) outputs/experiments/{experiment_id}/ dışında. "
+                "İşlem DURDURULDU."
+            )
+
+
+def _dry_run_file_check(paths: dict) -> dict:
+    """Rastarları OKUMADAN, yalnızca dosya varlığını kontrol edip loglar."""
+    status = {"step5": {}, "step5c": {}}
+    log.info("Step5 girdi dizini: %s", paths["step5_dir"])
+    for name in STEP5_REQUIRED_FILES:
+        p = Path(paths["step5_dir"]) / name
+        exists = p.exists()
+        status["step5"][name] = exists
+        log.info("  %s %s", "[VAR]" if exists else "[EKSİK]", name)
+
+    log.info("Step5C girdi dizini: %s", paths["step5c_dir"])
+    for name in STEP5C_REQUIRED_FILES:
+        p = Path(paths["step5c_dir"]) / name
+        exists = p.exists()
+        status["step5c"][name] = exists
+        log.info("  %s %s", "[VAR]" if exists else "[EKSİK]", name)
+
+    log.info("Step5B çıktı dizini (planlanan): %s", paths["output_dir"])
+    return status
+
+
+def _append_experiment_section_to_markdown(
+    summary_path: Path, ctx: dict, warnings_list: list[str],
+) -> None:
+    """
+    summary.md dosyasına deney bağlamı (experiment_id/region/role/pencereler/
+    baseline yılları) ve varsa uyarıları ekler. write_summary_markdown()'ın
+    kendi içeriğine DOKUNMAZ -- yalnızca sona ekleme yapar.
+    """
+    lines = ["", "## Experiment Context", ""]
+    lines.append(f"- experiment_id: `{ctx['experiment_id']}`")
+    lines.append(f"- region_key: `{ctx['region_key']}`")
+    lines.append(f"- role: `{ctx['role']}`")
+    lines.append(f"- predictor window: {ctx['predictor_start_date']} -> {ctx['predictor_end_date']}")
+    lines.append(f"- label window: {ctx['label_start_date']} -> {ctx['label_end_date']}")
+    lines.append(f"- baseline years: {ctx['baseline_years']}")
+    lines.append("")
+    lines.append(
+        "Step5B, Step5/Step5C'nin ürettiği diagnostic raster ürünlerini "
+        "(thermal anomaly, dryness indicator/TVDI) okuyup özetler; **hiçbir "
+        "raster değerini değiştirmez** ve bu ürünler 'fire risk' değildir."
     )
-    summary_path = write_summary_markdown(report)
+    if warnings_list:
+        lines.append("")
+        lines.append("### Warnings")
+        lines.append("")
+        for w in warnings_list:
+            lines.append(f"- {w}")
+    lines.append("")
 
-    log.info("Diagnostic JSON yazıldı: %s", stats_path)
-    log.info("Summary markdown yazıldı: %s", summary_path)
-    log.info("PNG çıktıları: %s", ", ".join(report["png_outputs"]))
-    log.info("=" * 60)
-    log.info("STEP 5B DIAGNOSTIC REPORT TAMAMLANDI")
+    with open(summary_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+def run_step5b(ctx: dict | None = None, force: bool = False, output_dir_override: Path | None = None) -> dict:
+    """
+    Step5B diagnostic raporunu üretir.
+
+    ctx: None ise (varsayılan) legacy Kozan davranışı BİREBİR korunur --
+        outputs/step5, outputs/step5c okunur, outputs/step5b_diagnostics'e
+        yazılır. Verilirse (bkz. core/experiment_context.py) ve Kozan-dışıysa,
+        tamamen namespaced (outputs/experiments/<experiment_id>/step5,
+        step5c, step5b) çalışır.
+
+    force: Mevcut script'te (legacy) zaten her zaman üzerine yazma davranışı
+        vardı (fail-fast/skip kontrolü yoktu); bu davranış BİREBİR korunur --
+        `--force` bayrağı kabul edilir ama Kozan/legacy davranışını
+        DEĞİŞTİRMEZ (yalnızca CLI tutarlılığı için sunulur, bkz. Bölüm 7).
+
+    output_dir_override: Verilirse (--output-dir), hesaplanan output_dir'in
+        YERİNE kullanılır (Kozan-dışı deneylerde yine namespace güvenlik
+        kontrolünden geçer).
+    """
+    global STEP5_OUTPUT_DIR, STEP5C_OUTPUT_DIR, DIAGNOSTIC_DIR
+
+    paths = resolve_step5b_paths(ctx)
+    if output_dir_override is not None:
+        paths = {**paths, "output_dir": Path(output_dir_override)}
+    use_ctx_paths = ctx is not None and not ctx.get("is_kozan")
+
+    if use_ctx_paths:
+        _assert_paths_are_safely_namespaced(ctx, paths)
+
+    saved = (STEP5_OUTPUT_DIR, STEP5C_OUTPUT_DIR, DIAGNOSTIC_DIR)
+    apply_path_override = use_ctx_paths or output_dir_override is not None
+    try:
+        if apply_path_override:
+            STEP5_OUTPUT_DIR = Path(paths["step5_dir"])
+            STEP5C_OUTPUT_DIR = Path(paths["step5c_dir"])
+            DIAGNOSTIC_DIR = Path(paths["output_dir"])
+            DIAGNOSTIC_DIR.mkdir(parents=True, exist_ok=True)
+            log.info(
+                "[experiment=%s] Step5B path override aktif. step5_dir=%s, "
+                "step5c_dir=%s, output_dir=%s",
+                ctx["experiment_id"] if ctx else None, STEP5_OUTPUT_DIR, STEP5C_OUTPUT_DIR, DIAGNOSTIC_DIR,
+            )
+
+        log.info("=" * 60)
+        log.info(
+            "STEP 5B DIAGNOSTIC REPORT BAŞLIYOR%s",
+            f" [experiment={ctx['experiment_id']}]" if ctx else "",
+        )
+        log.info("=" * 60)
+
+        report = build_report()
+
+        warnings_list: list[str] = []
+        low_std_ratio = (
+            report.get("tvdi_stats", {})
+            .get("low_std_masking", {})
+            .get("low_tvdi_std_masked_ratio")
+        )
+        if low_std_ratio is not None and low_std_ratio > TVDI_ZSCORE_HEAVY_MASKING_THRESHOLD:
+            warnings_list.append(
+                f"tvdi_anomaly_zscore ağır maskeli: low_tvdi_std_masked_ratio="
+                f"{low_std_ratio:.4f} > {TVDI_ZSCORE_HEAVY_MASKING_THRESHOLD} "
+                "(düşük baseline TVDI std nedeniyle piksellerin büyük "
+                "çoğunluğu maskelendi; bu katman yorumlanırken bu sınırlama "
+                "açıkça belirtilmelidir)."
+            )
+
+        if ctx is not None:
+            report["experiment_id"] = ctx["experiment_id"]
+            report["region_key"] = ctx["region_key"]
+            report["role"] = ctx["role"]
+            report["predictor_window"] = [ctx["predictor_start_date"], ctx["predictor_end_date"]]
+            report["label_window"] = [ctx["label_start_date"], ctx["label_end_date"]]
+            report["baseline_years"] = ctx["baseline_years"]
+        report["warnings"] = warnings_list
+
+        stats_path = DIAGNOSTIC_DIR / "diagnostic_stats.json"
+        stats_path.write_text(
+            json.dumps(report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        summary_path = write_summary_markdown(report)
+        if ctx is not None:
+            _append_experiment_section_to_markdown(summary_path, ctx, warnings_list)
+
+        log.info("Diagnostic JSON yazıldı: %s", stats_path)
+        log.info("Summary markdown yazıldı: %s", summary_path)
+        log.info("PNG çıktıları: %s", ", ".join(report["png_outputs"]))
+        for w in warnings_list:
+            log.warning("UYARI: %s", w)
+        log.info("=" * 60)
+        log.info("STEP 5B DIAGNOSTIC REPORT TAMAMLANDI")
+
+        return {
+            "stats_path": stats_path,
+            "summary_path": summary_path,
+            "output_dir": DIAGNOSTIC_DIR,
+            "warnings": warnings_list,
+        }
+    finally:
+        STEP5_OUTPUT_DIR, STEP5C_OUTPUT_DIR, DIAGNOSTIC_DIR = saved
+
+
+def main() -> None:
+    """CLI entry point (argümansız/legacy çağrı: Kozan, BİREBİR eski davranış)."""
+    run_step5b(ctx=None, force=False)
+
+
+def parse_args(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Step5B: Step5/Step5C diagnostic raster ürünleri için "
+        "tanı raporu üretir. Hiçbir raster değerini değiştirmez, model "
+        "eğitmez. kozan_2023 (veya --experiment verilmezse) legacy "
+        "davranışı birebir korur; diğer deneyler (örn. manavgat_2021) "
+        "tamamen namespaced çalışır."
+    )
+    parser.add_argument("--experiment", type=str, default=None)
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Hiçbir raster okuma/yazma yapma; deney özetini + gerekli/opsiyonel "
+        "dosyaların var/yok durumunu bas.",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Kabul edilir (CLI tutarlılığı); mevcut script zaten her zaman "
+        "üzerine yazar, bu davranış değişmez.",
+    )
+    parser.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Çıktı dizinini elle geçersiz kıl (opsiyonel).",
+    )
+    return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+
+    if args.experiment is None:
+        # Argümansız/legacy çağrı (or. sadece --force): ctx yok, birebir eski davranış.
+        if args.dry_run:
+            paths = resolve_step5b_paths(None)
+            if args.output_dir:
+                paths = {**paths, "output_dir": Path(args.output_dir)}
+            log.info("[dry-run] Legacy Kozan yolları:")
+            _dry_run_file_check(paths)
+            log.info("[dry-run] Hiçbir okuma/yazma ÇALIŞTIRILMADI.")
+        else:
+            run_step5b(
+                ctx=None, force=args.force,
+                output_dir_override=Path(args.output_dir) if args.output_dir else None,
+            )
+    else:
+        _ctx = build_experiment_context(args.experiment)
+        log_context_summary(_ctx, log)
+        _paths = resolve_step5b_paths(_ctx)
+        if args.output_dir:
+            _paths = {**_paths, "output_dir": Path(args.output_dir)}
+            if not _ctx.get("is_kozan"):
+                _assert_paths_are_safely_namespaced(_ctx, _paths)
+
+        if args.dry_run:
+            log.info("[dry-run] Planlanan yollar:")
+            log.info("  step5_dir: %s", _paths["step5_dir"])
+            log.info("  step5c_dir: %s", _paths["step5c_dir"])
+            log.info("  output_dir: %s", _paths["output_dir"])
+            _dry_run_file_check(_paths)
+            log.info("[dry-run] Hiçbir okuma/yazma ÇALIŞTIRILMADI.")
+        else:
+            run_step5b(
+                ctx=_ctx, force=args.force,
+                output_dir_override=Path(args.output_dir) if args.output_dir else None,
+            )

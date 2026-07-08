@@ -133,14 +133,25 @@ def build_cloud_mask_from_qa(qa_array: np.ndarray) -> np.ndarray:
     )
 
 
-def list_baseline_tifs() -> list[Path]:
+def list_baseline_tifs(ctx: dict | None = None) -> list[Path]:
     """
     Baseline zaman serisini oluşturan GeoTIFF dosyalarını listeler.
 
     QA dosyaları aynı klasöre yanlışlıkla konmuşsa `_qa` ile bitenleri
     baseline görüntüsü olarak kullanmaz.
+
+    ctx: None ise (varsayılan) legacy Kozan davranışı BİREBİR korunur
+        (module-level BASELINE_INPUT_DIR/STEP4_METADATA_PATH kullanılır).
+        Verilirse ctx["baseline_input_dir"] ve ctx.get("step4_metadata_path")
+        kullanılır (deney-farkında/experiment-aware çağrılar için,
+        bkz. core/experiment_context.py).
     """
-    metadata_files = list_baseline_tifs_from_step4_metadata()
+    baseline_dir = ctx["baseline_input_dir"] if ctx else BASELINE_INPUT_DIR
+    baseline_start = ctx["baseline_start_date"] if ctx else BASELINE_START_DATE
+    baseline_end = ctx["baseline_end_date"] if ctx else BASELINE_END_DATE
+    file_prefix = ctx["landsat_file_prefix"] if ctx else LANDSAT_EXPORT["file_name_prefix"]
+
+    metadata_files = list_baseline_tifs_from_step4_metadata(ctx)
     if metadata_files:
         return metadata_files
 
@@ -152,35 +163,42 @@ def list_baseline_tifs() -> list[Path]:
 
     tif_files = sorted(
         path
-        for path in BASELINE_INPUT_DIR.glob("*.tif")
+        for path in baseline_dir.glob("*.tif")
         if not is_qa_tif_name(path.name)
-        and path.name.lower().startswith(LANDSAT_EXPORT["file_name_prefix"].lower())
-        and BASELINE_START_DATE <= str(extract_date_from_filename(path)) <= BASELINE_END_DATE
+        and path.name.lower().startswith(file_prefix.lower())
+        and baseline_start <= str(extract_date_from_filename(path)) <= baseline_end
     )
 
     if not tif_files:
         raise FileNotFoundError(
-            f"Baseline GeoTIFF dosyası bulunamadı: {BASELINE_INPUT_DIR}\n"
+            f"Baseline GeoTIFF dosyası bulunamadı: {baseline_dir}\n"
             "Step4 baseline zaman serisi export dosyalarını bu klasöre koymalısın."
         )
 
     return tif_files
 
 
-def list_baseline_tifs_from_step4_metadata() -> list[Path]:
+def list_baseline_tifs_from_step4_metadata(ctx: dict | None = None) -> list[Path]:
     """
     Step4 metadata varsa yalnız son export edilen baseline LST dosyalarını seçer.
 
     Böylece data/landsat_timeseries içinde önceki denemelerden kalan dosyalar
     yeni Step5 baseline yığınına sessizce karışmaz.
+
+    ctx verilirse ve ctx.get("step4_metadata_path") None ise (Manavgat gibi
+    Step4 metadata'sı henüz olmayan deneyler için), bu fonksiyon boş liste
+    döner -- list_baseline_tifs() bu durumda dizin taramasına düşer.
     """
-    if not STEP4_METADATA_PATH.exists():
+    baseline_dir = ctx["baseline_input_dir"] if ctx else BASELINE_INPUT_DIR
+    metadata_path = ctx.get("step4_metadata_path", STEP4_METADATA_PATH) if ctx else STEP4_METADATA_PATH
+
+    if metadata_path is None or not Path(metadata_path).exists():
         return []
 
     try:
-        metadata = json.loads(STEP4_METADATA_PATH.read_text(encoding="utf-8"))
+        metadata = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        log.warning("Step4 metadata JSON okunamadı: %s", STEP4_METADATA_PATH)
+        log.warning("Step4 metadata JSON okunamadı: %s", metadata_path)
         return []
 
     exports = (
@@ -195,7 +213,7 @@ def list_baseline_tifs_from_step4_metadata() -> list[Path]:
         if not lst_prefix:
             continue
 
-        matches = sorted(BASELINE_INPUT_DIR.glob(f"{lst_prefix}*.tif"))
+        matches = sorted(baseline_dir.glob(f"{lst_prefix}*.tif"))
         matches = [path for path in matches if not is_qa_tif_name(path.name)]
 
         if not matches:
@@ -207,22 +225,27 @@ def list_baseline_tifs_from_step4_metadata() -> list[Path]:
     return sorted(set(selected_files))
 
 
-def list_current_period_tifs() -> list[Path]:
+def list_current_period_tifs(ctx: dict | None = None) -> list[Path]:
     """
     Current period median GeoTIFF dosyalarını listeler.
 
     Birden fazla dosya varsa deterministik olması için sıralı listedeki ilk
     dosya kullanılır ve log'a uyarı yazılır.
+
+    ctx: None ise (varsayılan) legacy Kozan davranışı korunur.
     """
-    current_files = sorted(CURRENT_PERIOD_DIR.glob("*.tif"))
+    current_dir = ctx["current_period_dir"] if ctx else CURRENT_PERIOD_DIR
+    current_period_days = ctx["current_period_days"] if ctx else CURRENT_PERIOD_DAYS
+
+    current_files = sorted(current_dir.glob("*.tif"))
 
     if not current_files:
         raise FileNotFoundError(
-            f"Current period median dosyası bulunamadı: {CURRENT_PERIOD_DIR}\n"
+            f"Current period median dosyası bulunamadı: {current_dir}\n"
             "Step4 landsat_current_period_XXdays.tif export dosyasını buraya koymalısın."
         )
 
-    expected_prefix = f"landsat_current_period_{CURRENT_PERIOD_DAYS}days"
+    expected_prefix = f"landsat_current_period_{current_period_days}days"
     matching_files = [
         path
         for path in current_files
@@ -235,7 +258,7 @@ def list_current_period_tifs() -> list[Path]:
         log.warning(
             "CURRENT_PERIOD_DAYS=%s ile eşleşen current raster bulunamadı; "
             "klasördeki ilk dosya kullanılacak.",
-            CURRENT_PERIOD_DAYS,
+            current_period_days,
         )
 
     if len(current_files) > 1:
@@ -247,27 +270,35 @@ def list_current_period_tifs() -> list[Path]:
     return current_files
 
 
-def list_modis_context_tifs() -> list[Path]:
+def list_modis_context_tifs(ctx: dict | None = None) -> list[Path]:
     """
     Step4b'nin data/modis klasörüne yerleştirdiği MODIS mean/std GeoTIFF'lerini listeler.
 
     MODIS dosyası Step5 için zorunlu değildir; bulunursa düşük çözünürlüklü bağlam
     z-score ürünü ve Landsat gridine yeniden örneklenmiş mean/std katmanları yazılır.
+
+    ctx: None ise (varsayılan) legacy Kozan davranışı korunur. Verilip
+        ctx["enable_modis_context"]=False ise (örn. Manavgat gate-only/
+        predictor-only akışında MODIS context henüz hazırlanmadığı için)
+        her zaman boş liste döner.
     """
-    if not ENABLE_MODIS_STEP5_CONTEXT:
+    modis_dir = ctx["modis_input_dir"] if ctx else MODIS_INPUT_DIR
+    enabled = ctx["enable_modis_context"] if ctx else ENABLE_MODIS_STEP5_CONTEXT
+
+    if not enabled:
         return []
 
     expected_prefix = MODIS_EXPORT["file_name_prefix"].lower()
     modis_files = sorted(
         path
-        for path in MODIS_INPUT_DIR.glob("*.tif")
+        for path in modis_dir.glob("*.tif")
         if path.name.lower().startswith(expected_prefix)
     )
 
     if not modis_files:
         log.warning(
             "MODIS Step5 bağlamı açık ama MODIS GeoTIFF bulunamadı: %s",
-            MODIS_INPUT_DIR,
+            modis_dir,
         )
         return []
 
@@ -292,7 +323,7 @@ def is_qa_tif_name(filename: str) -> bool:
     return bool(re.search(r"_qa($|[-_])", stem))
 
 
-def find_qa_path_for_landsat_tif(tif_path: Path) -> Path | None:
+def find_qa_path_for_landsat_tif(tif_path: Path, ctx: dict | None = None) -> Path | None:
     """
     LST GeoTIFF için eşleşen QA dosyasını bulur.
 
@@ -302,8 +333,12 @@ def find_qa_path_for_landsat_tif(tif_path: Path) -> Path | None:
     Parçalı GEE export:
         landsat_lst_..._2020-06-01-0000000000-0000000000.tif
         landsat_lst_..._2020-06-01_qa-0000000000-0000000000.tif
+
+    ctx: None ise (varsayılan) legacy Kozan QA_DIR kullanılır.
     """
-    exact_path = QA_DIR / f"{tif_path.stem}_qa{tif_path.suffix}"
+    qa_dir = ctx["qa_dir"] if ctx else QA_DIR
+
+    exact_path = qa_dir / f"{tif_path.stem}_qa{tif_path.suffix}"
     if exact_path.exists():
         return exact_path
 
@@ -316,8 +351,8 @@ def find_qa_path_for_landsat_tif(tif_path: Path) -> Path | None:
 
     candidates = []
     if suffix_after_date:
-        candidates.append(QA_DIR / f"{base_stem}_qa{suffix_after_date}{tif_path.suffix}")
-    candidates.extend(sorted(QA_DIR.glob(f"{base_stem}_qa*.tif")))
+        candidates.append(qa_dir / f"{base_stem}_qa{suffix_after_date}{tif_path.suffix}")
+    candidates.extend(sorted(qa_dir.glob(f"{base_stem}_qa*.tif")))
 
     for candidate in candidates:
         if candidate.exists():
@@ -587,6 +622,7 @@ def process_step5_windowed(
     tif_files: list[Path],
     current_path: Path,
     modis_path: Path | None = None,
+    ctx: dict | None = None,
 ) -> dict:
     """
     Step5 işlemini bellek dostu pencere tabanlı akışla çalıştırır.
@@ -600,7 +636,15 @@ def process_step5_windowed(
         6. Sonuçları aynı anda çıktı GeoTIFF dosyalarına yazar.
 
     Böylece full raster zaman serisi belleğe alınmaz.
+
+    ctx: None ise (varsayılan) çıktılar legacy OUTPUT_DIR'e (outputs/step5)
+        yazılır ve QA dosyaları legacy QA_DIR'de aranır. Verilirse
+        ctx["output_dir"] ve QA arama ctx üzerinden yapılır (deney-farkında
+        çağrılar için, bkz. core/experiment_context.py).
     """
+    output_dir = ctx["output_dir"] if ctx else OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     times = [extract_date_from_filename(path) for path in tif_files]
     sort_order = np.argsort(times)
     tif_files = [tif_files[index] for index in sort_order]
@@ -614,7 +658,7 @@ def process_step5_windowed(
 
     validate_same_grid(profile, current_path)
     for tif_path in tif_files:
-        qa_path = find_qa_path_for_landsat_tif(tif_path)
+        qa_path = find_qa_path_for_landsat_tif(tif_path, ctx)
         if qa_path is not None:
             validate_same_grid(profile, qa_path)
 
@@ -645,26 +689,26 @@ def process_step5_windowed(
     valid_modis_context_pixels = 0
 
     output_paths = {
-        "baseline_mean": OUTPUT_DIR / "baseline_lst_mean_celsius.tif",
-        "baseline_std": OUTPUT_DIR / "baseline_lst_std_celsius.tif",
-        "baseline_valid_count": OUTPUT_DIR / "baseline_valid_count.tif",
-        "low_baseline_count_mask": OUTPUT_DIR / "low_baseline_count_mask.tif",
-        "low_baseline_std_mask": OUTPUT_DIR / "low_baseline_std_mask.tif",
-        "current_median": OUTPUT_DIR / "current_period_median_celsius.tif",
-        "current_valid_count": OUTPUT_DIR / "current_period_valid_count.tif",
-        "low_current_count_mask": OUTPUT_DIR / "low_current_count_mask.tif",
-        "anomaly_zscore": OUTPUT_DIR / "anomaly_zscore.tif",
+        "baseline_mean": output_dir / "baseline_lst_mean_celsius.tif",
+        "baseline_std": output_dir / "baseline_lst_std_celsius.tif",
+        "baseline_valid_count": output_dir / "baseline_valid_count.tif",
+        "low_baseline_count_mask": output_dir / "low_baseline_count_mask.tif",
+        "low_baseline_std_mask": output_dir / "low_baseline_std_mask.tif",
+        "current_median": output_dir / "current_period_median_celsius.tif",
+        "current_valid_count": output_dir / "current_period_valid_count.tif",
+        "low_current_count_mask": output_dir / "low_current_count_mask.tif",
+        "anomaly_zscore": output_dir / "anomaly_zscore.tif",
     }
     if modis_path is not None:
         output_paths.update(
             {
-                "modis_mean_resampled": OUTPUT_DIR / "modis_lst_mean_celsius_resampled.tif",
-                "modis_std_resampled": OUTPUT_DIR / "modis_lst_std_celsius_resampled.tif",
-                "modis_context_zscore": OUTPUT_DIR / "modis_context_zscore.tif",
+                "modis_mean_resampled": output_dir / "modis_lst_mean_celsius_resampled.tif",
+                "modis_std_resampled": output_dir / "modis_lst_std_celsius_resampled.tif",
+                "modis_context_zscore": output_dir / "modis_context_zscore.tif",
             }
         )
 
-    qa_paths = [find_qa_path_for_landsat_tif(path) for path in tif_files]
+    qa_paths = [find_qa_path_for_landsat_tif(path, ctx) for path in tif_files]
 
     with ExitStack() as stack_context:
         baseline_datasets = [
@@ -887,19 +931,35 @@ def write_metadata(
     result: dict,
     tif_files: list[Path],
     current_path: Path,
+    ctx: dict | None = None,
 ) -> Path:
     """
     Step5 çıktıları için metadata JSON dosyasını yazar.
 
     Metadata; girdi klasörlerini, pencere ayarlarını, üretilen dosya adlarını,
     özet istatistikleri ve kullanılan anomali yöntemini içerir.
+
+    ctx: None ise (varsayılan) legacy Kozan tarih/dizin sabitleri kullanılır.
+        Verilirse ctx içindeki deney-farkında (experiment-aware) değerler
+        kullanılır (current_period_end_date, current_period_days,
+        baseline_input_dir, qa_dir, current_period_dir, modis_input_dir,
+        enable_modis_context, output_dir).
     """
+    current_period_end_date = ctx["current_period_end_date"] if ctx else CURRENT_PERIOD_END_DATE
+    current_period_days = ctx["current_period_days"] if ctx else CURRENT_PERIOD_DAYS
+    baseline_input_dir = ctx["baseline_input_dir"] if ctx else BASELINE_INPUT_DIR
+    qa_dir = ctx["qa_dir"] if ctx else QA_DIR
+    current_period_dir = ctx["current_period_dir"] if ctx else CURRENT_PERIOD_DIR
+    modis_input_dir = ctx["modis_input_dir"] if ctx else MODIS_INPUT_DIR
+    enable_modis_context = ctx["enable_modis_context"] if ctx else ENABLE_MODIS_STEP5_CONTEXT
+    output_dir = ctx["output_dir"] if ctx else OUTPUT_DIR
+
     times = result["times"]
     tif_files = result["tif_files"]
     output_paths = result["output_paths"]
     baseline_netcdf = None  # NetCDF çıktısı henüz desteklenmiyor
-    current_end_dt = datetime.strptime(CURRENT_PERIOD_END_DATE, "%Y-%m-%d")
-    current_start_dt = current_end_dt - timedelta(days=CURRENT_PERIOD_DAYS)
+    current_end_dt = datetime.strptime(current_period_end_date, "%Y-%m-%d")
+    current_start_dt = current_end_dt - timedelta(days=current_period_days)
     current_year = current_end_dt.year
     baseline_years_used = sorted({int(str(time)[:4]) for time in times})
     current_year_excluded = current_year not in baseline_years_used
@@ -915,15 +975,16 @@ def write_metadata(
         "step": "step5_preprocess_timeseries",
         "method": "windowed_zscore_anomaly",
         "created_at": datetime.now().isoformat(),
+        "experiment_id": ctx["experiment_id"] if ctx else None,
         "current_period_start": current_start_dt.strftime("%Y-%m-%d"),
-        "current_period_end": CURRENT_PERIOD_END_DATE,
+        "current_period_end": current_period_end_date,
         "baseline_years_used": baseline_years_used,
         "current_year_excluded_from_baseline": current_year_excluded,
         "input_dirs": {
-            "baseline_timeseries": str(BASELINE_INPUT_DIR),
-            "qa_masks": str(QA_DIR),
-            "current_period": str(CURRENT_PERIOD_DIR),
-            "modis_context": str(MODIS_INPUT_DIR),
+            "baseline_timeseries": str(baseline_input_dir),
+            "qa_masks": str(qa_dir),
+            "current_period": str(current_period_dir),
+            "modis_context": str(modis_input_dir),
         },
         "log_file": str(log_file),
         "processing": {
@@ -937,7 +998,7 @@ def write_metadata(
             "temporal_interpolation_used": False,
             "baseline_statistics_source": "observed_qa_clean_landsat_pixels_only",
             "insufficient_observations_policy": "mask_as_nan",
-            "modis_context_enabled": ENABLE_MODIS_STEP5_CONTEXT,
+            "modis_context_enabled": enable_modis_context,
             "modis_spatial_resampling": "bilinear_to_landsat_grid_for_context_only",
             "modis_used_as_primary_baseline": False,
             "min_modis_std_celsius": STEP5_MIN_MODIS_STD_CELSIUS,
@@ -962,10 +1023,10 @@ def write_metadata(
         },
         "current_period": {
             "start_date": current_start_dt.strftime("%Y-%m-%d"),
-            "end_date": CURRENT_PERIOD_END_DATE,
+            "end_date": current_period_end_date,
             "current_period_start": current_start_dt.strftime("%Y-%m-%d"),
-            "current_period_end": CURRENT_PERIOD_END_DATE,
-            "window_days": CURRENT_PERIOD_DAYS,
+            "current_period_end": current_period_end_date,
+            "window_days": current_period_days,
             "input_file": current_path.name,
             "valid_count_band": (
                 "Current_Period_Valid_Count if present; otherwise legacy fallback"
@@ -974,7 +1035,7 @@ def write_metadata(
             "mean_celsius": result["current_stats"]["mean"],
         },
         "modis_context": {
-            "enabled": ENABLE_MODIS_STEP5_CONTEXT,
+            "enabled": enable_modis_context,
             "input_file": (
                 None if result["modis_path"] is None else result["modis_path"].name
             ),
@@ -1037,7 +1098,7 @@ def write_metadata(
         "status": "processed",
     }
 
-    metadata_path = OUTPUT_DIR / "step5_metadata.json"
+    metadata_path = output_dir / "step5_metadata.json"
     metadata_path.write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -1045,19 +1106,29 @@ def write_metadata(
     return metadata_path
 
 
-def main() -> None:
-    """Komut satırından çalıştırıldığında Step5 pencere bazlı akışı başlatır."""
+def run_step5(ctx: dict | None = None) -> dict:
+    """
+    Step5 windowed akışını çalıştırır.
+
+    ctx: None ise (varsayılan) legacy Kozan davranışı BİREBİR korunur.
+        Verilirse (bkz. core/experiment_context.py:build_experiment_context)
+        tüm girdi/çıktı dizinleri ve current/baseline tarihleri ctx'ten
+        gelir; Kozan'ın legacy paylaşılan dosyalarına DOKUNULMAZ.
+    """
     log.info("=" * 60)
-    log.info("STEP 5 BAŞLIYOR (windowed/chunked işleme)")
+    log.info(
+        "STEP 5 BAŞLIYOR (windowed/chunked işleme)%s",
+        f" [experiment={ctx['experiment_id']}]" if ctx else "",
+    )
     log.info("=" * 60)
 
-    tif_files = list_baseline_tifs()
-    current_path = list_current_period_tifs()[0]
-    modis_files = list_modis_context_tifs()
+    tif_files = list_baseline_tifs(ctx)
+    current_path = list_current_period_tifs(ctx)[0]
+    modis_files = list_modis_context_tifs(ctx)
     modis_path = modis_files[0] if modis_files else None
 
-    result = process_step5_windowed(tif_files, current_path, modis_path=modis_path)
-    metadata_path = write_metadata(result, tif_files, current_path)
+    result = process_step5_windowed(tif_files, current_path, modis_path=modis_path, ctx=ctx)
+    metadata_path = write_metadata(result, tif_files, current_path, ctx=ctx)
 
     log.info("Baseline ortalaması: %.2f C", result["baseline_mean_stats"]["mean"])
     log.info("Baseline standart sapması: %.2f C", result["baseline_std_stats"]["mean"])
@@ -1076,9 +1147,16 @@ def main() -> None:
         result["anomaly_stats"]["max"],
     )
     log.info("Metadata kaydedildi: %s", metadata_path)
-    log.info("Çıktı klasörü: %s", OUTPUT_DIR)
+    log.info("Çıktı klasörü: %s", ctx["output_dir"] if ctx else OUTPUT_DIR)
     log.info("=" * 60)
     log.info("STEP 5 TAMAMLANDI")
+
+    return {**result, "metadata_path": metadata_path}
+
+
+def main() -> None:
+    """Komut satırından çalıştırıldığında Step5 pencere bazlı akışı (legacy Kozan) başlatır."""
+    run_step5(ctx=None)
 
 
 if __name__ == "__main__":

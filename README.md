@@ -310,6 +310,19 @@ Bu komut **Step7 veya Step8'i ÇALIŞTIRMAZ**. Yalnızca: (1) Step6A ile gate-on
 
 `--skip-export` (varsayılan davranış, `--export-labels` verilmezse) raw BurnDate export'unu atlar ve gate'in mevcut dosyayı kullanmasını sağlar — thresholds üzerinde iterasyon yaparken GEE kotası harcamamak için kullanışlıdır.
 
+### Manavgat experiment-aware predictor üretimi (Step3-Step5/5C)
+
+```bash
+python scripts/run_predictors_only.py --experiment kozan_2023 --dry-run
+python scripts/run_predictors_only.py --experiment manavgat_2021 --dry-run
+python scripts/run_predictors_only.py --experiment manavgat_2021 --export --force \
+  2>&1 | tee logs/manavgat_predictors_export.log
+python scripts/run_predictors_only.py --experiment manavgat_2021 --local-only --force \
+  2>&1 | tee logs/manavgat_predictors_local.log
+```
+
+Bu script **Step7 veya Step8'i ÇALIŞTIRMAZ**, model eğitmez. `kozan_2023` legacy davranışını korur; `manavgat_2021` (ve kozan-dışı her deney) tamamen `outputs/experiments/<experiment_id>/` altında, namespaced çalışır (`core/experiment_context.py:build_experiment_context()`). `--export`, current+baseline Landsat LST/NDVI'yı doğrudan GEE'den yerel diske export eder (Step4/4B'nin Drive zincirini replike etmez) ve ardından Step5/Step5C'yi çalıştırır; `--local-only` bu dosyaların zaten var olduğunu varsayar ve yalnızca Step5/Step5C'yi çalıştırır. Manavgat için `current_period_days`, mevcut `CURRENT_PERIOD_DAYS` konvansiyonuyla (basit tarih farkı) birebir tutarlı şekilde **56** olarak hesaplanır (57 değil — bkz. `docs/experiments.md`).
+
 ### Adım adım (Kozan, legacy)
 
 ```bash
@@ -339,6 +352,7 @@ core/
   paths.py                     # Girdi/çıktı yol tanımları
   io_utils.py                  # Ortak okuma/yazma yardımcıları
   regions.py                   # Step0 deney/bölge (experiment/region) kayıt defteri
+  experiment_context.py        # Step3-Step5/5C için deney-farkında path/tarih context'i
   validation_burned_area.py    # Burned-area doğrulama mantığı
   utils/                       # Diğer paylaşılan yardımcı modüller
 
@@ -360,6 +374,7 @@ scripts/
   export_mcd64a1_raw_burndate.py       # Raw BurnDate DOY export'u için ince CLI sarmalayıcı
   preview_experiment_aoi.py            # Deney metadata + AOI önizleme (export/pipeline çalıştırmaz)
   run_label_gate_only.py               # Gate-only çalıştırıcı (Kozan: legacy; diğerleri: namespaced)
+  run_predictors_only.py               # Step3-Step5/5C predictor çalıştırıcı (Kozan: legacy; diğerleri: namespaced)
   check_experiment_registry.py         # Step0 kayıt defteri doğrulama script'i
 
 docs/
@@ -422,7 +437,7 @@ logs/       # Runtime log dosyaları (kod-seviyesi + shell tee çıktıları); .
 
 ## 16. Sonraki Adımlar
 
-1. **Manavgat Step1-Step5/5C deney-farkında predictor üretimi:** Manavgat AOI'si için MODIS/Landsat/DEM/NDVI verilerini export edip termal anomaly + TVDI ürünlerini üretmek (namespaced, experiment-aware).
+1. **Manavgat Step1-Step5/5C deney-farkında predictor üretimi:** `scripts/run_predictors_only.py` ile Manavgat AOI'si için Landsat LST/NDVI current+baseline export edip termal anomaly + TVDI ürünlerini üretmek (namespaced, experiment-aware; araç hazır — bkz. Bölüm 12 — ancak gerçek GEE export'u henüz çalıştırılmadı).
 2. **Manavgat Step7 downscaling/fusion (gerekirse):** Kozan'da kullanılan MODIS→Landsat downscaling/fusion mantığını Manavgat için gerektiği kadar tekrarlamak.
 3. **Manavgat Step8A-E modelleme:** Label-honest 500 m dataset'i oluşturup baseline vs. thermal karşılaştırmasını, bootstrap belirsizliğini ve ablation'ı Manavgat için çalıştırmak.
 4. **Kozan negative-control vs. Manavgat wildfire anchor karşılaştırması:** İki AOI'nin sonuçlarını yan yana koyup thermal feature katkısının doğal bitki örtüsü yangınında da geçerli olup olmadığını değerlendirmek.
