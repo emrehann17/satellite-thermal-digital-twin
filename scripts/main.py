@@ -3,9 +3,10 @@ main.py
 
 Yapılanlar:
     - Step1'den Step8E'ye kadar TÜM pipeline'ı sırasıyla çalıştırır: GEE
-      erişimi gereken online kısım (Step1-7B), ardından yerel/offline kısım
-      (Step7C downscaling model eğitimi -> Step7D downscaled LST tahmini ->
-      Step7E füzyon -> raw MCD64A1 BurnDate export -> Step8A native 500 m
+      erişimi gereken online kısım (Step1-7B; Step6'nın hemen ardından
+      label export cleanup + burned-landcover gate dahil), ardından
+      yerel/offline kısım (Step7C downscaling model eğitimi -> Step7D
+      downscaled LST tahmini -> Step7E füzyon -> Step8A native 500 m
       modelleme verisi -> Step8B baseline vs thermal belirleyici deney ->
       Step8C spatial-block bootstrap -> Step8D termal özellik ablation ->
       Step8E nihai birleşik rapor).
@@ -15,15 +16,25 @@ NOTLAR:
       erişimi başarısız olursa yalnızca uyarı verir, pipeline'ın geri
       kalanını DURDURMAZ (Step6'nın çıktısı sonraki adımların hiçbiri için
       zorunlu girdi değildir).
-    - Raw MCD64A1 BurnDate export (scripts/export_mcd64a1_raw_burndate.py)
-      Step8A için ZORUNLU bir GEE adımıdır ve hata-toleranslı DEĞİLDİR:
-      başarısız olursa pipeline burada durur, çünkü Step8A gerçek BurnDate
-      DOY değerleri olmadan (yalnızca binary maskeyle) yanlış/geçersiz bir
-      etiket kullanmaya çalışır ve zaten kendi içinde net hata ile durur.
+    - Label export cleanup (src.step6_validate_fire_relation.export_raw_mcd64a1_labels,
+      Step6'nın HEMEN ardından çalışır) Step8A için ZORUNLU bir GEE adımıdır
+      ve hata-toleranslı DEĞİLDİR: başarısız olursa pipeline burada durur,
+      çünkü Step8A gerçek BurnDate DOY değerleri olmadan (yalnızca binary
+      maskeyle) yanlış/geçersiz bir etiket kullanmaya çalışır ve zaten kendi
+      içinde net hata ile durur. Bu adım Step6'nın kendi association
+      testinden BAĞIMSIZDIR (Step6 başarısız olsa/atlansa bile çalışır).
+    - Burned-landcover gate (src.step6b_burned_landcover_gate, label export
+      cleanup'ın hemen ardından çalışır) DIAGNOSTIC'tir: MCD64A1-burned
+      hücrelerin landcover kompozisyonunu özetler ve
+      wildfire_candidate_pass / cropland_dominated_control /
+      insufficient_burned_positives / mixed_or_uncertain olarak sınıflar.
+      cropland_dominated_control sonucu (Kozan 2023 için beklenen) pipeline'ı
+      DURDURMAZ; yalnızca raw BurnDate binary görünüyorsa veya gerekli girdi
+      rasterları eksikse hata verir.
     - Step7C/7D/7E ve Step8A-8E, önceki çalıştırmadan kalan çıktılar zaten
       varsa varsayılan olarak NET HATA ile durur (üzerine yazma güvenliği).
       Bu betiği tekrar/yeniden çalıştırmak için `--force` verin; bu, ilgili
-      tüm adımlara iletilir.
+      tüm adımlara (burned-landcover gate dahil) iletilir.
     - Step7C (model eğitimi) ve özellikle Step8D (popülasyon başına 11
       model x spatial-block CV) gerçek AOI verisiyle uzun sürebilir
       (Step8D tek başına gerçek ~48k satırlık veride tahminen 15-40 dakika).
@@ -47,6 +58,7 @@ import traceback
 
 from core.io_utils import setup_logger
 from core.paths import PROJECT_ROOT
+from core.regions import get_active_experiment, get_experiment_output_root
 
 import src.step1_fetch_modis as step1_fetch_modis
 import src.step2_modis_5year_mean as step2_modis_5year_mean
@@ -58,12 +70,12 @@ import src.step5_preprocess_timeseries as step5_preprocess_timeseries
 import src.step5b_diagnostic_report as step5b_diagnostic_report
 import src.step5c_tvdi as step5c_tvdi
 import src.step6_validate_fire_relation as step6_validate_fire_relation
+import src.step6b_burned_landcover_gate as step6b_burned_landcover_gate
 import src.step7a_tiling_infrastructure as step7a_tiling_infrastructure
 import src.step7b_prepare_downscaling_dataset as step7b_prepare_downscaling_dataset
 import src.step7c_train_downscaling_model as step7c_train_downscaling_model
 import src.step7d_predict_downscaled_lst as step7d_predict_downscaled_lst
 import src.step7e_fuse_landsat_downscaled_lst as step7e_fuse_landsat_downscaled_lst
-import scripts.export_mcd64a1_raw_burndate as export_mcd64a1_raw_burndate
 import src.step8a_prepare_500m_modeling_dataset as step8a_prepare_500m_modeling_dataset
 import src.step8b_train_baseline_vs_thermal_model as step8b_train_baseline_vs_thermal_model
 import src.step8c_spatial_block_bootstrap_uncertainty as step8c_spatial_block_bootstrap_uncertainty
@@ -73,6 +85,45 @@ import src.step8e_final_report as step8e_final_report
 
 BASE_DIR = PROJECT_ROOT
 log, log_file = setup_logger("main")
+
+
+def log_step0_banner(experiment_id: str) -> dict:
+    """Step0: aktif deneyi cozer, logo/konsola yazdirir ve deney dict'ini dondurur.
+
+    NOT: Bu fonksiyon YALNIZCA bilgilendirme/namespacing amaclidir. Step1-8E
+    script'leri hala core/config.py'deki legacy REGION_NAME / PREDICTOR_*_DATE
+    / LABEL_*_DATE sabitlerini kullanir (bkz. core/config.py Step0 koprusu
+    yorumlari). Bu ilk implementasyonda yalnizca "kozan_2023" deneyi gercekten
+    calistirilir; farkli bir --experiment ile tam pipeline'i calistirmaya
+    calismak fail-fast bir hata verir (bkz. main() cagrisi altindaki kontrol).
+    """
+    exp = get_active_experiment(experiment_id)
+    output_root = get_experiment_output_root(experiment_id)
+    baseline_years_str = ", ".join(str(y) for y in exp["baseline_years"])
+
+    log.info("[Step0] Active experiment: %s", experiment_id)
+    log.info("[Step0] Region: %s", exp["region_key"])
+    log.info("[Step0] Role: %s", exp["role"])
+    log.info(
+        "[Step0] Predictor window: %s -> %s",
+        exp["predictor_start_date"], exp["predictor_end_date"],
+    )
+    log.info(
+        "[Step0] Label window: %s -> %s",
+        exp["label_start_date"], exp["label_end_date"],
+    )
+    log.info("[Step0] Baseline years: %s", baseline_years_str)
+    log.info("[Step0] Output root: %s", output_root)
+
+    print(f"[Step0] Active experiment: {experiment_id}")
+    print(f"[Step0] Region: {exp['region_key']}")
+    print(f"[Step0] Role: {exp['role']}")
+    print(f"[Step0] Predictor window: {exp['predictor_start_date']} -> {exp['predictor_end_date']}")
+    print(f"[Step0] Label window: {exp['label_start_date']} -> {exp['label_end_date']}")
+    print(f"[Step0] Baseline years: {baseline_years_str}")
+    print(f"[Step0] Output root: {output_root}")
+
+    return exp
 
 
 def run_step(step_name: str, step_func) -> None:
@@ -97,8 +148,10 @@ def main(force: bool = False) -> None:
     log.info(f"force={force}")
     log.info(
         "NOT: Step6 hata-toleranslıdır (basarisiz olursa yalnizca uyarir). "
-        "Raw MCD64A1 BurnDate export ise ZORUNLUDUR; basarisiz olursa "
-        "pipeline burada durur (Step8A gecerli DOY etiketi olmadan calisamaz)."
+        "Label export cleanup (raw MCD64A1 BurnDate) ise ZORUNLUDUR; "
+        "basarisiz olursa pipeline burada durur (Step8A gecerli DOY etiketi "
+        "olmadan calisamaz). Burned-landcover gate DIAGNOSTIC'tir; "
+        "cropland_dominated_control sonucu pipeline'i durdurmaz."
     )
     log.info("#" * 80)
 
@@ -127,6 +180,29 @@ def main(force: bool = False) -> None:
                 "STEP 6 atlandı (burned-area validation başarısız): %s", exc
             )
 
+        # Label export cleanup: gerçek MCD64A1 BurnDate DOY değerlerini (+
+        # opsiyonel binary maskeyi) canonical konuma (outputs/validation/labels/)
+        # yazar. ZORUNLUDUR ve hata-toleranslı DEĞİLDİR -- Step8A geçerli DOY
+        # etiketi olmadan çalışamaz. Step6'nın kendi association testinden
+        # (yukarıda) BAĞIMSIZDIR: Step6 başarısız/atlanmış olsa bile bu adım
+        # çalışır ve kendi GEE erişimini kurar.
+        run_step(
+            "LABEL EXPORT CLEANUP (raw MCD64A1 BurnDate)",
+            lambda: step6_validate_fire_relation.export_raw_mcd64a1_labels(also_binary=True),
+        )
+
+        # Burned-landcover gate: MCD64A1-burned ~500 m hücrelerin landcover
+        # kompozisyonunu özetler (wildfire_candidate_pass /
+        # cropland_dominated_control / insufficient_burned_positives /
+        # mixed_or_uncertain). DIAGNOSTIC'tir; cropland_dominated_control
+        # sonucu (Kozan için beklenen) pipeline'ı DURDURMAZ. Yalnızca raw
+        # BurnDate binary görünüyorsa veya gerekli girdi rasterları eksikse
+        # hata verir.
+        run_step(
+            "BURNED-LANDCOVER GATE",
+            lambda: step6b_burned_landcover_gate.main(force=force),
+        )
+
         run_step("STEP 7A", step7a_tiling_infrastructure.main)
         run_step("STEP 7B", step7b_prepare_downscaling_dataset.main)
 
@@ -134,12 +210,6 @@ def main(force: bool = False) -> None:
         run_step("STEP 7C", lambda: step7c_train_downscaling_model.main(force=force))
         run_step("STEP 7D", lambda: step7d_predict_downscaled_lst.main(force=force))
         run_step("STEP 7E", lambda: step7e_fuse_landsat_downscaled_lst.main(force=force))
-
-        # Raw MCD64A1 BurnDate export (GEE) -- ZORUNLU, hata-toleranslı DEĞİL.
-        run_step(
-            "RAW MCD64A1 BURNDATE EXPORT",
-            lambda: export_mcd64a1_raw_burndate.main(argv=["--also-binary"]),
-        )
 
         run_step("STEP 8A", lambda: step8a_prepare_500m_modeling_dataset.main(force=force))
         run_step("STEP 8B", lambda: step8b_train_baseline_vs_thermal_model.main(force=force))
@@ -183,9 +253,40 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--force", action="store_true",
         help="Step7C/7D/7E ve Step8A-8E icin ciktilar zaten varsa uzerine yaz.",
     )
+    parser.add_argument(
+        "--experiment", default="kozan_2023",
+        help=(
+            "Step0 deney kimligi (core/regions.py EXPERIMENTS kaydi). "
+            "Varsayilan: kozan_2023. NOT: bu Step0 implementasyonunda "
+            "yalnizca kozan_2023 gercekten calistirilabilir; baska bir "
+            "deney icin --dry-run kullanin."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help=(
+            "Yalnizca Step0 aktif deney bilgisini (region, pencereler, "
+            "baseline yillari, cikti koku) yazdirir ve pipeline'i "
+            "CALISTIRMADAN cikar."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = parse_args()
-    main(force=args.force)
+    active_exp = log_step0_banner(args.experiment)
+
+    if args.dry_run:
+        print("[Step0] --dry-run: pipeline calistirilmadi.")
+    elif args.experiment != "kozan_2023":
+        raise SystemExit(
+            f"'{args.experiment}' deneyi icin tam pipeline calistirma bu "
+            "Step0 implementasyonunda henuz desteklenmiyor (Step1-8E hala "
+            "legacy kozan_2023 config sabitlerini kullaniyor). Bu deneyi "
+            "onizlemek icin --dry-run ekleyin; gercek calistirma icin "
+            "Step1-8E'nin experiment-aware hale getirilmesi gereken "
+            "sonraki bir refactor asamasini bekleyin."
+        )
+    else:
+        main(force=args.force)

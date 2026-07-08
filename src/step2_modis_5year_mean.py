@@ -4,7 +4,7 @@ step2_modis_5year_mean.py
 Yapılanlar:
     - GEE bağlantısını başlatmak
     - Çalışma bölgelerini almak
-    - Doğu Akdeniz için 2019-2022 yaz ayları MODIS LST verisini sorgulamak
+    - Verilen Bölge için 2019-2022 yaz ayları MODIS LST verisini sorgulamak
     - Zaman ortalaması almak
     - DN -> Celsius dönüşümü yapmak
     - İşlenmiş görüntü ve metadata üretmek

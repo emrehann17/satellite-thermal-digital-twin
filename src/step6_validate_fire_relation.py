@@ -59,9 +59,12 @@ from core.config import (
     GEE_PROJECT,
     LABEL_END_DATE,
     LABEL_START_DATE,
+    MCD64A1_BURNDATE_BAND,
+    MCD64A1_COLLECTION,
     PREDICTOR_END_DATE,
     PREDICTOR_START_DATE,
     REGION_NAME,
+    STEP6_LABEL_OUTPUT_DIR,
     VALIDATION_ALLOW_OVERLAPPING_WINDOWS,
     VALIDATION_BALANCED_UNBURNED_RATIO,
     VALIDATION_FIRMS_BRIGHTNESS_THRESHOLD,
@@ -124,6 +127,16 @@ LANDCOVER_CANDIDATE_DIRS = [
 ]
 OUTPUT_DIR = BASE_DIR / "outputs" / "step6"
 LABEL_DIR = OUTPUT_DIR / "labels"
+
+# CANONICAL label export location (Step0-era, shared with Step8A and future
+# experiments). This is DELIBERATELY separate from LABEL_DIR above: LABEL_DIR
+# holds Step6's OWN internal association-test scratch files (binary GEE
+# downloads used only to compute this module's ROC/AUC diagnostics), while
+# VALIDATION_LABEL_DIR holds the "official", semantically-honest MCD64A1
+# label files that Step8A (and the Step6B burned-landcover gate) discover by
+# fixed path. See export_raw_mcd64a1_labels() below -- Step6 now OWNS this
+# export instead of relying on a separately-run script.
+VALIDATION_LABEL_DIR = BASE_DIR / STEP6_LABEL_OUTPUT_DIR
 BURNABLE_NDVI_THRESHOLD = 0.2
 VEGETATION_NDVI_THRESHOLDS = (BURNABLE_NDVI_THRESHOLD, 0.3)
 NDVI_STRATA = (
@@ -148,6 +161,7 @@ STEP5C_METADATA_PATH = STEP5C_OUTPUT_DIR / "step5c_metadata.json"
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 LABEL_DIR.mkdir(parents=True, exist_ok=True)
+VALIDATION_LABEL_DIR.mkdir(parents=True, exist_ok=True)
 
 log, log_file = setup_logger("step6")
 
@@ -513,18 +527,29 @@ def export_label_to_grid(
     grid: dict,
     out_path: Path,
     label_name: str,
+    raw_path: Path | None = None,
 ) -> Path | None:
     """
     GEE binary etiket image'ini referans predictor grid'ine indirir/resample eder.
 
     geemap ile etiket GeoTIFF olarak indirilir; ardından rasterio ile predictor
     grid'ine (nearest, kategorik etiket) reproject edilir. Başarısızsa None döner.
+
+    raw_path: GEE'den indirilen HİZALANMAMIŞ ara dosyanın yazılacağı yol.
+        Verilmezse `LABEL_DIR / f"{label_name}_raw.tif"` kullanılır (eski
+        davranış). MCD64A1 çağrısı bu parametreyi AÇIKÇA verir, çünkü bu
+        fonksiyonun indirdiği ara dosya BINARY'dir (mosaic.gt(0)) ve adında
+        "raw" geçmesi -- Step8A'nın "*mcd64*raw*.tif" glob araması tarafından
+        yanlışlıkla gerçek BurnDate DOY rasteri sanılmasını önlemek için --
+        canonical raw BurnDate dosyasıyla (VALIDATION_LABEL_DIR/mcd64a1_raw.tif,
+        bkz. export_raw_mcd64a1_labels()) ÇAKIŞMAMALIDIR.
     """
     if not GEEMAP_AVAILABLE:
         log.warning("geemap yok; %s etiketi indirilemedi.", label_name)
         return None
 
-    raw_path = LABEL_DIR / f"{label_name}_raw.tif"
+    if raw_path is None:
+        raw_path = LABEL_DIR / f"{label_name}_raw.tif"
     try:
         geemap.ee_export_image(
             image,
@@ -561,6 +586,254 @@ def export_label_to_grid(
         dst.write(aligned, 1)
 
     return out_path
+
+
+# =============================================================================
+# Canonical raw MCD64A1 BurnDate export (Step6 owns this)
+# =============================================================================
+# TASINDI (moved) from scripts/export_mcd64a1_raw_burndate.py: bu ucu ucuna
+# GEE mantigi artik burada, Step6 modulunde yasiyor. scripts/export_mcd64a1_raw_burndate.py
+# artik yalnizca ince (thin) bir CLI sarmalayicidir ve export_raw_mcd64a1_labels()
+# fonksiyonunu cagirir -- boylece IKI FARKLI/DIVERGENT implementasyon
+# OLUSMAZ.
+#
+# NEDEN AYRI (export_label_to_grid'den farkli):
+#   export_label_to_grid() Step6'nin KENDI association-test binary
+#   etiketlerini (MCD64A1/FireCCI51/FIRMS) indirir/hizalar; bunlar Step6'nin
+#   kendi ROC/AUC hesaplamasi icindir.
+#   export_raw_mcd64a1_labels() ise Step8A'nin (ve Step6B burned-landcover
+#   gate'inin) ihtiyac duydugu GERCEK BurnDate DOY degerlerini (1..366) -- ve
+#   istege bagli ayri bir binary maskeyi -- CANONICAL, sabit konuma
+#   (VALIDATION_LABEL_DIR) yazar. Bu deger mosaic.gt(0) DEGILDIR.
+def build_raw_burndate_image(region: "ee.Geometry", start: str, end: str) -> "ee.Image":
+    """
+    [start, end) penceresi icin ham MCD64A1 BurnDate DOY degerlerinden olusan
+    bir ee.Image olusturur.
+
+    Aylik goruntuler uzerinde piksel-basina POZITIF BurnDate'in MAKSIMUMUNU
+    alir (son yanma kazanir); bu gercek bir DOY degeri korur (0 = unburned).
+    """
+    collection = (
+        ee.ImageCollection(MCD64A1_COLLECTION)
+        .filterBounds(region)
+        .filterDate(start, end)
+        .select(MCD64A1_BURNDATE_BAND)
+    )
+
+    size = collection.size().getInfo()
+    if size == 0:
+        raise ValidationError(
+            f"MCD64A1 secili AOI/pencerede ({start} -> {end}) hic goruntu "
+            "dondurmedi. AOI'yi/pencereyi kontrol edin."
+        )
+    log.info("MCD64A1 goruntu sayisi: %d", size)
+
+    raw_burndate = collection.max().rename("BurnDate").clip(region)
+    return raw_burndate
+
+
+def export_raster_image(image: "ee.Image", out_path: Path, scale: int, region: "ee.Geometry", crs: str) -> None:
+    """GEE image'ini verilen scale/region/crs ile GeoTIFF olarak indirir."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    log.info("Export basliyor -> %s (scale=%dm, crs=%s)", out_path, scale, crs)
+    geemap.ee_export_image(
+        image,
+        filename=str(out_path),
+        scale=scale,
+        region=region,
+        crs=crs,
+        file_per_band=False,
+    )
+    if not out_path.exists():
+        raise ValidationError(f"Export dosyasi olusmadi: {out_path}")
+    log.info("Yazildi: %s", out_path)
+
+
+def inspect_raw_burndate_output(path: Path, start: str, end: str) -> dict:
+    """
+    Export sonrasi hizli dogruluk kontrolu: rasterin gercekten DOY degerleri
+    icerdigini (yalniz {0,1} degil) dogrular. Sonuc dict'i loglanir/dondurulur;
+    "looks_binary=True" olmasi CAGIRANIN hata vermesi gerektigini gosterir
+    (bu fonksiyon kendisi raise ETMEZ, yalnizca teshis eder).
+    """
+    from datetime import datetime as _dt
+
+    start_doy = _dt.strptime(start, "%Y-%m-%d").timetuple().tm_yday
+    end_doy = _dt.strptime(end, "%Y-%m-%d").timetuple().tm_yday
+
+    with rasterio.open(path) as src:
+        arr = src.read(1, masked=True).compressed().astype("float64")
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        log.warning("Cikti rasterinde gecerli piksel yok: %s", path)
+        return {"path": str(path), "valid_pixel_count": 0, "looks_binary": None}
+
+    positive = arr[arr > 0]
+    in_range = int(np.sum((arr >= start_doy) & (arr <= end_doy)))
+    looks_binary = bool(positive.size > 0 and np.all(positive == 1.0))
+
+    log.info(
+        "Cikti kontrolu: min=%.1f max=%.1f count_positive=%d count_one=%d "
+        "count_in_DOY[%d-%d]=%d",
+        float(arr.min()), float(arr.max()), int(positive.size),
+        int(np.sum(arr == 1)), start_doy, end_doy, in_range,
+    )
+    if looks_binary:
+        log.error(
+            "UYARI: tum pozitif degerler 1.0 -> bu hala BINARY gorunuyor. "
+            "BurnDate bandinin DOY degerleriyle export edildiginden emin olun "
+            "(mosaic.gt(0) KULLANMAYIN)."
+        )
+    elif in_range == 0:
+        log.warning(
+            "UYARI: label DOY penceresinde (%d-%d) hic deger yok. Pencereyi "
+            "veya AOI'yi kontrol edin.", start_doy, end_doy,
+        )
+    else:
+        log.info("OK: cikti gercek BurnDate DOY degerleri iceriyor gorunuyor.")
+
+    return {
+        "path": str(path),
+        "min": float(arr.min()), "max": float(arr.max()),
+        "count_positive": int(positive.size), "count_one": int(np.sum(arr == 1)),
+        "count_in_label_doy_range": in_range,
+        "looks_binary": looks_binary,
+    }
+
+
+def export_raw_mcd64a1_labels(
+    region: "ee.Geometry | None" = None,
+    start: str | None = None,
+    end: str | None = None,
+    also_binary: bool = True,
+    raw_out: Path | None = None,
+    binary_out: Path | None = None,
+    output_dir: Path | None = None,
+    scale: int = VALIDATION_LABEL_EXPORT_SCALE,
+    experiment_id: str | None = None,
+) -> dict:
+    """
+    ZORUNLU (required), hata-toleransli OLMAYAN canonical export: gercek
+    MCD64A1 BurnDate DOY degerlerini mcd64a1_raw.tif'e, istenirse binary
+    maskeyi mcd64a1_burned.tif'e yazar.
+
+    Step6'nin kendi association-test main()'inin AKSINE bu fonksiyon
+    main.py tarafindan hata-toleranssiz (try/except'siz) cagrilmalidir --
+    Step8A gercek DOY etiketi olmadan calisamaz.
+
+    GEE ortami gerektirir (ee/geemap/init_gee), tipki Step6'nin kendisi gibi.
+
+    EXPERIMENT-AWARE DAVRANIS (Step0C):
+        experiment_id=None (varsayilan):
+            Legacy Kozan davranisi BIREBIR korunur -- region core.config
+            REGION_NAME'den, start/end legacy LABEL_*_DATE'den, ciktilar
+            VALIDATION_LABEL_DIR'den (outputs/validation/labels/) gelir.
+        experiment_id verilirse (or. "manavgat_2021"):
+            Region, label penceresi ve cikti dizini Step0 deney kaydindan
+            cozulur:
+                region     = get_region_for_experiment(experiment_id)
+                start/end  = exp["label_start_date"] / exp["label_end_date"]
+                output_dir = outputs/experiments/<ns>/validation/labels/
+            Boylece Manavgat (ve gelecekteki deneyler) Kozan'in legacy
+            paylasilan yollarina ASLA yazmaz.
+        Acikca verilen parametreler (region/start/end/raw_out/binary_out/
+        output_dir) her iki modda da deney/legacy varsayilanlarini ezer.
+    """
+    if not GEE_IMPORTS_OK:
+        raise ValidationError(
+            "GEE importlari basarisiz; raw MCD64A1 BurnDate export'u icin "
+            f"GEE ortami gerekli. Gercek hata: {GEE_IMPORT_ERROR}."
+        )
+    if not GEEMAP_AVAILABLE:
+        raise ValidationError("geemap yok; raw MCD64A1 BurnDate export'u yapilamiyor.")
+
+    experiment = None
+    region_desc = REGION_NAME
+    if experiment_id is not None:
+        # Import burada (fonksiyon icinde): core.regions zaten import ediliyor
+        # (build_regions), ama experiment yardimcilarini yalnizca gerektiginde
+        # cekmek dongusel-import riskini sifirda tutar.
+        from core.regions import get_active_experiment, get_experiment_output_root
+
+        experiment = get_active_experiment(experiment_id)
+        region_desc = experiment["region_key"]
+        start = start or experiment["label_start_date"]
+        end = end or experiment["label_end_date"]
+        if start is None or end is None:
+            raise ValidationError(
+                f"'{experiment_id}' deneyinin label penceresi tanimsiz "
+                "(label_start_date/label_end_date=None). Placeholder deneyler "
+                "icin export yapilamaz."
+            )
+        if output_dir is None:
+            output_dir = get_experiment_output_root(experiment_id) / "validation" / "labels"
+
+    start = start or LABEL_START_DATE
+    end = end or LABEL_END_DATE
+    if output_dir is None:
+        output_dir = VALIDATION_LABEL_DIR
+    output_dir = Path(output_dir)
+    raw_out = Path(raw_out) if raw_out is not None else (output_dir / "mcd64a1_raw.tif")
+    binary_out = Path(binary_out) if binary_out is not None else (output_dir / "mcd64a1_burned.tif")
+
+    try:
+        init_gee(GEE_PROJECT)
+    except Exception as exc:  # noqa: BLE001
+        raise ValidationError(
+            f"GEE init/auth basarisiz: {type(exc).__name__}: {exc}. "
+            "'earthengine authenticate' calistirin ve GEE_PROJECT'i kontrol edin."
+        ) from exc
+
+    if region is None and experiment_id is not None:
+        from core.regions import get_region_for_experiment
+
+        region = get_region_for_experiment(experiment_id)
+    if region is None:
+        regions = build_regions()
+        if REGION_NAME not in regions:
+            raise ValidationError(f"Bolge bulunamadi: {REGION_NAME}")
+        region = regions[REGION_NAME]
+
+    log.info(
+        "[Raw BurnDate export] AOI=%s%s, pencere=%s -> %s, scale=%dm, cikti=%s",
+        region_desc,
+        f" (experiment={experiment_id})" if experiment_id else "",
+        start, end, scale, output_dir,
+    )
+
+    raw_image = build_raw_burndate_image(region, start, end)
+    export_raster_image(raw_image, raw_out, scale, region, EXPORT_CRS)
+    inspection = inspect_raw_burndate_output(raw_out, start, end)
+
+    if inspection.get("looks_binary"):
+        raise ValidationError(
+            "Export edilen 'raw' MCD64A1 BurnDate rasteri BINARY gorunuyor "
+            f"({raw_out}). Bu, Step8A'yi sessizce bozar (butun pozitif "
+            "degerler DOY=1'e esitlenmis olur). Export mantigini kontrol edin "
+            "(mosaic.gt(0) KULLANILMAMALI)."
+        )
+
+    binary_path = None
+    if also_binary:
+        binary_image = raw_image.gt(0).rename("MCD64A1_burned").clip(region)
+        export_raster_image(binary_image, binary_out, scale, region, EXPORT_CRS)
+        binary_path = binary_out
+
+    log.info(
+        "[Raw BurnDate export] TAMAMLANDI. Step8A/Step6B artik kullanabilir: %s",
+        raw_out,
+    )
+
+    return {
+        "raw_path": raw_out,
+        "binary_path": binary_path,
+        "inspection": inspection,
+        "start": start,
+        "end": end,
+        "scale": scale,
+        "experiment_id": experiment_id,
+        "output_dir": output_dir,
+    }
 
 
 def build_binary_label(
@@ -640,7 +913,14 @@ def fetch_labels(grid: dict, label_start: str, label_end: str) -> dict:
         skipped_sources.append({"source": "MCD64A1", "reason": mcd_status})
     else:
         mcd_path = export_label_to_grid(
-            mcd, region, grid, LABEL_DIR / "mcd64a1_burned.tif", "mcd64a1"
+            mcd, region, grid, LABEL_DIR / "mcd64a1_burned.tif", "mcd64a1",
+            # Bu, Step6'nin KENDI ic association-test indirmesi icin ara
+            # dosyadir (BINARY: mosaic.gt(0)) ve dosya adinda BILEREK "raw"
+            # GECMEZ -- Step8A'nin genel "*mcd64*raw*.tif" fallback aramasi
+            # tarafindan yanlislikla gercek BurnDate DOY rasteri sanilmasin
+            # diye. Gercek/canonical raw BurnDate dosyasi ayri bir fonksiyonla
+            # (export_raw_mcd64a1_labels) VALIDATION_LABEL_DIR altina yazilir.
+            raw_path=LABEL_DIR / "mcd64a1_association_test_binary_download.tif",
         )
         if mcd_path is not None:
             with rasterio.open(mcd_path) as src:

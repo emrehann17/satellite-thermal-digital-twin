@@ -353,6 +353,35 @@ if VALIDATION_MODE == "pre_fire":
 
 
 # =============================================================================
+# Step6 label export cleanup + burned-landcover gate
+# =============================================================================
+# Step6 artik "onemli/dogru" MCD64A1 etiket dosyalarinin (raw BurnDate DOY +
+# binary burned mask) TEK SAHIBIDIR. Bu dosyalar Step6'nin kendi ic
+# association-test calismasindan (outputs/step6/labels/) AYRI, sabit/paylasilan
+# bir konumda (asagida) tutulur; boylece Step8A ve ileride diger deneyler
+# (Manavgat vb.) bu konumu guvenle arayabilir.
+#
+# ONEMLI: Bu yollar Step0/deney-namespace'li degildir (henuz). Manavgat
+# pipeline'i CALISTIRILMADAN once bu alan experiment-aware hale getirilmelidir
+# (bkz. docs/experiments.md "Current scope limitation").
+STEP6_LABEL_OUTPUT_DIR = "outputs/step6/labels"
+
+# Burned-landcover gate karar esikleri (supervisor talebi). Degistirilirse
+# Kozan 2023 icin beklenen "cropland_dominated_control" sonucu da degisebilir.
+STEP6_BURNED_LANDCOVER_GATE_MIN_POSITIVES = 30
+STEP6_BURNED_LANDCOVER_GATE_NATURAL_THRESHOLD = 0.50
+STEP6_BURNED_LANDCOVER_GATE_CROPLAND_THRESHOLD = 0.50
+
+# Gate'in calistigi agregasyon seviyesi. "500m_reconstructed_mcd64a1_cell":
+# Step8A ile AYNI block/tile mantigi (bkz. core.utils.tiling.make_tile_grid +
+# STEP8A_MCD64A1_NATIVE_CELL_SIZE_M / STEP8A_REFERENCE_PIXEL_SIZE_M orani)
+# kullanilarak 30 m referans gridi yaklasik native ~500 m MCD64A1 hucrelerine
+# geri toplanir. Bu, gate sayilarinin Step8A'nin ürettigi sayilarla mumkun
+# oldugunca karsilastirilabilir olmasini saglar (bkz. docs/label_gate.md).
+STEP6_BURNED_LANDCOVER_GATE_LEVEL = "500m_reconstructed_mcd64a1_cell"
+
+
+# =============================================================================
 # Step7B: MODIS downscaling training dataset builder
 # =============================================================================
 # Step7B, MODIS->Landsat LST downscaling için pencere/tile-bazlı bir EĞİTİM
@@ -536,3 +565,76 @@ STEP8D_BOOTSTRAP_TOP_K = 3
 # ciktilarini (stats JSON'lari) okuyup tek bir tutarli bilimsel ozet raporuna
 # birlestirir (markdown + JSON + Excel + CSV).
 STEP8E_OUTPUT_DIR = "outputs/step8e"
+
+
+# =============================================================================
+# Step0: deney (experiment) kayit defteri uyumluluk koprusu (compatibility bridge)
+# =============================================================================
+# core/regions.py icindeki EXPERIMENTS kayit defterini bu modulden de
+# erisilebilir kilar. ONEMLI: yukaridaki mevcut REGION_NAME, PREDICTOR_*_DATE,
+# LABEL_*_DATE gibi degiskenler BILEREK degistirilmedi/uzerine yazilmadi --
+# Step1-Step8 script'leri bugun oldugu gibi bu legacy degiskenleri kullanmaya
+# devam eder ve bu Step0 katmanindan ETKILENMEZ.
+#
+# Asagidaki ACTIVE_EXPERIMENT_ID / ACTIVE_EXPERIMENT / EXPERIMENT_* isimleri
+# yeni, saf-ek (additive) degiskenlerdir; sadece yeni namespaced cikti katmani
+# ve gelecekteki kademeli Step1-Step8 migration'i icin saglanir.
+#
+# ACTIVE_EXPERIMENT_ID varsayilani "kozan_2023"tur -- bu, yukaridaki legacy
+# REGION_NAME ("kozan_aoi") ve PREDICTOR_*_DATE/LABEL_*_DATE degerleriyle
+# birebir ayni deneydir; bu yuzden varsayilan calistirmada hicbir bilimsel
+# fark YARATMAZ.
+from core.regions import (  # noqa: E402
+    get_active_experiment as _get_active_experiment,
+    get_experiment_output_root as _get_experiment_output_root,
+)
+
+ACTIVE_EXPERIMENT_ID = os.getenv("ACTIVE_EXPERIMENT_ID", "kozan_2023")
+ACTIVE_EXPERIMENT = _get_active_experiment(ACTIVE_EXPERIMENT_ID)
+
+# Deneyden turetilen, "EXPERIMENT_" onekli saf-ek degiskenler. Bunlar legacy
+# REGION_NAME / PREDICTOR_*_DATE / LABEL_*_DATE degiskenlerinin YERINE GECMEZ;
+# Step1-Step8 script'leri hala legacy isimleri kullanir.
+EXPERIMENT_REGION_NAME = ACTIVE_EXPERIMENT["region_key"]
+EXPERIMENT_PREDICTOR_START_DATE = ACTIVE_EXPERIMENT["predictor_start_date"]
+EXPERIMENT_PREDICTOR_END_DATE = ACTIVE_EXPERIMENT["predictor_end_date"]
+EXPERIMENT_LABEL_START_DATE = ACTIVE_EXPERIMENT["label_start_date"]
+EXPERIMENT_LABEL_END_DATE = ACTIVE_EXPERIMENT["label_end_date"]
+EXPERIMENT_BASELINE_YEARS = ACTIVE_EXPERIMENT["baseline_years"]
+EXPERIMENT_OUTPUT_ROOT = _get_experiment_output_root(ACTIVE_EXPERIMENT_ID)
+
+# Guvenlik kontrolu (sadece varsayilan deney icin): ACTIVE_EXPERIMENT_ID
+# "kozan_2023" iken, EXPERIMENT_* degerlerinin legacy PREDICTOR_*_DATE /
+# LABEL_*_DATE / REGION_NAME ile birebir ayni oldugunu dogrular. Bu, Step0
+# kayit defterinin gelecekte yanlislikla Kozan varsayilanindan sapmasini
+# erken yakalamak icin bir fail-fast kontroludur (bilimsel hesaplamayi
+# DEGISTIRMEZ, yalnizca tutarliligi dogrular).
+if ACTIVE_EXPERIMENT_ID == "kozan_2023":
+    _mismatch = []
+    if EXPERIMENT_REGION_NAME != REGION_NAME:
+        _mismatch.append(f"region_key={EXPERIMENT_REGION_NAME!r} != REGION_NAME={REGION_NAME!r}")
+    if EXPERIMENT_PREDICTOR_START_DATE != PREDICTOR_START_DATE:
+        _mismatch.append(
+            f"predictor_start_date={EXPERIMENT_PREDICTOR_START_DATE!r} != "
+            f"PREDICTOR_START_DATE={PREDICTOR_START_DATE!r}"
+        )
+    if EXPERIMENT_PREDICTOR_END_DATE != PREDICTOR_END_DATE:
+        _mismatch.append(
+            f"predictor_end_date={EXPERIMENT_PREDICTOR_END_DATE!r} != "
+            f"PREDICTOR_END_DATE={PREDICTOR_END_DATE!r}"
+        )
+    if EXPERIMENT_LABEL_START_DATE != LABEL_START_DATE:
+        _mismatch.append(
+            f"label_start_date={EXPERIMENT_LABEL_START_DATE!r} != "
+            f"LABEL_START_DATE={LABEL_START_DATE!r}"
+        )
+    if EXPERIMENT_LABEL_END_DATE != LABEL_END_DATE:
+        _mismatch.append(
+            f"label_end_date={EXPERIMENT_LABEL_END_DATE!r} != "
+            f"LABEL_END_DATE={LABEL_END_DATE!r}"
+        )
+    if _mismatch:
+        raise ValueError(
+            "Step0 EXPERIMENTS['kozan_2023'] kaydi, core/config.py icindeki "
+            "legacy Kozan sabitleriyle TUTARSIZ: " + "; ".join(_mismatch)
+        )
