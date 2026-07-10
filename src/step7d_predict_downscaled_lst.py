@@ -157,8 +157,21 @@ def confirm_leakage_guard(metadata: dict, safe_features: list[str]) -> None:
     )
 
 
-def resolve_reference_grid() -> tuple[Path, int]:
-    """Step7B/Step7C ile ayni target rasterini (referans grid) cozer."""
+def resolve_reference_grid(ctx: dict | None = None) -> tuple[Path, int]:
+    """Step7B/Step7C ile ayni target rasterini (referans grid) cozer.
+
+    ctx: None ise (varsayılan) legacy Kozan keşfi. Verilirse (Kozan-dışı)
+        YALNIZCA ctx["step5_output_dir"] altına bakar.
+    """
+    if ctx is not None:
+        p = ctx["step5_output_dir"] / "current_period_median_celsius.tif"
+        if p.exists():
+            return p, 1
+        raise SystemExit(
+            f"Referans grid (Landsat LST target) bulunamadi: {p}. Once "
+            "Step5'i (namespaced) calistirin."
+        )
+
     candidates = [
         (BASE_DIR / "outputs" / "step5" / "current_period_median_celsius.tif", 1),
         (BASE_DIR / "data" / "current_period" / "landsat_current_period_60days.tif", 1),
@@ -273,15 +286,29 @@ def prepare_aligned_landcover(
 
 
 def resolve_feature_rasters(
-    safe_features: list[str], reference_path: Path
+    safe_features: list[str], reference_path: Path, ctx: dict | None = None,
 ) -> tuple[dict[str, Path], dict]:
     """
     Metadata'daki safe_feature_columns icin gercek raster yollarini cozer.
 
-    landcover için özel durum: nearest-neighbor ile önceden hizalanmış
-    (`LANDCOVER_ALIGNED_RELPATH`) dosya tercih edilir; yoksa kaynak
-    (`LANDCOVER_SOURCE_RELPATH`) rasterından açıkça oluşturulur. Başka hiçbir
-    özellik için otomatik resample yapılmaz (mismatch varsa net hata verilir).
+    Kozan-disi deneyler (ctx verilmis ve ctx["is_kozan"]=False): TÜM feature
+    rasterlari YALNIZCA Step7B'nin ONCEDEN uretip
+    outputs/experiments/<experiment_id>/step7b/aligned_inputs/<name>.tif'e
+    yazdigi, referans gridle ZATEN eslesen dosyalardan okunur. Ham/coarse
+    namespaced kaynaklara (data/modis, dem_input_dir, ndvi_current_dir, vb.)
+    ASLA geri DUSULMEZ -- boylece Step7D kendi ic pencere-pencere reproject
+    mantigina GUVENMEZ ("do not silently resample"). Bir aligned dosya
+    eksikse, o ozellik icin HEMEN (diger ozellikleri kontrol etmeden) su
+    net mesajla durur: "Aligned feature raster missing for Step7D: <feature>.
+    Re-run Step7B."
+
+    Kozan (ctx=None veya ctx["is_kozan"]=True): legacy davranis KORUNUR
+    (FEATURE_RASTER_CANDIDATES, BASE_DIR relative, landcover icin
+    LANDCOVER_ALIGNED_RELPATH/prepare_aligned_landcover). Ek olarak, eger
+    outputs/step7b/aligned_inputs/<name>.tif zaten mevcutsa (Step7B bir
+    deney icin degil de Kozan icin de calistirilip aligned_inputs
+    uretmisse), bu ONCELIKLI olarak kullanilir -- ama mevcut degilse legacy
+    kesif ile devam edilir (Kozan hicbir zaman bu yuzden BOZULMAZ).
     """
     resolved: dict[str, Path] = {}
     missing: list[str] = []
@@ -293,13 +320,58 @@ def resolve_feature_rasters(
         "landcover_alignment_created": False,
     }
 
+    use_aligned_inputs_only = ctx is not None and not ctx.get("is_kozan")
+    aligned_inputs_dir = (
+        ctx["step7b_output_dir"] / "aligned_inputs" if use_aligned_inputs_only else None
+    )
+    # Kozan icin de aligned_inputs varsa ONCELIKLI kullanilir (opsiyonel,
+    # ZORUNLU degil -- bkz. docstring).
+    kozan_aligned_inputs_dir = BASE_DIR / "outputs" / "step7b" / "aligned_inputs"
+
     for name in safe_features:
         if name in DERIVED_COORD_FEATURES:
             continue
         if name in LEAKAGE_FEATURES:
             raise SystemExit(f"KRITIK: leakage ozelligi '{name}' islenmeye calisildi.")
 
+        if use_aligned_inputs_only:
+            aligned_path = aligned_inputs_dir / f"{name}.tif"
+            if not aligned_path.exists():
+                raise SystemExit(
+                    f"Aligned feature raster missing for Step7D: {name}. Re-run Step7B."
+                )
+            resolved[name] = aligned_path
+            if name == "landcover":
+                landcover_info.update({
+                    "original_landcover_path": None,
+                    "aligned_landcover_path": str(aligned_path),
+                    "landcover_alignment_method": "step7b_aligned_inputs_reuse",
+                    "landcover_alignment_reason": (
+                        "reused Step7B's pre-aligned aligned_inputs/landcover.tif "
+                        "(already matches the Step5 reference grid); no "
+                        "resampling performed in Step7D"
+                    ),
+                    "landcover_alignment_created": False,
+                })
+            continue
+
         if name == "landcover":
+            kozan_aligned_landcover = kozan_aligned_inputs_dir / "landcover.tif"
+            if kozan_aligned_landcover.exists():
+                resolved[name] = kozan_aligned_landcover
+                landcover_info.update({
+                    "original_landcover_path": None,
+                    "aligned_landcover_path": str(kozan_aligned_landcover),
+                    "landcover_alignment_method": "step7b_aligned_inputs_reuse",
+                    "landcover_alignment_reason": (
+                        "reused outputs/step7b/aligned_inputs/landcover.tif "
+                        "(already matches reference grid); no resampling "
+                        "performed here"
+                    ),
+                    "landcover_alignment_created": False,
+                })
+                continue
+
             aligned_path = BASE_DIR / LANDCOVER_ALIGNED_RELPATH
             source_path = BASE_DIR / LANDCOVER_SOURCE_RELPATH
             source_path_arg = source_path if source_path.exists() else None
@@ -322,6 +394,11 @@ def resolve_feature_rasters(
                 ),
                 "landcover_alignment_created": result["created"],
             })
+            continue
+
+        kozan_aligned_candidate = kozan_aligned_inputs_dir / f"{name}.tif"
+        if kozan_aligned_candidate.exists():
+            resolved[name] = kozan_aligned_candidate
             continue
 
         candidates = FEATURE_RASTER_CANDIDATES.get(name)
@@ -746,6 +823,31 @@ def load_step7c_metrics_summary() -> dict | None:
     }
 
 
+def _modis_spatial_calibration_note(ctx: dict | None) -> str:
+    """
+    MODIS mean/std katmanlarinin ne oldugunu (ve ne OLMADIGINI) aciklayan
+    metadata notu. Kozan (ctx=None veya ctx["is_kozan"]) icin legacy metin
+    BIREBIR korunur (coklu-yil yaz-ortalamasi baseline). Kozan-disi bir
+    deney icin (or. manavgat_2021), MODIS o deneyin PREDICTOR penceresi
+    icin tek-sezonluk (single-season) export edildigi icin ("coklu-yil
+    baseline" DEGIL -- bkz. scripts/prepare_modis_for_step7.py), metin
+    bunu acikca yansitir.
+    """
+    if ctx is None or ctx.get("is_kozan"):
+        return (
+            "modis_lst_mean_celsius is a 4-year summer-mean MODIS context layer, "
+            "not a current daily MODIS observation. Step7D is therefore a spatial "
+            "downscaling/context calibration raster product, not yet daily MODIS "
+            "gap-filling."
+        )
+    return (
+        "modis_lst_mean_celsius and modis_lst_std_celsius are single-season "
+        "MODIS predictor-window summary layers for "
+        f"{ctx['predictor_start_date']} -> {ctx['predictor_end_date']}; they "
+        "are not multi-year baselines and not daily MODIS products."
+    )
+
+
 def write_metadata(
     output_dir: Path,
     model_path: Path,
@@ -760,22 +862,32 @@ def write_metadata(
     plots_written: list[str],
     warnings_list: list[str],
     landcover_info: dict | None = None,
+    ctx: dict | None = None,
 ) -> Path:
     landcover_info = landcover_info or {}
     payload = {
         "created_at": datetime.now().isoformat(),
         "script": "step7d_predict_downscaled_lst.py",
+        "experiment_id": ctx["experiment_id"] if ctx else None,
         "model_path": str(model_path),
         "model_metadata_path": str(metadata_path),
         "model_type": model_metadata.get("model_type"),
         "safe_feature_columns": safe_features,
+        "feature_list": safe_features,
         "excluded_leakage_features": LEAKAGE_FEATURES,
         "leakage_guard_confirmed": True,
         "no_fire_risk_model_trained": True,
         "no_burned_area_labels_used": True,
         "no_firms_labels_used": True,
         "reference_grid_path": str(reference_path),
+        "reference_raster": str(reference_path),
         "feature_raster_paths": {k: str(v) for k, v in feature_paths.items()},
+        "feature_paths": {k: str(v) for k, v in feature_paths.items()},
+        # validate_grid_alignment() bu noktaya ulaşılmadan ÖNCE her feature'ı
+        # referans gridle birebir karşılaştırıp uyuşmazlıkta zaten fail-fast
+        # yapar; bu yüzden buraya ulaşıldıysa ikisi de garantili True'dur.
+        "all_features_match_reference_grid": True,
+        "no_silent_resampling": True,
         "original_landcover_path": landcover_info.get("original_landcover_path"),
         "aligned_landcover_path": landcover_info.get("aligned_landcover_path"),
         "landcover_alignment_method": landcover_info.get("landcover_alignment_method"),
@@ -788,12 +900,7 @@ def write_metadata(
         "crs": run_result["raster_info"]["crs"],
         "transform": run_result["raster_info"]["transform"],
         "step7c_metrics_summary": load_step7c_metrics_summary(),
-        "spatial_calibration_note": (
-            "modis_lst_mean_celsius is a 4-year summer-mean MODIS context layer, "
-            "not a current daily MODIS observation. Step7D is therefore a spatial "
-            "downscaling/context calibration raster product, not yet daily MODIS "
-            "gap-filling."
-        ),
+        "spatial_calibration_note": _modis_spatial_calibration_note(ctx),
         "warnings": warnings_list,
     }
     path = output_dir / "downscaling_prediction_metadata.json"
@@ -969,9 +1076,13 @@ def main(
     force: bool = False,
     write_residual_products: bool = STEP7D_WRITE_RESIDUAL_PRODUCTS,
     make_plots: bool = False,
+    ctx: dict | None = None,
 ) -> dict:
     log.info("=" * 60)
-    log.info("STEP 7D BASLIYOR (Step7C modeli tam raster gridine uygulaniyor)")
+    log.info(
+        "STEP 7D BASLIYOR (Step7C modeli tam raster gridine uygulaniyor)%s",
+        f" [experiment={ctx['experiment_id']}]" if ctx else "",
+    )
     log.info("=" * 60)
 
     out_dir = BASE_DIR / output_dir
@@ -988,6 +1099,7 @@ def main(
             "Step7D ciktilari zaten var (" + ", ".join(present)
             + "). Uzerine yazmak icin --force verin."
         )
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     warnings_list: list[str] = []
 
@@ -1016,10 +1128,10 @@ def main(
 
     confirm_leakage_guard(model_metadata, safe_features)
 
-    reference_path, reference_band = resolve_reference_grid()
+    reference_path, reference_band = resolve_reference_grid(ctx)
     log.info("Referans grid: %s (band %s)", reference_path, reference_band)
 
-    feature_paths, landcover_info = resolve_feature_rasters(safe_features, reference_path)
+    feature_paths, landcover_info = resolve_feature_rasters(safe_features, reference_path, ctx)
     log.info("Feature rasterlari cozuldu: %s", {k: str(v) for k, v in feature_paths.items()})
 
     validate_grid_alignment(reference_path, feature_paths)
@@ -1045,6 +1157,7 @@ def main(
         out_dir, Path(model_path), Path(model_metadata_path), model_metadata,
         safe_features, reference_path, feature_paths, run_result, tile_size,
         write_residual_products, plots_written, warnings_list, landcover_info,
+        ctx=ctx,
     )
     stats_path_out = write_stats(out_dir, run_result, tile_size)
     summary_path_out = write_summary(
@@ -1074,7 +1187,42 @@ def main(
         "stats_path": str(stats_path_out),
         "summary_path": str(summary_path_out),
         "stats": run_result["stats"],
+        "experiment_id": ctx["experiment_id"] if ctx else None,
     }
+
+
+def run_step7d(ctx: dict | None = None, force: bool = False, **kwargs) -> dict:
+    """
+    Step7C modelini tam Manavgat/Kozan grid'ine uygular (windowed inference).
+
+    ctx: None ise (varsayılan) legacy Kozan davranışı BİREBİR korunur.
+        Verilirse (Kozan-dışı): model outputs/experiments/<id>/step7c/'den,
+        referans grid ctx["step5_output_dir"]'den, feature rasterları
+        namespaced Step5/Step5C + shared DEM + Step6A landcover'dan okunur;
+        çıktı outputs/experiments/<id>/step7d/'ye yazılır.
+    """
+    use_ctx = ctx is not None and not ctx.get("is_kozan")
+    model_path = None
+    model_metadata_path = None
+    output_dir = None
+    if use_ctx:
+        model_path = str(ctx["step7c_output_dir"] / "downscaling_model.joblib")
+        model_metadata_path = str(ctx["step7c_output_dir"] / "downscaling_model_metadata.json")
+        output_dir = str(ctx["step7d_output_dir"])
+        log.info(
+            "[experiment=%s] Step7D ctx override aktif. model_path=%s, "
+            "output_dir=%s", ctx["experiment_id"], model_path, output_dir,
+        )
+
+    kwargs_final = dict(kwargs)
+    if model_path is not None:
+        kwargs_final["model_path"] = model_path
+    if model_metadata_path is not None:
+        kwargs_final["model_metadata_path"] = model_metadata_path
+    if output_dir is not None:
+        kwargs_final["output_dir"] = output_dir
+
+    return main(force=force, ctx=ctx if use_ctx else None, **kwargs_final)
 
 
 def parse_args(argv=None) -> argparse.Namespace:

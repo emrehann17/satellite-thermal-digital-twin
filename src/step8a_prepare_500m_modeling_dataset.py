@@ -98,6 +98,8 @@ from rasterio.windows import Window
 from core.config import (
     LABEL_START_DATE,
     LABEL_END_DATE,
+    PREDICTOR_START_DATE,
+    PREDICTOR_END_DATE,
     STEP8A_OUTPUT_DIR,
     STEP8A_MIN_30M_VALID_FRACTION,
     STEP8A_BURNABLE_FRACTION_THRESHOLD,
@@ -377,30 +379,63 @@ def resolve_label_raster(explicit: str | None) -> tuple[Path, str]:
     )
 
 
-def resolve_continuous_predictors() -> tuple[dict[str, Path], list[str]]:
+def resolve_continuous_predictors(ctx: dict | None = None) -> tuple[dict[str, Path], list[str]]:
     """
     Resolves paths for the continuous predictor registry.
 
-    Returns (resolved_paths, missing_required_names). Raises immediately if a
+    ctx: None ise (varsayilan) legacy Kozan kesfi (CONTINUOUS_PREDICTOR_CANDIDATES,
+        BASE_DIR relative). Verilirse (Kozan-disi, or. manavgat_2021): TUM
+        predictor'lar YALNIZCA o deneyin namespaced Step5/Step5C/Step7
+        dizinlerinden + DEM'den (ctx["dem_input_dir"], artik namespaced --
+        bkz. scripts/prepare_dem_for_experiment.py) cozulur. Kozan'in legacy
+        paylasilan yollarina (outputs/step5, outputs/step5c, outputs/step7d,
+        outputs/step7e, data/dem) ASLA dusulmez.
+
+    Returns (resolved_paths, missing_optional_names). Raises immediately if a
     required predictor has none of its candidate paths present.
     """
     resolved: dict[str, Path] = {}
     missing_optional: list[str] = []
     missing_required: list[str] = []
 
-    for name, info in CONTINUOUS_PREDICTOR_CANDIDATES.items():
-        found = None
-        for rel in info["candidates"]:
-            p = BASE_DIR / rel
-            if p.exists():
-                found = p
-                break
-        if found is not None:
-            resolved[name] = found
-        elif info["required"]:
-            missing_required.append(name)
-        else:
-            missing_optional.append(name)
+    if ctx is not None:
+        candidates_by_name = {
+            "ndvi": [ctx["ndvi_current_dir"] / "current_ndvi_median.tif"],
+            "elevation": [ctx["dem_input_dir"] / "elevation.tif"],
+            "slope": [ctx["dem_input_dir"] / "slope.tif"],
+            "lst_anomaly": [ctx["step5_output_dir"] / "anomaly_zscore.tif"],
+            "current_lst": [ctx["step5_output_dir"] / "current_period_median_celsius.tif"],
+            "current_tvdi": [ctx["step5c_output_dir"] / "current_tvdi.tif"],
+            "tvdi_difference": [ctx["step5c_output_dir"] / "tvdi_difference.tif"],
+            "downscaled_lst": [ctx["step7d_output_dir"] / "downscaled_lst_celsius.tif"],
+            "fused_lst": [ctx["step7e_output_dir"] / "fused_lst_celsius.tif"],
+        }
+        for name, info in CONTINUOUS_PREDICTOR_CANDIDATES.items():
+            found = None
+            for p in candidates_by_name.get(name, []):
+                if p.exists():
+                    found = p
+                    break
+            if found is not None:
+                resolved[name] = found
+            elif info["required"]:
+                missing_required.append(name)
+            else:
+                missing_optional.append(name)
+    else:
+        for name, info in CONTINUOUS_PREDICTOR_CANDIDATES.items():
+            found = None
+            for rel in info["candidates"]:
+                p = BASE_DIR / rel
+                if p.exists():
+                    found = p
+                    break
+            if found is not None:
+                resolved[name] = found
+            elif info["required"]:
+                missing_required.append(name)
+            else:
+                missing_optional.append(name)
 
     if missing_required:
         raise Step8AError(
@@ -505,8 +540,36 @@ def prepare_aligned_landcover(
     return {"created": True, "reused": False, "path": aligned_path}
 
 
-def resolve_landcover(reference_path: Path) -> tuple[Path, dict]:
-    """Resolves the landcover raster, aligning the fallback source if needed."""
+def resolve_landcover(reference_path: Path, explicit: str | None = None) -> tuple[Path, dict]:
+    """Resolves the landcover raster, aligning the fallback source if needed.
+
+    explicit: verilirse (Kozan-disi deneyler icin, or.
+        ctx["landcover_aligned_path"] -- Step6A gate-input asamasinda zaten
+        referans gride hizalanmis) bu dosya KULLANILIR; grid'i referansla
+        eslesmiyorsa net bir hata verilir (sessizce yeniden hizalanmaz).
+        Kozan'in legacy data/landcover/ kesfine bu durumda HIC BAKILMAZ.
+    """
+    with rasterio.open(reference_path) as ref:
+        ref_w, ref_h, ref_crs, ref_t = ref.width, ref.height, ref.crs, ref.transform
+
+    if explicit:
+        explicit_path = Path(explicit)
+        if not explicit_path.exists():
+            raise Step8AError(f"Belirtilen landcover rasteri bulunamadi: {explicit_path}")
+        if not _grid_matches(explicit_path, ref_w, ref_h, ref_crs, ref_t):
+            raise Step8AError(
+                f"Belirtilen landcover rasteri ({explicit_path}) referans "
+                "gridle eslesmiyor. Bu deney icin landcover zaten referans "
+                "gride hizali olmalidir (bkz. Step6A gate-input hazirlama); "
+                "sessizce yeniden hizalanmaz."
+            )
+        log.info("Hizalanmis landcover (explicit) kullaniliyor: %s", explicit_path)
+        return explicit_path, {
+            "original_landcover_path": None,
+            "aligned_landcover_path": str(explicit_path),
+            "landcover_alignment_method": "step6a_gate_input_reuse",
+        }
+
     aligned = BASE_DIR / LANDCOVER_ALIGNED_RELPATH
     source = BASE_DIR / LANDCOVER_SOURCE_RELPATH
 
@@ -814,6 +877,8 @@ def build_dataset(
     output_dir: Path,
     min_valid_fraction: float,
     burnable_threshold: float,
+    label_start: str = LABEL_START_DATE,
+    label_end: str = LABEL_END_DATE,
 ) -> dict:
     block_size = compute_block_size_pixels()
     log.info(
@@ -940,7 +1005,7 @@ def build_dataset(
                 rep_doy, rep_count, _n = mode_and_agreement(positive_doy)
                 agreement = float(rep_count / positive_doy.size)
                 month, _iso = doy_to_month_and_date(
-                    rep_doy, LABEL_START_DATE, LABEL_END_DATE
+                    rep_doy, label_start, label_end
                 )
                 if month is not None:
                     burned_flag = 1
@@ -955,7 +1020,7 @@ def build_dataset(
                     if len([w for w in warnings_list if "label penceresi" in w]) < 20:
                         warnings_list.append(
                             f"{cell_id}: BurnDate={rep_doy} label penceresi "
-                            f"({LABEL_START_DATE} -> {LABEL_END_DATE}) disinda; "
+                            f"({label_start} -> {label_end}) disinda; "
                             "bu label penceresi icin UNBURNED sayildi."
                         )
 
@@ -1505,7 +1570,13 @@ def write_stats(
     return path
 
 
-def write_summary(output_dir: Path, result: dict, stats_path: Path) -> Path:
+def write_summary(
+    output_dir: Path,
+    result: dict,
+    stats_path: Path,
+    label_start: str = LABEL_START_DATE,
+    label_end: str = LABEL_END_DATE,
+) -> Path:
     counters = result["counters"]
     burnable_diag = result.get("burnable_landcover_diagnostics", {}) or {}
     burned_rate = (
@@ -1555,7 +1626,7 @@ def write_summary(output_dir: Path, result: dict, stats_path: Path) -> Path:
             "- This dataset was built from the **raw MCD64A1 BurnDate** raster. "
             "Each 500 m cell keeps both burned and unburned cells; a cell is "
             "`burned=1` only if its native BurnDate falls inside the "
-            f"{LABEL_START_DATE} -> {LABEL_END_DATE} label window."
+            f"{label_start} -> {label_end} label window."
             if result.get("burn_month_available")
             else "- **WARNING:** a **binary burned mask** was used as a "
             "last-resort fallback (raw BurnDate raster not found). `burn_date` "
@@ -1684,11 +1755,183 @@ def write_summary(output_dir: Path, result: dict, stats_path: Path) -> Path:
 LEAKAGE_COLUMN_NAMES = {"anomaly_zscore", "modis_context_zscore"}
 
 
+# =============================================================================
+# Metadata date-consistency guards (fail-fast)
+# =============================================================================
+# Kozan'in legacy tarihleri. Kozan-disi HICBIR deneyin ciktisinda (ne JSON ne
+# markdown) bu dizgiler GECMEMELIDIR. Sabit dizgi olarak yazmak yerine
+# core.config'in GERCEK Kozan sabitlerinden turetiyoruz -- boylece Kozan'in
+# config'i degisirse bu koruma otomatik olarak onunla birlikte guncellenir.
+# (Prompt madde 7 acikca "2023-08-01" ve "2023-10-31"i istiyor; bunlar zaten
+# LABEL_START_DATE / LABEL_END_DATE degerleridir.)
+_KOZAN_STALE_DATE_STRINGS = tuple(
+    d for d in (
+        PREDICTOR_START_DATE, PREDICTOR_END_DATE,
+        LABEL_START_DATE, LABEL_END_DATE,
+    ) if d
+)
+
+# Deney bazli, ELLE dogrulanmis beklenen tarihler. Bir deney burada listeliyse,
+# ciktisi bu degerlerle BIREBIR eslesmek ZORUNDADIR (prompt madde 6).
+_EXPECTED_EXPERIMENT_DATES = {
+    "manavgat_2021": {
+        "predictor_start_date": "2021-06-01",
+        "predictor_end_date": "2021-07-27",
+        "label_start_date": "2021-07-28",
+        "label_end_date": "2021-08-31",
+    },
+}
+
+
+def assert_metadata_dates_consistent(stats_data: dict, ctx: dict | None) -> None:
+    """
+    Step8A ciktilari YAZILMADAN once calisan sert (hard) tutarlilik kontrolu.
+
+    Kontroller (Kozan-disi deneyler icin):
+      1. Top-level predictor_start_date/predictor_end_date/label_start_date/
+         label_end_date, ctx'in degerleriyle BIREBIR ayni olmali.
+      2. Top-level tarih alanlari, predictor_window / label_window listeleriyle
+         BIREBIR ayni olmali (ikisi arasinda sessiz bir sapma olamaz).
+      3. Deney _EXPECTED_EXPERIMENT_DATES'te listeliyse (or. manavgat_2021),
+         tarihler o elle-dogrulanmis degerlerle BIREBIR ayni olmali.
+      4. Hicbir top-level tarih alani Kozan'in legacy tarihlerinden biri olamaz.
+
+    Kozan (ctx=None veya experiment_id == "kozan_2023") icin HICBIR SEY
+    YAPMAZ -- legacy davranis BIREBIR korunur.
+    """
+    if ctx is None or ctx.get("experiment_id") == "kozan_2023":
+        return
+
+    experiment_id = ctx["experiment_id"]
+    date_fields = (
+        "predictor_start_date", "predictor_end_date",
+        "label_start_date", "label_end_date",
+    )
+
+    # 1. ctx ile birebir eslesme
+    mismatched = {
+        f: (stats_data.get(f), ctx[f]) for f in date_fields
+        if stats_data.get(f) != ctx[f]
+    }
+    if mismatched:
+        raise Step8AError(
+            f"METADATA TUTARSIZLIGI ('{experiment_id}'): top-level tarih "
+            f"alanlari ctx ile eslesmiyor (alan: (yazilan, beklenen)): "
+            f"{mismatched}. Islem DURDURULDU."
+        )
+
+    # 2. window listeleriyle birebir eslesme
+    predictor_window = stats_data.get("predictor_window")
+    label_window = stats_data.get("label_window")
+    if predictor_window != [stats_data["predictor_start_date"], stats_data["predictor_end_date"]]:
+        raise Step8AError(
+            f"METADATA TUTARSIZLIGI ('{experiment_id}'): predictor_window "
+            f"({predictor_window}) top-level predictor tarihleriyle "
+            f"({stats_data['predictor_start_date']} -> "
+            f"{stats_data['predictor_end_date']}) eslesmiyor. Islem DURDURULDU."
+        )
+    if label_window != [stats_data["label_start_date"], stats_data["label_end_date"]]:
+        raise Step8AError(
+            f"METADATA TUTARSIZLIGI ('{experiment_id}'): label_window "
+            f"({label_window}) top-level label tarihleriyle "
+            f"({stats_data['label_start_date']} -> "
+            f"{stats_data['label_end_date']}) eslesmiyor. Islem DURDURULDU."
+        )
+
+    # 3. elle-dogrulanmis beklenen tarihler (varsa)
+    expected = _EXPECTED_EXPERIMENT_DATES.get(experiment_id)
+    if expected:
+        wrong = {
+            f: (stats_data.get(f), v) for f, v in expected.items()
+            if stats_data.get(f) != v
+        }
+        if wrong:
+            raise Step8AError(
+                f"METADATA TUTARSIZLIGI ('{experiment_id}'): tarihler bu deney "
+                f"icin elle-dogrulanmis beklenen degerlerle eslesmiyor "
+                f"(alan: (yazilan, beklenen)): {wrong}. Islem DURDURULDU."
+            )
+
+    # 4. Kozan'in legacy tarihlerinden hicbiri gecmemeli
+    stale = {
+        f: stats_data.get(f) for f in date_fields
+        if stats_data.get(f) in _KOZAN_STALE_DATE_STRINGS
+    }
+    if stale:
+        raise Step8AError(
+            f"METADATA TUTARSIZLIGI ('{experiment_id}'): su top-level tarih "
+            f"alanlari hala Kozan'in legacy tarihlerini iceriyor: {stale}. "
+            "Islem DURDURULDU."
+        )
+
+
+def assert_no_stale_kozan_dates_in_outputs(paths: list[Path], ctx: dict | None) -> None:
+    """
+    Kozan-disi bir deneyin YAZILMIS ciktilarini (JSON/markdown/vb.) tarayip
+    Kozan'in legacy tarih dizgilerinden (2023-06-01/2023-07-31/2023-08-01/
+    2023-10-31) herhangi birini iceriyorsa RuntimeError firlatir
+    (prompt madde 7).
+
+    Bu, madde 6'daki alan-bazli kontrolun YAKALAYAMADIGI sizintilari
+    (or. serbest-metin markdown cumleleri, warnings[] listesindeki eski
+    pencere metinleri) yakalar.
+
+    Kozan icin HICBIR SEY YAPMAZ.
+    """
+    if ctx is None or ctx.get("experiment_id") == "kozan_2023":
+        return
+
+    experiment_id = ctx["experiment_id"]
+    offenders: dict[str, list[str]] = {}
+    for path in paths:
+        if path is None or not Path(path).exists():
+            continue
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue  # binari (parquet/tif) dosyalari atla
+        found = [s for s in _KOZAN_STALE_DATE_STRINGS if s in text]
+        if found:
+            offenders[str(path)] = found
+
+    if offenders:
+        raise RuntimeError(
+            f"STALE KOZAN DATE SIZINTISI ('{experiment_id}'): asagidaki cikti "
+            f"dosyalari Kozan'in legacy tarihlerini iceriyor: {offenders}. "
+            "Kozan-disi bir deneyin ciktisinda bu tarihler ASLA gecmemelidir. "
+            "Islem DURDURULDU."
+        )
+
+
+def _label_window_months(label_start: str, label_end: str) -> set[int]:
+    """
+    Label penceresinin (inclusive) kapsadigi takvim aylarinin kumesini
+    dondurur. Kozan icin (2023-08-01 -> 2023-10-31) {8, 9, 10} -- BIREBIR
+    eski davranis. Manavgat gibi farkli bir pencereye sahip deneyler icin
+    (or. 2021-07-28 -> 2021-08-31) {7, 8} -- ARTIK DOGRU sekilde
+    hesaplaniyor (eskiden HER ZAMAN sabit {8, 9, 10} varsayiliyordu, bkz.
+    bug raporu).
+    """
+    start_dt = datetime.strptime(label_start, "%Y-%m-%d")
+    end_dt = datetime.strptime(label_end, "%Y-%m-%d")
+    months: set[int] = set()
+    year, month = start_dt.year, start_dt.month
+    while (year, month) <= (end_dt.year, end_dt.month):
+        months.add(month)
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return months
+
+
 def run_quality_checks(
     df: pd.DataFrame,
     result: dict,
     ref_pixel_total: int,
     allow_all_burned: bool,
+    label_start: str = LABEL_START_DATE,
+    label_end: str = LABEL_END_DATE,
 ) -> tuple[list[str], list[str]]:
     """
     Runs sanity checks. Returns (fatal_problems, soft_warnings).
@@ -1702,6 +1945,7 @@ def run_quality_checks(
     fatal: list[str] = []
     warnings: list[str] = []
     counters = result["counters"]
+    valid_months = _label_window_months(label_start, label_end)
 
     valid = int(counters["valid_modeling_cells"])
     burned = int(counters["burned_cell_count"])
@@ -1787,14 +2031,18 @@ def run_quality_checks(
             "burned pixel count; aggregation may not have collapsed pixels."
         )
 
-    # --- burn_month must be only 8/9/10 for burned rows (raw label) ---
+    # --- burn_month must be inside the experiment's own label-window months
+    # for burned rows (raw label). Kozan: {8,9,10}; other experiments (e.g.
+    # Manavgat: {7,8}) use their OWN label window -- BIREBIR sabit {8,9,10}
+    # varsayimi ARTIK YOK (bkz. bug raporu).
     if result.get("burn_month_available"):
-        bad_months = burned_rows[~burned_rows["burn_month"].isin([8, 9, 10])]
+        bad_months = burned_rows[~burned_rows["burn_month"].isin(valid_months)]
         bad_months_hard = bad_months[bad_months["burn_month"].notna()]
         if len(bad_months_hard) > 0:
             fatal.append(
                 f"{len(bad_months_hard)} burned rows have burn_month outside "
-                "{8, 9, 10}; burned cells must map inside the Aug-Oct window."
+                f"{sorted(valid_months)}; burned cells must map inside the "
+                f"experiment's label window ({label_start} -> {label_end})."
             )
 
     # --- cropland must not by itself satisfy burnable masks (soft) ---
@@ -1838,14 +2086,17 @@ def run_quality_checks(
             )
 
     # --- Point 6: burn_month total must equal burned_cell_count (raw label) ---
+    # Kozan: {8,9,10}; diger deneyler kendi label-penceresi aylarini kullanir
+    # (bkz. yukaridaki valid_months / bug raporu).
     if result.get("burn_month_available"):
         bm = counters["burn_month_counts"]
-        bm_total = int(bm.get(8, 0)) + int(bm.get(9, 0)) + int(bm.get(10, 0))
+        bm_total = sum(int(bm.get(m, 0)) for m in valid_months)
         if bm_total != burned:
             fatal.append(
                 f"burn_month_counts total ({bm_total}) != burned_cell_count "
                 f"({burned}); every burned cell must have a burn month in "
-                "{8, 9, 10}."
+                f"{sorted(valid_months)} (experiment label window "
+                f"{label_start} -> {label_end})."
             )
 
     # --- Point 6: valid_modeling_cells should be much larger than burned ---
@@ -1894,9 +2145,13 @@ def main(
     label_raster_arg: str | None = None,
     reference_30m_arg: str | None = None,
     allow_all_burned: bool = False,
+    ctx: dict | None = None,
 ) -> dict:
     log.info("=" * 60)
-    log.info("STEP 8A BASLIYOR (native ~500 m MCD64A1-grid modeling dataset)")
+    log.info(
+        "STEP 8A BASLIYOR (native ~500 m MCD64A1-grid modeling dataset)%s",
+        f" [experiment={ctx['experiment_id']}]" if ctx else "",
+    )
     log.info("=" * 60)
 
     out_dir = BASE_DIR / output_dir_arg
@@ -1914,10 +2169,37 @@ def main(
         )
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if ctx is not None and not ctx.get("is_kozan"):
+        reference_30m_arg = reference_30m_arg or str(
+            ctx["step5_output_dir"] / "current_period_median_celsius.tif"
+        )
+        label_raster_arg = label_raster_arg or str(ctx["gate_labels_dir"] / "mcd64a1_raw.tif")
+
     reference_path = resolve_reference_30m(reference_30m_arg)
     label_path_raw, label_kind = resolve_label_raster(label_raster_arg)
-    predictor_paths, missing_optional = resolve_continuous_predictors()
-    landcover_path, landcover_info = resolve_landcover(reference_path)
+    predictor_paths, missing_optional = resolve_continuous_predictors(ctx=ctx)
+    landcover_explicit = (
+        str(ctx["landcover_aligned_path"])
+        if (ctx is not None and not ctx.get("is_kozan") and ctx.get("landcover_aligned_path"))
+        else None
+    )
+    landcover_path, landcover_info = resolve_landcover(reference_path, explicit=landcover_explicit)
+
+    # BUG FIX: BurnDate -> ay/burned-pencere siniflandirmasi (asagida
+    # inspect_label_raster + build_dataset icinde) daha once HER ZAMAN
+    # modul-seviyesi LABEL_START_DATE/LABEL_END_DATE (Kozan'in 2023 legacy
+    # sabitleri) kullaniyordu -- ctx'ten BAGIMSIZ. Bu, deney-farkinda
+    # (Kozan-disi) calistirmalarda gercekte deneyin KENDI label penceresi
+    # icinde olan BurnDate degerlerinin yanlislikla "pencere disi" sayilip
+    # UNBURNED'a dusurulmesine yol aciyordu (bkz. bug raporu). Burada
+    # kullanilacak GERCEK label penceresini ctx'ten (Kozan-disi) veya
+    # legacy sabitlerden (Kozan, DEGISMEDEN) coziyoruz.
+    if ctx is not None and not ctx.get("is_kozan"):
+        effective_label_start = ctx["label_start_date"]
+        effective_label_end = ctx["label_end_date"]
+    else:
+        effective_label_start = LABEL_START_DATE
+        effective_label_end = LABEL_END_DATE
 
     with rasterio.open(reference_path) as ref:
         ref_profile = {
@@ -1962,7 +2244,7 @@ def main(
     # user can see exactly what the label contained.
     try:
         label_diag = inspect_label_raster(
-            label_path_raw, label_kind, LABEL_START_DATE, LABEL_END_DATE
+            label_path_raw, label_kind, effective_label_start, effective_label_end
         )
     except Step8AError as exc:
         # Persist whatever diagnostics we can before aborting.
@@ -1987,7 +2269,11 @@ def main(
 
     label_path = align_label_to_reference(label_path_raw, ref_profile, out_dir)
 
-    source_mask_path = BASE_DIR / FUSED_SOURCE_MASK_RELPATH
+    source_mask_path = (
+        ctx["step7e_output_dir"] / "fused_lst_source_mask.tif"
+        if (ctx is not None and not ctx.get("is_kozan"))
+        else (BASE_DIR / FUSED_SOURCE_MASK_RELPATH)
+    )
     if not source_mask_path.exists():
         log.warning(
             "Fused LST source mask bulunamadi (%s); observed/gapfilled "
@@ -2012,12 +2298,17 @@ def main(
         output_dir=out_dir,
         min_valid_fraction=min_valid_fraction,
         burnable_threshold=burnable_threshold,
+        label_start=effective_label_start,
+        label_end=effective_label_end,
     )
     result["label_source_description"] = label_source_description
     result["label_raster_diagnostics"] = label_diag
     df = result["dataframe"]
 
-    fatal, soft = run_quality_checks(df, result, ref_pixel_total, allow_all_burned)
+    fatal, soft = run_quality_checks(
+        df, result, ref_pixel_total, allow_all_burned,
+        label_start=effective_label_start, label_end=effective_label_end,
+    )
     for w in soft:
         log.warning("QUALITY CHECK (warning): %s", w)
     result["warnings"].extend(soft)
@@ -2063,9 +2354,42 @@ def main(
     stats_data["csv_written"] = bool(write_csv)
     stats_data["diagnostic_rasters"] = {k: str(v) for k, v in diag_rasters.items()}
     stats_data["cell_preview_geojson"] = str(geojson_path)
+    stats_data["cell_level"] = "500m_reconstructed_mcd64a1_cell"
+    stats_data["no_30m_label_claim"] = True
+    if ctx is not None:
+        stats_data["experiment_id"] = ctx["experiment_id"]
+        stats_data["region_key"] = ctx["region_key"]
+        stats_data["predictor_window"] = [ctx["predictor_start_date"], ctx["predictor_end_date"]]
+        stats_data["label_window"] = [ctx["label_start_date"], ctx["label_end_date"]]
+        stats_data["baseline_years"] = ctx["baseline_years"]
+        # BUG FIX: write_stats() yukarida top-level predictor_start_date/
+        # predictor_end_date/label_start_date/label_end_date alanlarini HER
+        # ZAMAN None/None/LABEL_START_DATE/LABEL_END_DATE (Kozan'in legacy
+        # core.config sabitleri) ile dolduruyordu -- ctx'ten BAGIMSIZ. Bu,
+        # Manavgat gibi deney-farkinda calistirmalarda JSON'da Kozan'a ait
+        # 2023 tarihlerinin (veya null) sessizce kalmasina yol aciyordu,
+        # oysa dogru degerler zaten predictor_window/label_window'da mevcuttu.
+        # Burada bu 4 alani da ctx'in GERCEK tarihleriyle DUZELTIYORUZ.
+        stats_data["predictor_start_date"] = ctx["predictor_start_date"]
+        stats_data["predictor_end_date"] = ctx["predictor_end_date"]
+        stats_data["label_start_date"] = ctx["label_start_date"]
+        stats_data["label_end_date"] = ctx["label_end_date"]
+
+    # FAIL-FAST (madde 6): ciktilar DISKE YAZILMADAN once, tarih alanlarinin
+    # ctx / predictor_window / label_window / elle-dogrulanmis beklenen
+    # degerlerle birebir tutarli oldugunu ve Kozan'in legacy tarihlerini
+    # icermedigini dogrula. Kozan icin hicbir sey yapmaz.
+    assert_metadata_dates_consistent(stats_data, ctx)
+
     stats_path.write_text(json.dumps(stats_data, indent=2, default=str), encoding="utf-8")
 
-    summary_path = write_summary(out_dir, result, stats_path)
+    summary_path = write_summary(out_dir, result, stats_path, effective_label_start, effective_label_end)
+
+    # FAIL-FAST (madde 7): YAZILMIS metin ciktilarini tarayip Kozan'in legacy
+    # tarih dizgilerinden herhangi birinin sizip sizmadigini dogrula. Bu,
+    # alan-bazli kontrolun yakalayamayacagi serbest-metin sizintilarini
+    # (markdown cumleleri, warnings[] listesi, vb.) yakalar.
+    assert_no_stale_kozan_dates_in_outputs([stats_path, summary_path], ctx)
 
     log.info("Dataset satir sayisi: %d (valid_for_modeling=%d)", len(df), result["counters"]["valid_modeling_cells"])
     log.info("Stats: %s", stats_path)
@@ -2084,6 +2408,31 @@ def main(
         "row_count": len(df),
         "valid_modeling_cells": result["counters"]["valid_modeling_cells"],
     }
+
+
+def run_step8a(ctx: dict | None = None, force: bool = False, **kwargs) -> dict:
+    """
+    Step8A: label-honest ~500 m MCD64A1-cell modeling dataset olusturur.
+
+    ctx: None ise (varsayilan) legacy Kozan davranisi BIREBIR korunur --
+        outputs/step8a'ya yazar, girdileri legacy Kozan yollarindan (data/,
+        outputs/step5, outputs/step5c, outputs/step7d, outputs/step7e,
+        data/landcover) kesfeder. Verilirse (Kozan-disi, or. manavgat_2021):
+        outputs/experiments/<experiment_id>/step8a'ya yazar; TUM girdiler
+        (label, referans grid, predictor'lar, landcover, fused source mask)
+        o deneyin namespaced dizinlerinden cozulur -- Kozan'in legacy
+        paylasilan dosyalarina ASLA dokunulmaz.
+
+    30 m piksel HICBIR ZAMAN label olarak KULLANILMAZ; hucre seviyesi her
+    zaman MCD64A1'in (yaklasik) native ~500 m gridine (block/tile
+    reconstruction ile) sabittir (bkz. compute_block_size_pixels()).
+    """
+    use_ctx = ctx is not None and not ctx.get("is_kozan")
+    output_dir_arg = str(ctx["step8a_output_dir"]) if use_ctx else STEP8A_OUTPUT_DIR
+    result = main(output_dir_arg=output_dir_arg, force=force, ctx=ctx if use_ctx else None, **kwargs)
+    if ctx is not None:
+        result["experiment_id"] = ctx["experiment_id"]
+    return result
 
 
 def parse_args(argv=None) -> argparse.Namespace:

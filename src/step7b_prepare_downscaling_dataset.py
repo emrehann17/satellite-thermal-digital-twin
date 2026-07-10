@@ -68,8 +68,21 @@ ELEVATION_MIN, ELEVATION_MAX = -500.0, 9000.0
 # =============================================================================
 # Target + feature kaynak çözümleme
 # =============================================================================
-def resolve_target() -> tuple[Path | None, int]:
-    """Landsat LST target rasterını çözer (öncelik: step5 celsius -> current_period)."""
+def resolve_target(ctx: dict | None = None) -> tuple[Path | None, int]:
+    """Landsat LST target rasterını çözer (öncelik: step5 celsius -> current_period).
+
+    ctx: None ise (varsayılan) legacy Kozan keşfi. Verilirse (Kozan-dışı,
+        or. manavgat_2021) YALNIZCA ctx["step5_output_dir"] altına bakar --
+        legacy outputs/step5/ veya data/current_period/ yollarına ASLA
+        dokunmaz.
+    """
+    if ctx is not None:
+        candidates = [(ctx["step5_output_dir"] / "current_period_median_celsius.tif", 1)]
+        for path, band in candidates:
+            if path.exists():
+                return path, band
+        return None, 1
+
     candidates = [
         (BASE_DIR / "outputs" / "step5" / "current_period_median_celsius.tif", 1),
         (BASE_DIR / "data" / "current_period" / "landsat_current_period_60days.tif", 1),
@@ -90,6 +103,7 @@ def resolve_target() -> tuple[Path | None, int]:
 def build_feature_registry(
     include_tvdi: bool = STEP7B_INCLUDE_OPTIONAL_TVDI_FEATURES,
     include_anomaly: bool = STEP7B_INCLUDE_OPTIONAL_ANOMALY_FEATURES,
+    ctx: dict | None = None,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """
     Feature kaynaklarını çözer.
@@ -97,10 +111,36 @@ def build_feature_registry(
     Döner: (core_features, optional_features, missing_optional)
     Her giriş: {name, path, band, resampling}
     resampling: "bilinear" (sürekli) | "nearest" (kategorik/binary)
+
+    ctx: None ise (varsayılan) legacy Kozan keşfi (BASE_DIR/outputs/step5,
+        BASE_DIR/outputs/step5c, BASE_DIR/data/...). Verilirse (Kozan-dışı):
+        Step5/Step5C kaynakları TAMAMEN namespaced (ctx["step5_output_dir"],
+        ctx["step5c_output_dir"], ctx["ndvi_current_dir"],
+        ctx["modis_input_dir"]) okunur -- legacy Kozan yollarına ASLA
+        dokunulmaz. DEM (elevation/slope) ARTIK ctx["dem_input_dir"]'den
+        okunur -- Kozan için bu paylaşılan (shared) data/dem/'dir
+        (değişmedi), Kozan-dışı deneyler için ise NAMESPACED
+        (outputs/experiments/<experiment_id>/data/dem/,
+        scripts/prepare_dem_for_experiment.py ile hazırlanır) -- çünkü
+        paylaşılan data/dem/ yalnızca Kozan'ın AOI'sini kapsar ve diğer
+        deneylerle coğrafi olarak örtüşmez. Landcover,
+        ctx["landcover_aligned_path"] mevcutsa (Step6A gate-input çıktısı)
+        onu kullanır; yoksa hiçbir landcover eklenmez (Kozan'ın paylaşılan
+        data/landcover/ dizinine ASLA düşülmez).
     """
-    data = BASE_DIR / "data"
-    s5 = BASE_DIR / "outputs" / "step5"
-    s5c = BASE_DIR / "outputs" / "step5c"
+    data = BASE_DIR / "data"  # yalnızca Kozan legacy DEM fallback + landcover için
+    if ctx is not None:
+        s5 = ctx["step5_output_dir"]
+        s5c = ctx["step5c_output_dir"]
+        modis_search_dirs = [ctx["modis_input_dir"]]
+        ndvi_current = ctx["ndvi_current_dir"] / "current_ndvi_median.tif"
+        landcover_override = ctx.get("landcover_aligned_path")
+    else:
+        s5 = BASE_DIR / "outputs" / "step5"
+        s5c = BASE_DIR / "outputs" / "step5c"
+        modis_search_dirs = [data / "modis"]
+        ndvi_current = data / "ndvi_current_period" / "current_ndvi_median.tif"
+        landcover_override = None
 
     def first_existing(paths: list[Path]) -> Path | None:
         for p in paths:
@@ -111,15 +151,21 @@ def build_feature_registry(
     core: list[dict] = []
 
     # 1) MODIS LST context (mean zorunlu çekirdek; std/zscore varsa eklenir)
-    modis_mean = first_existing([
-        s5 / "modis_lst_mean_celsius_resampled.tif",
-        data / "modis" / "modis_lst_dogu_akdeniz_4y_summer_mean.tif",
-    ])
+    modis_mean_candidates = [s5 / "modis_lst_mean_celsius_resampled.tif"]
+    for d in modis_search_dirs:
+        modis_mean_candidates.append(d / "modis_lst_dogu_akdeniz_4y_summer_mean.tif")
+        if d.exists():
+            modis_mean_candidates.extend(sorted(d.glob("*mean*.tif")))
+    modis_mean = first_existing(modis_mean_candidates)
     if modis_mean is not None:
         core.append({"name": "modis_lst_mean_celsius", "path": modis_mean,
                      "band": 1, "resampling": "bilinear", "required": False})
 
-    modis_std = first_existing([s5 / "modis_lst_std_celsius_resampled.tif"])
+    modis_std_candidates = [s5 / "modis_lst_std_celsius_resampled.tif"]
+    for d in modis_search_dirs:
+        if d.exists():
+            modis_std_candidates.extend(sorted(d.glob("*std*.tif")))
+    modis_std = first_existing(modis_std_candidates)
     if modis_std is not None:
         core.append({"name": "modis_lst_std_celsius", "path": modis_std,
                      "band": 1, "resampling": "bilinear", "required": False})
@@ -130,30 +176,39 @@ def build_feature_registry(
                      "band": 1, "resampling": "bilinear", "required": False})
 
     # 2) NDVI
-    ndvi = first_existing([data / "ndvi_current_period" / "current_ndvi_median.tif"])
+    ndvi = first_existing([ndvi_current])
     if ndvi is not None:
         core.append({"name": "ndvi", "path": ndvi, "band": 1,
                      "resampling": "bilinear", "required": STEP7B_REQUIRE_NDVI})
 
     # 3) DEM elevation + slope
-    elevation = first_existing([data / "dem" / "elevation.tif"])
+    # ctx verilmisse (Kozan-dışı): ctx["dem_input_dir"] -- artık NAMESPACED
+    # (bkz. core/experiment_context.py + scripts/prepare_dem_for_experiment.py).
+    # Kozan-dışı deneylerin data/dem/ (Kozan'a özel, coğrafi olarak farklı
+    # AOI) okuması/oraya düşmesi ENGELLENIR. ctx yoksa (legacy Kozan):
+    # data/dem/ (paylaşılan, değişmedi).
+    dem_dir = ctx["dem_input_dir"] if ctx is not None else (data / "dem")
+    elevation = first_existing([dem_dir / "elevation.tif"])
     if elevation is not None:
         core.append({"name": "elevation", "path": elevation, "band": 1,
                      "resampling": "bilinear", "required": STEP7B_REQUIRE_DEM})
-    slope = first_existing([data / "dem" / "slope.tif"])
+    slope = first_existing([dem_dir / "slope.tif"])
     if slope is not None:
         core.append({"name": "slope", "path": slope, "band": 1,
                      "resampling": "bilinear", "required": STEP7B_REQUIRE_DEM})
 
     # 4) Land cover (kategorik -> nearest)
-    landcover = first_existing([
-        data / "landcover" / "landcover_esa_worldcover_v200.tif",
-    ])
-    if landcover is None and (data / "landcover").exists():
-        for p in sorted((data / "landcover").glob("*.tif")):
-            if "(" not in p.name:
-                landcover = p
-                break
+    if landcover_override is not None:
+        landcover = landcover_override if landcover_override.exists() else None
+    else:
+        landcover = first_existing([
+            data / "landcover" / "landcover_esa_worldcover_v200.tif",
+        ])
+        if landcover is None and (data / "landcover").exists():
+            for p in sorted((data / "landcover").glob("*.tif")):
+                if "(" not in p.name:
+                    landcover = p
+                    break
     if landcover is not None:
         core.append({"name": "landcover", "path": landcover, "band": 1,
                      "resampling": "nearest", "required": False})
@@ -223,6 +278,183 @@ def read_feature_into_target_window(
 # =============================================================================
 # Ana veri seti üretimi
 # =============================================================================
+# =============================================================================
+# Deney-farkında (experiment-aware) girdi hizalama (Kozan-dışı deneyler için)
+# =============================================================================
+def align_feature_to_reference(
+    feature_name: str,
+    source_path: Path,
+    resampling: str,
+    ref_w: int, ref_h: int, ref_crs, ref_transform,
+    output_dir: Path,
+    force: bool = False,
+) -> tuple[Path, dict]:
+    """
+    Bir feature rasterini referans (Step5 current_period_median_celsius.tif)
+    gridine ONCEDEN (pencere-pencere degil, TEK SEFERDE) hizalar.
+
+    Zaten hizali ise (grid birebir eslesiyorsa) kaynak dosya CANONICAL isimle
+    (aligned_inputs/<name>.tif) KOPYALANIR (kullanılmaz/atlanmaz -- Step7D
+    yalnızca bu canonical yolu arar). Hizalanmasi gerekiyorsa da AYNI
+    canonical isimle (aligned_inputs/<name>.tif, "_aligned" son eki OLMADAN)
+    yazilir; kategorik ("nearest") ozellikler icin nearest-neighbor, sürekli
+    ("bilinear") ozellikler icin bilinear resampling kullanilir.
+
+    Döner: (kullanilacak_path, diagnostic_dict). diagnostic_dict; kaynak
+    grid bilgisi, hedef gridle orani (overlap), ve gecerli piksel sayisini
+    icerir -- boylece "MODIS 1 km ile Landsat 30 m'nin nasil hizalandigi"
+    Step7B calistirilmadan ONCE seffaf bir sekilde raporlanir.
+    """
+    with rasterio.open(source_path) as src:
+        src_w, src_h, src_crs, src_t = src.width, src.height, src.crs, src.transform
+        src_nodata = src.nodata
+        src_dtype = src.dtypes[0]
+        src_arr = src.read(1, masked=True)
+        src_valid_count = int((~np.ma.getmaskarray(src_arr)).sum())
+
+    diag = {
+        "name": feature_name,
+        "resampling": resampling,
+        "source_path": str(source_path),
+        "source_shape_hw": [src_h, src_w],
+        "source_crs": str(src_crs),
+        "source_transform": [src_t.a, src_t.b, src_t.c, src_t.d, src_t.e, src_t.f],
+        "source_nodata": src_nodata,
+        "source_valid_pixel_count": src_valid_count,
+        "source_total_pixel_count": int(src_w * src_h),
+    }
+
+    same_grid = (
+        src_crs == ref_crs and src_w == ref_w and src_h == ref_h and src_t == ref_transform
+    )
+    out_path = output_dir / f"{feature_name}.tif"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if same_grid:
+        # ÖNEMLİ (bug fix, aynı DEM hazırlama script'indeki gibi): grid zaten
+        # eşleşse bile dosya CANONICAL isimle (aligned_inputs/<name>.tif)
+        # KOPYALANIR. Önceden bu durumda hiçbir dosya yazılmıyordu ve Step7D
+        # "aligned_inputs/<name>.tif bulunamadı" ile karşılaşıyordu --
+        # Step7B'nin log'u "başarılı" görünse de.
+        if not out_path.exists() or force:
+            import shutil
+            shutil.copyfile(source_path, out_path)
+        diag.update({
+            "aligned": False,
+            "aligned_path": str(out_path),
+            "reused_existing": out_path.exists() and not force,
+            "aligned_valid_pixel_count": src_valid_count,
+            "aligned_valid_fraction": (
+                src_valid_count / (ref_w * ref_h) if ref_w * ref_h else 0.0
+            ),
+        })
+        return out_path, diag
+
+    if out_path.exists() and not force:
+        with rasterio.open(out_path) as a:
+            a_arr = a.read(1, masked=True)
+            aligned_valid = int((~np.ma.getmaskarray(a_arr)).sum())
+        diag.update({
+            "aligned": True, "aligned_path": str(out_path), "reused_existing": True,
+            "aligned_valid_pixel_count": aligned_valid,
+            "aligned_valid_fraction": aligned_valid / (ref_w * ref_h) if ref_w * ref_h else 0.0,
+        })
+        return out_path, diag
+
+    resampling_enum = Resampling.nearest if resampling == "nearest" else Resampling.bilinear
+    dst_dtype = src_dtype if resampling == "nearest" else "float32"
+    if src_nodata is not None:
+        dst_nodata = src_nodata
+    else:
+        dst_nodata = 0 if resampling == "nearest" else float("nan")
+
+    dst = np.full((ref_h, ref_w), dst_nodata, dtype=dst_dtype)
+    with rasterio.open(source_path) as src:
+        reproject(
+            source=rasterio.band(src, 1),
+            destination=dst,
+            src_transform=src_t, src_crs=src_crs,
+            dst_transform=ref_transform, dst_crs=ref_crs,
+            dst_nodata=dst_nodata,
+            resampling=resampling_enum,
+        )
+
+    out_profile = {
+        "driver": "GTiff", "width": ref_w, "height": ref_h, "count": 1,
+        "dtype": dst_dtype, "crs": ref_crs, "transform": ref_transform,
+        "nodata": dst_nodata, "compress": "deflate",
+    }
+    with rasterio.open(out_path, "w", **out_profile) as dst_ds:
+        dst_ds.write(dst, 1)
+
+    if isinstance(dst_nodata, float) and np.isnan(dst_nodata):
+        valid_mask = np.isfinite(dst)
+    else:
+        valid_mask = (dst != dst_nodata)
+    aligned_valid = int(valid_mask.sum())
+
+    diag.update({
+        "aligned": True,
+        "aligned_path": str(out_path),
+        "reused_existing": False,
+        "aligned_valid_pixel_count": aligned_valid,
+        "aligned_valid_fraction": aligned_valid / (ref_w * ref_h) if ref_w * ref_h else 0.0,
+    })
+    log.info(
+        "[align] %s: kaynak %dx%d (%s) -> referans %dx%d, resampling=%s, "
+        "hizalı geçerli piksel oranı=%.4f -> %s",
+        feature_name, src_h, src_w, src_crs, ref_h, ref_w, resampling,
+        diag["aligned_valid_fraction"], out_path,
+    )
+    return out_path, diag
+
+
+def align_features_to_reference(
+    ctx: dict,
+    target_path: Path,
+    core_features: list[dict],
+    optional_features: list[dict],
+    force: bool = False,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """
+    Kozan-dışı (deney-farkında) çalıştırmalar için: TÜM feature rasterlarını
+    (MODIS mean/std dahil) Step7B'nin kendi pencere-pencere reproject
+    mantığına GÜVENMEDEN, önceden Step5 referans gridine (target_path)
+    hizalar. Hizalanmış dosyalar
+    outputs/experiments/<experiment_id>/step7b/aligned_inputs/ altına
+    yazılır (debug için saklanır).
+
+    MODIS (1 km) gibi çok daha kaba çözünürlüklü sürekli rasterlar için
+    bilinear, landcover gibi kategorik rasterlar için nearest-neighbor
+    kullanılır (build_feature_registry'nin zaten atadığı "resampling" alanı
+    ile tutarlı).
+
+    Döner: (aligned_core_features, aligned_optional_features, alignment_diagnostics)
+    """
+    output_dir = ctx["step7b_output_dir"] / "aligned_inputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with rasterio.open(target_path) as ref:
+        ref_w, ref_h, ref_crs, ref_transform = ref.width, ref.height, ref.crs, ref.transform
+
+    diagnostics: list[dict] = []
+
+    def _align_list(features: list[dict]) -> list[dict]:
+        aligned = []
+        for feat in features:
+            aligned_path, diag = align_feature_to_reference(
+                feat["name"], Path(feat["path"]), feat["resampling"],
+                ref_w, ref_h, ref_crs, ref_transform, output_dir, force=force,
+            )
+            diagnostics.append(diag)
+            aligned.append({**feat, "path": aligned_path})
+        return aligned
+
+    aligned_core = _align_list(core_features)
+    aligned_optional = _align_list(optional_features)
+    return aligned_core, aligned_optional, diagnostics
+
+
 def build_dataset(
     target_path: Path,
     target_band: int,
@@ -632,11 +864,23 @@ def write_stats_and_summary(
     stratify: bool,
     seed: int,
     warnings_list: list[str],
+    alignment_diagnostics: list[dict] | None = None,
+    aligned_inputs_dir: Path | None = None,
 ) -> tuple[Path, Path]:
     """downscaling_dataset_stats.json + downscaling_dataset_summary.md yazar."""
     required_features = [f["name"] for f in core_features if f.get("required")]
     optional_used = [f["name"] for f in optional_features]
     optional_missing = [m["name"] for m in missing_optional]
+
+    drop_keys = [
+        "dropped_nan_target", "dropped_invalid_target_range",
+        "dropped_nan_required_features", "dropped_invalid_ndvi",
+        "dropped_invalid_slope", "dropped_invalid_elevation",
+    ]
+    drop_summary = {k: counters.get(k, 0) for k in drop_keys}
+    dominant_drop_filter = (
+        max(drop_summary, key=drop_summary.get) if any(drop_summary.values()) else None
+    )
 
     stats = {
         "step": "step7b_prepare_downscaling_dataset",
@@ -646,6 +890,11 @@ def write_stats_and_summary(
         "target_band": target_band,
         "target_name": "landsat_lst_celsius",
         "feature_paths": {f["name"]: str(f["path"]) for f in core_features + optional_features},
+        "aligned_inputs_dir": str(aligned_inputs_dir) if aligned_inputs_dir else None,
+        "aligned_feature_paths": (
+            {f["name"]: str(f["path"]) for f in core_features + optional_features}
+            if aligned_inputs_dir else None
+        ),
         "reference_grid": grid_info,
         "tile_size": tile_size,
         "window_count": counters.get("window_count"),
@@ -658,6 +907,8 @@ def write_stats_and_summary(
         "dropped_invalid_ndvi": counters.get("dropped_invalid_ndvi"),
         "dropped_invalid_slope": counters.get("dropped_invalid_slope"),
         "dropped_invalid_elevation": counters.get("dropped_invalid_elevation"),
+        "dominant_drop_filter": dominant_drop_filter,
+        "alignment_diagnostics": alignment_diagnostics or [],
         "output_files": out_result.get("output_files"),
         "columns": out_result.get("columns"),
         "parquet_written": out_result.get("parquet_written"),
@@ -750,9 +1001,13 @@ def main(
     force: bool = False,
     include_optional_tvdi: bool = STEP7B_INCLUDE_OPTIONAL_TVDI_FEATURES,
     include_optional_anomaly: bool = STEP7B_INCLUDE_OPTIONAL_ANOMALY_FEATURES,
+    ctx: dict | None = None,
 ) -> dict:
     log.info("=" * 60)
-    log.info("STEP 7B BAŞLIYOR (MODIS downscaling training dataset)")
+    log.info(
+        "STEP 7B BAŞLIYOR (MODIS downscaling training dataset)%s",
+        f" [experiment={ctx['experiment_id']}]" if ctx else "",
+    )
     log.info("=" * 60)
 
     warnings_list: list[str] = []
@@ -772,18 +1027,23 @@ def main(
             + "). Üzerine yazmak için --force verin."
         )
 
-    target_path, target_band = resolve_target()
+    target_path, target_band = resolve_target(ctx)
     if target_path is None:
         raise SystemExit(
             "Landsat LST target rasterı bulunamadı. Beklenen: "
-            "outputs/step5/current_period_median_celsius.tif veya "
-            "data/current_period/landsat_current_period_*days.tif"
+            + (
+                f"{ctx['step5_output_dir']}/current_period_median_celsius.tif"
+                if ctx else
+                "outputs/step5/current_period_median_celsius.tif veya "
+                "data/current_period/landsat_current_period_*days.tif"
+            )
         )
     log.info("Target: %s (band %s)", target_path, target_band)
 
     core_features, optional_features, missing_optional = build_feature_registry(
         include_tvdi=include_optional_tvdi,
         include_anomaly=include_optional_anomaly,
+        ctx=ctx,
     )
     log.info(
         "Core features: %s | Optional used: %s | Optional missing: %s",
@@ -791,6 +1051,45 @@ def main(
         [f["name"] for f in optional_features],
         [m["name"] for m in missing_optional],
     )
+
+    # --- Deney-farkında (Kozan-dışı) girdi hizalama ---
+    # MODIS (1 km) gibi kaba çözünürlüklü rasterları Step5 referans gridine
+    # (target_path) ÖNCEDEN hizalar (bilinear/nearest -- feature tipine göre),
+    # pencere-pencere reproject'e GÜVENMEZ. Hizalanmış dosyalar debug için
+    # outputs/experiments/<id>/step7b/aligned_inputs/ altına yazılır.
+    alignment_diagnostics: list[dict] = []
+    use_ctx_alignment = ctx is not None and not ctx.get("is_kozan")
+    if use_ctx_alignment:
+        log.info("Deney-farkında girdi hizalama başlıyor (aligned_inputs/)...")
+        core_features, optional_features, alignment_diagnostics = align_features_to_reference(
+            ctx, target_path, core_features, optional_features, force=force,
+        )
+        with rasterio.open(target_path) as tsrc:
+            target_valid_mask = np.isfinite(
+                tsrc.read(target_band, masked=True).astype("float32").filled(np.nan)
+            )
+        target_valid_count = int(target_valid_mask.sum())
+        for diag in alignment_diagnostics:
+            with rasterio.open(diag["aligned_path"]) as fsrc:
+                farr = fsrc.read(1, masked=True)
+                fvalid = ~np.ma.getmaskarray(farr)
+                fvalid = fvalid & np.isfinite(np.ma.filled(farr.astype("float64"), np.nan))
+            overlap = int((target_valid_mask & fvalid).sum())
+            diag["overlap_with_target_pixel_count"] = overlap
+            diag["overlap_with_target_fraction_of_target_valid"] = (
+                overlap / target_valid_count if target_valid_count else 0.0
+            )
+            log.info(
+                "[align-overlap] %s: target ile örtüşen geçerli piksel=%d "
+                "(target geçerli piksellerinin %.4f'ü)",
+                diag["name"], overlap, diag["overlap_with_target_fraction_of_target_valid"],
+            )
+            if overlap == 0:
+                log.warning(
+                    "[align-overlap] %s: target ile SIFIR örtüşme! Bu özellik "
+                    "muhtemelen yanlış AOI/grid kapsıyor (or. paylaşılan DEM "
+                    "farklı bir bölgeyi kapsıyorsa).", diag["name"],
+                )
 
     # Zorunlu feature eksikse uyar (NDVI/DEM)
     core_names = {f["name"] for f in core_features}
@@ -851,8 +1150,33 @@ def main(
         target_path, target_band, core_features, optional_features, missing_optional,
         counters, out_result, grid_info, tile_size, max_samples,
         STEP7B_SAMPLE_FRACTION, STEP7B_STRATIFY_BY_MODIS_PIXEL,
-        STEP7B_RANDOM_SEED, warnings_list,
+        STEP7B_RANDOM_SEED, warnings_list, alignment_diagnostics=alignment_diagnostics,
+        aligned_inputs_dir=(ctx["step7b_output_dir"] / "aligned_inputs") if use_ctx_alignment else None,
     )
+
+    if out_result.get("final_sample_count", 0) == 0:
+        drop_keys = [
+            "dropped_nan_target", "dropped_invalid_target_range",
+            "dropped_nan_required_features", "dropped_invalid_ndvi",
+            "dropped_invalid_slope", "dropped_invalid_elevation",
+        ]
+        drop_summary = {k: counters.get(k, 0) for k in drop_keys}
+        dominant_filter = max(drop_summary, key=drop_summary.get) if any(drop_summary.values()) else None
+        zero_overlap_features = [
+            d["name"] for d in alignment_diagnostics
+            if d.get("overlap_with_target_pixel_count") == 0
+        ]
+        raise SystemExit(
+            "Step7B FAIL-FAST: final_sample_count=0 -- eğitim verisi üretilemedi. "
+            f"Piksel bırakma sayaçları: {drop_summary} (en çok düşüren: {dominant_filter}). "
+            + (
+                f"Target ile SIFIR örtüşen özellikler: {zero_overlap_features} -- "
+                "muhtemelen bu özellik(ler) yanlış AOI/grid kapsıyor. "
+                if zero_overlap_features else
+                "Hizalama diagnostikleri için: "
+            )
+            + f"{stats_path}"
+        )
 
     log.info("Final sample count: %s", out_result.get("final_sample_count"))
     log.info("Stats: %s", stats_path)
@@ -866,7 +1190,35 @@ def main(
         "stats_path": str(stats_path),
         "summary_path": str(summary_path),
         "output_files": out_result.get("output_files"),
+        "experiment_id": ctx["experiment_id"] if ctx else None,
     }
+
+
+def run_step7b(ctx: dict | None = None, force: bool = False, **kwargs) -> dict:
+    """
+    Step7B MODIS downscaling training dataset'ini uretir.
+
+    ctx: None ise (varsayilan) legacy Kozan davranisi BIREBIR korunur.
+        Verilirse (Kozan-disi), outputs/experiments/<experiment_id>/step7b'ye
+        yazar ve tum girdileri (target/NDVI/anomaly/TVDI) namespaced
+        Step5/Step5C'den okur (DEM shared/read-only, landcover Step6A
+        gate-input'undan -- bkz. build_feature_registry docstring).
+    """
+    global OUTPUTS_DIR
+
+    use_ctx = ctx is not None and not ctx.get("is_kozan")
+    saved = OUTPUTS_DIR
+    try:
+        if use_ctx:
+            OUTPUTS_DIR = ctx["step7b_output_dir"]
+            OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+            log.info(
+                "[experiment=%s] Step7B ctx override aktif. output_dir=%s",
+                ctx["experiment_id"], OUTPUTS_DIR,
+            )
+        return main(force=force, ctx=ctx if use_ctx else None, **kwargs)
+    finally:
+        OUTPUTS_DIR = saved
 
 
 def parse_args(argv=None) -> argparse.Namespace:

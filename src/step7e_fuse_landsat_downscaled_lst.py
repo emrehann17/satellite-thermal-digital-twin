@@ -144,11 +144,16 @@ def validate_grid_alignment(reference_path: Path, other_paths: dict[str, Path]) 
     return ref
 
 
-def load_step7d_context() -> dict:
-    """Step7D metadata/stats'tan (varsa) bilgilendirici baglam okur; kritik degildir."""
+def load_step7d_context(ctx: dict | None = None) -> dict:
+    """Step7D metadata/stats'tan (varsa) bilgilendirici baglam okur; kritik degildir.
+
+    ctx: None ise (varsayılan) legacy outputs/step7d/. Verilirse (Kozan-dışı)
+        ctx["step7d_output_dir"] -- legacy Kozan yoluna dokunmaz.
+    """
     context: dict = {"metadata": None, "stats": None, "spatial_calibration_note": None}
-    meta_path = BASE_DIR / "outputs" / "step7d" / "downscaling_prediction_metadata.json"
-    stats_path = BASE_DIR / "outputs" / "step7d" / "downscaling_prediction_stats.json"
+    step7d_dir = ctx["step7d_output_dir"] if ctx is not None else (BASE_DIR / "outputs" / "step7d")
+    meta_path = step7d_dir / "downscaling_prediction_metadata.json"
+    stats_path = step7d_dir / "downscaling_prediction_stats.json"
     if meta_path.exists():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -517,15 +522,20 @@ def write_metadata(
     write_diagnostics: bool,
     plots_written: list[str],
     warnings_list: list[str],
+    ctx: dict | None = None,
 ) -> Path:
+    step7d_output_dir = (
+        ctx["step7d_output_dir"] if ctx else (BASE_DIR / "outputs" / "step7d")
+    )
     payload = {
         "created_at": datetime.now().isoformat(),
         "script": "step7e_fuse_landsat_downscaled_lst.py",
+        "experiment_id": ctx["experiment_id"] if ctx else None,
         "observed_landsat_path": str(observed_path),
         "downscaled_lst_path": str(downscaled_path),
         "downscaled_valid_mask_path": str(downscaled_mask_path),
         "step7d_metadata_path": str(
-            BASE_DIR / "outputs" / "step7d" / "downscaling_prediction_metadata.json"
+            step7d_output_dir / "downscaling_prediction_metadata.json"
         ),
         "fusion_rule": (
             "fused = observed_landsat where finite and in "
@@ -688,12 +698,17 @@ def main(
     force: bool = False,
     write_diagnostics: bool = STEP7E_WRITE_DIAGNOSTICS,
     make_plots: bool = False,
+    ctx: dict | None = None,
 ) -> dict:
     log.info("=" * 60)
-    log.info("STEP 7E BASLIYOR (gozlemlenen Landsat + Step7D downscaled LST fusion)")
+    log.info(
+        "STEP 7E BASLIYOR (gozlemlenen Landsat + Step7D downscaled LST fusion)%s",
+        f" [experiment={ctx['experiment_id']}]" if ctx else "",
+    )
     log.info("=" * 60)
 
     out_dir = BASE_DIR / output_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
     required_outputs = [
         out_dir / "fused_lst_celsius.tif",
         out_dir / "fused_lst_source_mask.tif",
@@ -734,7 +749,7 @@ def main(
         {"downscaled_lst": downscaled_path, "downscaled_valid_mask": downscaled_mask_path},
     )
 
-    step7d_context = load_step7d_context()
+    step7d_context = load_step7d_context(ctx)
 
     run_result = run_fusion(
         observed_path, downscaled_path, downscaled_mask_path,
@@ -751,7 +766,7 @@ def main(
     metadata_path_out = write_metadata(
         out_dir, observed_path, downscaled_path, downscaled_mask_path,
         step7d_context, run_result, tile_size, write_diagnostics,
-        plots_written, warnings_list,
+        plots_written, warnings_list, ctx=ctx,
     )
     stats_path_out = write_stats(out_dir, run_result, tile_size)
     summary_path_out = write_summary(out_dir, run_result, step7d_context, warnings_list)
@@ -780,7 +795,50 @@ def main(
         "stats_path": str(stats_path_out),
         "summary_path": str(summary_path_out),
         "stats": run_result["stats"],
+        "experiment_id": ctx["experiment_id"] if ctx else None,
     }
+
+
+def run_step7e(ctx: dict | None = None, force: bool = False, **kwargs) -> dict:
+    """
+    Gozlemlenen Landsat current LST ile Step7D downscaled LST'yi fuse eder.
+
+    Observed-priority kural DEGISMEZ: gozlemlenen pikseller ASLA uzerine
+    yazilmaz, yalnizca bosluklar downscaled LST ile doldurulur (bu kural
+    run_fusion() icinde, Kozan/Manavgat FARK ETMEKSIZIN aynen calisir).
+
+    ctx: None ise (varsayilan) legacy Kozan davranisi BIREBIR korunur.
+        Verilirse (Kozan-disi): gozlemlenen LST ctx["step5_output_dir"]'den,
+        downscaled LST/mask ctx["step7d_output_dir"]'den okunur, cikti
+        ctx["step7e_output_dir"]'e yazilir -- main()'in zaten var olan
+        `observed_path_arg`/`downscaled_path_arg`/`downscaled_mask_path_arg`/
+        `output_dir` parametreleri kullanilir (ic mantik DEGISTIRILMEDI).
+    """
+    use_ctx = ctx is not None and not ctx.get("is_kozan")
+    kwargs_final = dict(kwargs)
+    if use_ctx:
+        ctx["step7e_output_dir"].mkdir(parents=True, exist_ok=True)
+        kwargs_final.setdefault(
+            "observed_path_arg",
+            str(ctx["step5_output_dir"] / "current_period_median_celsius.tif"),
+        )
+        kwargs_final.setdefault(
+            "downscaled_path_arg",
+            str(ctx["step7d_output_dir"] / "downscaled_lst_celsius.tif"),
+        )
+        kwargs_final.setdefault(
+            "downscaled_mask_path_arg",
+            str(ctx["step7d_output_dir"] / "downscaled_lst_valid_mask.tif"),
+        )
+        kwargs_final.setdefault("output_dir", str(ctx["step7e_output_dir"]))
+        log.info(
+            "[experiment=%s] Step7E ctx override aktif. observed=%s, "
+            "downscaled=%s, output_dir=%s", ctx["experiment_id"],
+            kwargs_final["observed_path_arg"], kwargs_final["downscaled_path_arg"],
+            kwargs_final["output_dir"],
+        )
+
+    return main(force=force, ctx=ctx if use_ctx else None, **kwargs_final)
 
 
 def parse_args(argv=None) -> argparse.Namespace:

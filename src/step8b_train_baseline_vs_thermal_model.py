@@ -186,7 +186,11 @@ SENSITIVITY_POPULATIONS = {"all_valid", "cropland_dominant"}
 # =============================================================================
 def load_dataset(input_arg: str | None) -> tuple[pd.DataFrame, Path]:
     parquet_path = BASE_DIR / (input_arg or STEP8B_INPUT_DATASET)
-    csv_path = BASE_DIR / "outputs" / "step8a" / "step8a_500m_modeling_dataset.csv"
+    # CSV fallback: AYNI dizin, .csv uzantisi (parquet_path'in kendi
+    # dizininden turetilir -- hardcoded "outputs/step8a" DEGIL, boylece
+    # namespaced (Kozan-disi) bir input_arg verildiginde de dogru dizine
+    # bakar).
+    csv_path = parquet_path.with_suffix(".csv")
 
     if parquet_path.exists():
         try:
@@ -1218,6 +1222,29 @@ def main(
         "delta_auc_path": str(delta_auc_path),
         "monthly_path": str(monthly_path),
     }
+
+
+def run_step8b(ctx: dict | None = None, force: bool = False, **kwargs) -> dict:
+    """
+    Step8B: hucre seviyesinde baseline vs. baseline+thermal karsilastirmasini
+    egitir (spatial-block CV).
+
+    ctx: None ise (varsayilan) legacy Kozan davranisi BIREBIR korunur --
+        outputs/step8b'ye yazar, outputs/step8a/'dan okur. Verilirse
+        (Kozan-disi): outputs/experiments/<experiment_id>/step8b'ye yazar,
+        outputs/experiments/<experiment_id>/step8a/'dan okur -- Kozan'in
+        legacy paylasilan Step8A veri setine ASLA dokunulmaz.
+    """
+    use_ctx = ctx is not None and not ctx.get("is_kozan")
+    output_dir_arg = str(ctx["step8b_output_dir"]) if use_ctx else STEP8B_OUTPUT_DIR
+    input_arg = (
+        str(ctx["step8a_output_dir"] / "step8a_500m_modeling_dataset.parquet")
+        if use_ctx else None
+    )
+    result = main(input_arg=input_arg, output_dir_arg=output_dir_arg, force=force, **kwargs)
+    if ctx is not None:
+        result["experiment_id"] = ctx["experiment_id"]
+    return result
 
 
 def parse_args(argv=None) -> argparse.Namespace:

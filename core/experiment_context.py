@@ -137,6 +137,25 @@ def build_experiment_context(experiment_id: str) -> dict:
         "ndvi_baseline_dir": data_root / "ndvi_timeseries",
         "ndvi_current_dir": data_root / "ndvi_current_period",
         "enable_modis_context": False if not is_kozan else None,  # bkz. NOT asagida
+        # DEM (elevation/slope): Kozan icin PAYLASILAN/SALT-OKUNUR global
+        # asset (data/dem/elevation.tif + data/dem/slope.tif) -- legacy
+        # davranis DEGISMEDI. Kozan-disi deneyler icin (or. manavgat_2021)
+        # ARTIK TAMAMEN NAMESPACED: outputs/experiments/<experiment_id>/data/dem/
+        # -- cunku paylasilan data/dem/ yalnizca Kozan'in AOI'sini kapsiyor ve
+        # Manavgat ile COGRAFI OLARAK ORTUSMUYOR (bkz.
+        # scripts/prepare_dem_for_experiment.py). Manavgat-turetilmis hicbir
+        # DEM ciktisi Kozan'in paylasilan dizinine YAZILMAZ.
+        "dem_input_dir": data_root / "dem",
+        "dem_is_shared_read_only": is_kozan,
+        # Landcover: Kozan-disi deneyler icin Step6A gate-input asamasinda
+        # zaten uretilmis, referans gride hizali landcover reuse edilir
+        # (bkz. src/step6a_prepare_gate_inputs.py). Kozan icin bu alan None
+        # birakilir -- Kozan hala kendi legacy data/landcover/... yolunu
+        # kullanir (Step7B/7D kendi legacy kesif mantiklarinda).
+        "landcover_aligned_path": (
+            None if is_kozan
+            else output_root / "gate_inputs" / "landcover_esa_worldcover_v200_aligned_to_reference.tif"
+        ),
         # --- Cikti dizinleri ---
         "step4_metadata_path": step4_metadata_path,
         "landsat_file_prefix": export_prefix,
@@ -144,6 +163,16 @@ def build_experiment_context(experiment_id: str) -> dict:
         "step5b_output_dir": outputs_root / "step5b",
         "step5c_output_dir": outputs_root / "step5c",
         "output_dir": outputs_root / "step5",  # step5.process_step5_windowed icin
+        "step7a_output_dir": outputs_root / "step7a",
+        "step7b_output_dir": outputs_root / "step7b",
+        "step7c_output_dir": outputs_root / "step7c",
+        "step7d_output_dir": outputs_root / "step7d",
+        "step7e_output_dir": outputs_root / "step7e",
+        "step8a_output_dir": outputs_root / "step8a",
+        "step8b_output_dir": outputs_root / "step8b",
+        "step8c_output_dir": outputs_root / "step8c",
+        "step8d_output_dir": outputs_root / "step8d",
+        "step8e_output_dir": outputs_root / "step8e",
         "gate_labels_dir": gate_labels_dir,
         "export_prefix": export_prefix,
     }
@@ -195,3 +224,17 @@ def log_context_summary(ctx: dict, log) -> None:
     log.info("[ExperimentContext] step5_output_dir: %s", ctx["step5_output_dir"])
     log.info("[ExperimentContext] step5c_output_dir: %s", ctx["step5c_output_dir"])
     log.info("[ExperimentContext] gate_labels_dir: %s", ctx["gate_labels_dir"])
+    log.info(
+        "[ExperimentContext] dem_input_dir (%s): %s",
+        "shared, read-only (Kozan legacy)" if ctx["is_kozan"] else "namespaced",
+        ctx["dem_input_dir"],
+    )
+    log.info(
+        "[ExperimentContext] landcover_aligned_path: %s",
+        ctx["landcover_aligned_path"] if ctx["landcover_aligned_path"] else "(Kozan legacy discovery)",
+    )
+    log.info(
+        "[ExperimentContext] step7 output dirs: a=%s b=%s c=%s d=%s e=%s",
+        ctx["step7a_output_dir"], ctx["step7b_output_dir"], ctx["step7c_output_dir"],
+        ctx["step7d_output_dir"], ctx["step7e_output_dir"],
+    )

@@ -307,6 +307,40 @@ def main(
     return summary
 
 
+def run_step7a(ctx: dict | None = None, force: bool = False) -> dict:
+    """
+    Step7A tiling infrastructure testini calistirir.
+
+    ctx: None ise (varsayilan) legacy Kozan davranisi BIREBIR korunur --
+        outputs/step7a'ya yazar, referans rasteri kendi legacy oncelik
+        sirasiyla secer. Verilirse (Kozan-disi, or. manavgat_2021):
+        outputs/experiments/<experiment_id>/step7a'ya yazar VE referans
+        raster ACIKCA ctx["step5_output_dir"]/current_period_median_celsius.tif
+        olarak verilir (main()'in zaten var olan `reference_raster` parametresi
+        kullanilir -- monkeypatch gerekmez, yalnizca OUTPUTS_DIR icin gerekir).
+    """
+    global OUTPUTS_DIR
+
+    use_ctx = ctx is not None and not ctx.get("is_kozan")
+    saved = OUTPUTS_DIR
+    try:
+        reference_raster = None
+        if use_ctx:
+            OUTPUTS_DIR = ctx["step7a_output_dir"]
+            OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+            reference_raster = str(ctx["step5_output_dir"] / "current_period_median_celsius.tif")
+            log.info(
+                "[experiment=%s] Step7A ctx override aktif. output_dir=%s, "
+                "reference_raster=%s", ctx["experiment_id"], OUTPUTS_DIR, reference_raster,
+            )
+        result = main(reference_raster=reference_raster, force=force)
+        if ctx is not None:
+            result["experiment_id"] = ctx["experiment_id"]
+        return result
+    finally:
+        OUTPUTS_DIR = saved
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Step7A: tile/window-safe raster reconstruction test."

@@ -114,10 +114,15 @@ PLOT_MAX_POINTS = 50_000
 # =============================================================================
 # 1. Veri yükleme
 # =============================================================================
-def load_dataset() -> tuple[pd.DataFrame, Path]:
-    """Step7B parquet/csv veri setini yükler (parquet tercih edilir)."""
-    parquet_path = BASE_DIR / "outputs" / "step7b" / "downscaling_training_samples.parquet"
-    csv_path = BASE_DIR / "outputs" / "step7b" / "downscaling_training_samples.csv"
+def load_dataset(ctx: dict | None = None) -> tuple[pd.DataFrame, Path]:
+    """Step7B parquet/csv veri setini yükler (parquet tercih edilir).
+
+    ctx: None ise (varsayılan) legacy outputs/step7b/. Verilirse (Kozan-dışı)
+        ctx["step7b_output_dir"] -- legacy Kozan yoluna ASLA dokunmaz.
+    """
+    step7b_dir = ctx["step7b_output_dir"] if ctx is not None else (BASE_DIR / "outputs" / "step7b")
+    parquet_path = step7b_dir / "downscaling_training_samples.parquet"
+    csv_path = step7b_dir / "downscaling_training_samples.csv"
 
     if parquet_path.exists():
         try:
@@ -563,6 +568,31 @@ def residual_by_feature_summary(
 # =============================================================================
 # 7. Ana akış
 # =============================================================================
+def _modis_spatial_calibration_note(ctx: dict | None) -> str:
+    """
+    MODIS mean/std katmanlarinin ne oldugunu (ve ne OLMADIGINI) aciklayan
+    metadata notu. Kozan (ctx=None veya ctx["is_kozan"]) icin legacy metin
+    BIREBIR korunur (coklu-yil yaz-ortalamasi baseline). Kozan-disi bir
+    deney icin (or. manavgat_2021), MODIS aslinda o deneyin PREDICTOR
+    penceresi icin tek-sezonluk (single-season) export edildigi icin
+    ("coklu-yil baseline" DEGIL -- bkz. scripts/prepare_modis_for_step7.py),
+    metin bunu acikca yansitir.
+    """
+    if ctx is None or ctx.get("is_kozan"):
+        return (
+            "modis_lst_mean_celsius is a 4-year summer-mean MODIS context layer, "
+            "not a current daily MODIS observation. This is a spatial "
+            "downscaling/context calibration prototype, not yet daily MODIS "
+            "downscaling."
+        )
+    return (
+        "modis_lst_mean_celsius and modis_lst_std_celsius are single-season "
+        "MODIS predictor-window summary layers for "
+        f"{ctx['predictor_start_date']} -> {ctx['predictor_end_date']}; they "
+        "are not multi-year baselines and not daily MODIS products."
+    )
+
+
 def main(
     model_type: str = STEP7C_MODEL_TYPE,
     fast: bool = False,
@@ -572,6 +602,7 @@ def main(
     input_path: str | None = None,
     split_mode: str = STEP7C_SPLIT_MODE,
     spatial_block_size: int = STEP7C_SPATIAL_BLOCK_SIZE_PIXELS,
+    ctx: dict | None = None,
 ) -> dict:
     log.info("=" * 60)
     log.info("STEP 7C BAŞLIYOR (pure MODIS->Landsat LST downscaling model)")
@@ -733,12 +764,7 @@ def main(
             "residual_by_feature_summary": str(resid_summary_path),
             "per_split_predictions_sample": str(sample_path),
         },
-        "spatial_calibration_note": (
-            "modis_lst_mean_celsius is a 4-year summer-mean MODIS context layer, "
-            "not a current daily MODIS observation. This is a spatial "
-            "downscaling/context calibration prototype, not yet daily MODIS "
-            "downscaling."
-        ),
+        "spatial_calibration_note": _modis_spatial_calibration_note(ctx),
         "warnings": warnings_list,
     }
     metadata_path = OUTPUTS_DIR / "downscaling_model_metadata.json"
@@ -942,6 +968,55 @@ def write_summary_markdown(
     path = OUTPUTS_DIR / "downscaling_model_summary.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def _resolve_step7b_dataset_path(step7b_dir: Path) -> Path:
+    """load_dataset() ile aynı öncelik sırası (parquet -> csv); yalnızca yol döner."""
+    parquet_path = step7b_dir / "downscaling_training_samples.parquet"
+    csv_path = step7b_dir / "downscaling_training_samples.csv"
+    if parquet_path.exists():
+        return parquet_path
+    if csv_path.exists():
+        return csv_path
+    raise SystemExit(
+        f"Step7B veri seti bulunamadı: {parquet_path} veya {csv_path}. "
+        "Önce Step7B'yi (namespaced) çalıştırın."
+    )
+
+
+def run_step7c(ctx: dict | None = None, force: bool = False, **kwargs) -> dict:
+    """
+    Step7C: yalnızca MODIS->Landsat LST downscaling modelini eğitir.
+
+    ctx: None ise (varsayılan) legacy Kozan davranışı BİREBİR korunur --
+        outputs/step7b/'den okur, outputs/step7c/'ye yazar. Verilirse
+        (Kozan-dışı), ctx["step7b_output_dir"]'den okur (main()'in zaten var
+        olan `input_path` parametresi ile -- load_dataset()'in kendisi
+        DEĞİŞTİRİLMEDEN), ctx["step7c_output_dir"]'e yazar.
+
+    Bu ADIM, burned-area/fire-risk modeli DEĞİLDİR -- yalnızca saf
+    MODIS->Landsat LST downscaling modelidir (bkz. STEP7C_EXCLUDE_LEAKAGE_FEATURES).
+    """
+    global OUTPUTS_DIR
+
+    use_ctx = ctx is not None and not ctx.get("is_kozan")
+    saved = OUTPUTS_DIR
+    try:
+        input_path = None
+        if use_ctx:
+            OUTPUTS_DIR = ctx["step7c_output_dir"]
+            OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+            input_path = str(_resolve_step7b_dataset_path(ctx["step7b_output_dir"]))
+            log.info(
+                "[experiment=%s] Step7C ctx override aktif. output_dir=%s, "
+                "input_path=%s", ctx["experiment_id"], OUTPUTS_DIR, input_path,
+            )
+        result = main(force=force, input_path=input_path, ctx=ctx if use_ctx else None, **kwargs)
+        if ctx is not None:
+            result["experiment_id"] = ctx["experiment_id"]
+        return result
+    finally:
+        OUTPUTS_DIR = saved
 
 
 # =============================================================================

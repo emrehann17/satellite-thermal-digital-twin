@@ -117,7 +117,7 @@ EXPECTED_PREDICTION_COLUMNS = [
 # =============================================================================
 def load_predictions(input_arg: str | None) -> tuple[pd.DataFrame, Path]:
     parquet_path = BASE_DIR / (input_arg or STEP8C_INPUT_PREDICTIONS)
-    csv_path = BASE_DIR / "outputs" / "step8b" / "step8b_predictions.csv"
+    csv_path = parquet_path.with_suffix(".csv")
 
     if parquet_path.exists():
         try:
@@ -139,12 +139,15 @@ def load_predictions(input_arg: str | None) -> tuple[pd.DataFrame, Path]:
     )
 
 
-def reconstruct_spatial_block_id(df: pd.DataFrame) -> pd.DataFrame:
+def reconstruct_spatial_block_id(df: pd.DataFrame, step8a_dataset_path: Path | None = None) -> pd.DataFrame:
     """
     Fallback: if spatial_block_id is missing from the predictions table,
     reconstruct it by joining Step8A's dataset on cell_id to recover
     row_500m/col_500m, then re-deriving the same block id Step8B used.
     Fails clearly if this is not possible.
+
+    step8a_dataset_path: verilirse (Kozan-disi deneyler icin, ctx'ten
+        turetilir), legacy outputs/step8a/ yerine bu yol kullanilir.
     """
     if "spatial_block_id" in df.columns:
         return df
@@ -159,9 +162,14 @@ def reconstruct_spatial_block_id(df: pd.DataFrame) -> pd.DataFrame:
             "imkansiz. Step8B'yi guncel scriptle yeniden calistirin."
         )
 
-    step8a_path = BASE_DIR / "outputs" / "step8a" / "step8a_500m_modeling_dataset.parquet"
-    if not step8a_path.exists():
-        step8a_path = BASE_DIR / "outputs" / "step8a" / "step8a_500m_modeling_dataset.csv"
+    if step8a_dataset_path is not None:
+        step8a_path = Path(step8a_dataset_path)
+        if not step8a_path.exists():
+            step8a_path = step8a_path.with_suffix(".csv")
+    else:
+        step8a_path = BASE_DIR / "outputs" / "step8a" / "step8a_500m_modeling_dataset.parquet"
+        if not step8a_path.exists():
+            step8a_path = BASE_DIR / "outputs" / "step8a" / "step8a_500m_modeling_dataset.csv"
     if not step8a_path.exists():
         raise Step8CError(
             "spatial_block_id yeniden olusturulamiyor: Step8A veri seti de "
@@ -457,6 +465,7 @@ def main(
     random_seed: int = STEP8C_RANDOM_SEED,
     min_positives: int = STEP8C_MIN_POSITIVES,
     min_month_positives: int = STEP8C_MIN_MONTH_POSITIVES,
+    ctx: dict | None = None,
 ) -> dict:
     log.info("=" * 60)
     log.info("STEP 8C BASLIYOR (spatial-block bootstrap uncertainty)")
@@ -477,7 +486,12 @@ def main(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     df, input_path = load_predictions(input_arg)
-    df = reconstruct_spatial_block_id(df)
+    step8a_dataset_path = (
+        ctx["step8a_output_dir"] / "step8a_500m_modeling_dataset.parquet"
+        if (ctx is not None and not ctx.get("is_kozan"))
+        else None
+    )
+    df = reconstruct_spatial_block_id(df, step8a_dataset_path=step8a_dataset_path)
     warnings_list = validate_predictions(df)
 
     if "spatial_block_id" not in df.columns or df["spatial_block_id"].isna().all():
@@ -834,6 +848,27 @@ def write_summary_md(
     path = output_dir / "step8c_summary.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def run_step8c(ctx: dict | None = None, force: bool = False, **kwargs) -> dict:
+    """
+    Step8C: Step8B'nin out-of-fold tahminleri uzerinde spatial-block
+    bootstrap belirsizlik araligi hesaplar (yeniden egitim YAPMAZ).
+
+    ctx: None ise (varsayilan) legacy Kozan davranisi BIREBIR korunur.
+        Verilirse (Kozan-disi): outputs/experiments/<experiment_id>/step8c'ye
+        yazar, o deneyin kendi Step8B tahminlerinden okur.
+    """
+    use_ctx = ctx is not None and not ctx.get("is_kozan")
+    output_dir_arg = str(ctx["step8c_output_dir"]) if use_ctx else STEP8C_OUTPUT_DIR
+    input_arg = (
+        str(ctx["step8b_output_dir"] / "step8b_predictions.parquet")
+        if use_ctx else None
+    )
+    result = main(input_arg=input_arg, output_dir_arg=output_dir_arg, force=force, ctx=ctx, **kwargs)
+    if ctx is not None:
+        result["experiment_id"] = ctx["experiment_id"]
+    return result
 
 
 def parse_args(argv=None) -> argparse.Namespace:

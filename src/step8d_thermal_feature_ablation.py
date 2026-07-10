@@ -179,7 +179,7 @@ ALL_THERMAL_VS_STEP8B_TOLERANCE = 0.01
 # =============================================================================
 def load_dataset(input_arg: str | None) -> tuple[pd.DataFrame, Path]:
     parquet_path = BASE_DIR / (input_arg or STEP8D_INPUT_DATASET)
-    csv_path = BASE_DIR / "outputs" / "step8a" / "step8a_500m_modeling_dataset.csv"
+    csv_path = parquet_path.with_suffix(".csv")
 
     if parquet_path.exists():
         try:
@@ -733,8 +733,11 @@ def plot_ablation_barplot(results: dict, output_dir: Path) -> Path | None:
         return None
 
 
-def load_step8b_all_thermal_reference() -> dict:
-    path = BASE_DIR / STEP8B_METRICS_PATH_REL
+def load_step8b_all_thermal_reference(ctx: dict | None = None) -> dict:
+    if ctx is not None and not ctx.get("is_kozan"):
+        path = ctx["step8b_output_dir"] / Path(STEP8B_METRICS_PATH_REL).name
+    else:
+        path = BASE_DIR / STEP8B_METRICS_PATH_REL
     if not path.exists():
         return {}
     try:
@@ -972,6 +975,7 @@ def main(
     n_bootstrap: int = STEP8D_BOOTSTRAP_N,
     top_k_bootstrap: int = STEP8D_BOOTSTRAP_TOP_K,
     random_seed: int = STEP8D_RANDOM_SEED,
+    ctx: dict | None = None,
 ) -> dict:
     log.info("=" * 60)
     log.info("STEP 8D BASLIYOR (thermal feature ablation, spatial-block CV)")
@@ -1071,7 +1075,7 @@ def main(
         raise Step8DError(f"Primer populasyon 'all_valid' egitilemedi: {primary.get('reason') if primary else 'sonuc yok'}")
 
     # --- Cross-check all_thermal vs Step8B's own thermal result ---
-    step8b_ref = load_step8b_all_thermal_reference()
+    step8b_ref = load_step8b_all_thermal_reference(ctx)
     for pop_name in ("all_valid", "cropland_dominant"):
         res = results.get(pop_name)
         if res is None or res.get("skipped") or pop_name not in step8b_ref:
@@ -1157,6 +1161,27 @@ def main(
     }
 
 
+def run_step8d(ctx: dict | None = None, force: bool = False, **kwargs) -> dict:
+    """
+    Step8D: termal feature ablation (spatial-block CV) -- Step7 fused LST'nin
+    olcumlebilir katkisini test eder.
+
+    ctx: None ise (varsayilan) legacy Kozan davranisi BIREBIR korunur.
+        Verilirse (Kozan-disi): outputs/experiments/<experiment_id>/step8d'ye
+        yazar, o deneyin kendi Step8A veri setinden okur.
+    """
+    use_ctx = ctx is not None and not ctx.get("is_kozan")
+    output_dir_arg = str(ctx["step8d_output_dir"]) if use_ctx else STEP8D_OUTPUT_DIR
+    input_arg = (
+        str(ctx["step8a_output_dir"] / "step8a_500m_modeling_dataset.parquet")
+        if use_ctx else None
+    )
+    result = main(input_arg=input_arg, output_dir_arg=output_dir_arg, force=force, ctx=ctx, **kwargs)
+    if ctx is not None:
+        result["experiment_id"] = ctx["experiment_id"]
+    return result
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Step8D: thermal feature ablation for Step8B burned-area modeling."
@@ -1193,4 +1218,4 @@ if __name__ == "__main__":
         n_bootstrap=args.n_bootstrap,
         top_k_bootstrap=args.top_k_bootstrap,
         random_seed=args.random_seed,
-    )   
+    )
