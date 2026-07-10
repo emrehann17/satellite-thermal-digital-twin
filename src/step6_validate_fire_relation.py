@@ -605,30 +605,149 @@ def export_label_to_grid(
 #   gate'inin) ihtiyac duydugu GERCEK BurnDate DOY degerlerini (1..366) -- ve
 #   istege bagli ayri bir binary maskeyi -- CANONICAL, sabit konuma
 #   (VALIDATION_LABEL_DIR) yazar. Bu deger mosaic.gt(0) DEGILDIR.
+def _mcd64a1_collection_query_bounds(label_start: str, label_end: str) -> tuple[str, str]:
+    """
+    Bilimsel label penceresinden (or. "2022-08-15" -> "2022-09-30"), MCD64A1
+    AYLIK koleksiyonunu SORGULAMAK icin ay-hizali (month-aligned) sinirlari
+    turetir.
+
+    BUG FIX: MODIS/061/MCD64A1 AYLIK bir koleksiyondur; her goruntunun
+    system:time_start'i genellikle o ayin 1'idir (or. Agustos goruntusu ~
+    2022-08-01). `filterDate(label_start, label_end)` DOGRUDAN kullanilirsa
+    ve label_start ayin 1'i DEGILSE (or. "2022-08-15"), Agustos goruntusu
+    (2022-08-01) bu aralikta OLMADIGI icin SESSIZCE DISLANIR -- ve o ayda
+    gercek yangin BurnDate degerleri hic export edilmez (Bejis 2022 icin
+    gozlemlenen tam olarak budur: count_in_DOY[227-273]=0).
+
+    Bu fonksiyon, `filterDate` icin KULLANILACAK sorgulama sinirlarini
+    dondurur:
+        collection_start_date            = label_start'in AYININ 1'i
+        collection_end_date_exclusive    = label_end'in AYINDAN SONRAKI AYIN 1'i
+
+    Ornekler:
+        ("2022-08-15", "2022-09-30") -> ("2022-08-01", "2022-10-01")
+        ("2022-12-15", "2023-01-20") -> ("2022-12-01", "2023-02-01")  (yil sinirini GUVENLE gecer)
+
+    Bilimsel label penceresinin KENDISI (label_start/label_end) DEGISMEZ --
+    yalnizca MCD64A1 koleksiyonunu SORGULAMAK icin daha genis, ay-hizali bir
+    pencere kullanilir. Asil DOY filtrelemesi (yalnizca [label_start,
+    label_end] icindeki BurnDate degerlerinin gecerli sayilmasi)
+    build_raw_burndate_image() icinde, goruntu-basina (per-image) server-side
+    maskeleme ile AYRICA uygulanir (bkz. build_raw_burndate_image docstring).
+    """
+    start_dt = datetime.strptime(label_start, "%Y-%m-%d")
+    end_dt = datetime.strptime(label_end, "%Y-%m-%d")
+
+    collection_start = start_dt.replace(day=1)
+
+    # label_end'in ayindan SONRAKI ayin 1'i -- yil donusumunu (Aralik ->
+    # Ocak) GUVENLE isler.
+    if end_dt.month == 12:
+        collection_end_exclusive = end_dt.replace(year=end_dt.year + 1, month=1, day=1)
+    else:
+        collection_end_exclusive = end_dt.replace(month=end_dt.month + 1, day=1)
+
+    return (
+        collection_start.strftime("%Y-%m-%d"),
+        collection_end_exclusive.strftime("%Y-%m-%d"),
+    )
+
+
 def build_raw_burndate_image(region: "ee.Geometry", start: str, end: str) -> "ee.Image":
     """
-    [start, end) penceresi icin ham MCD64A1 BurnDate DOY degerlerinden olusan
-    bir ee.Image olusturur.
+    [start, end] BILIMSEL label penceresi icin ham MCD64A1 BurnDate DOY
+    degerlerinden olusan bir ee.Image olusturur.
 
-    Aylik goruntuler uzerinde piksel-basina POZITIF BurnDate'in MAKSIMUMUNU
-    alir (son yanma kazanir); bu gercek bir DOY degeri korur (0 = unburned).
+    IKI AYRI PENCERE KAVRAMI (bug fix -- bkz. _mcd64a1_collection_query_bounds):
+        1. Koleksiyon SORGU penceresi: MCD64A1 AYLIK bir koleksiyon oldugu
+           icin, `start`/`end`in AY-HIZALI (month-aligned) bir genisletmesi
+           kullanilarak sorgulanir (or. "2022-08-15"->"2022-09-30" bilimsel
+           pencere icin sorgu penceresi "2022-08-01"->"2022-10-01" olur).
+           Bu, label_start ayin 1'i olmadiginda ilgili ayin goruntusunun
+           `filterDate` tarafindan sessizce dislanmasini ONLER.
+        2. BurnDate DEGER penceresi (asil bilimsel filtre): sorgu penceresi
+           GENISLETILMIS oldugu icin, donen her aylik goruntu KENDI YILI
+           icin [start_doy, end_doy] araligina GORE piksel-bazinda
+           maskelenir -- boylece yalnizca GERCEKTEN [start, end] bilimsel
+           penceresi icindeki BurnDate degerleri sonuca dahil olur; pencere
+           disindaki (or. Ekim ayina ait, ya da Eylul'un 30'undan sonraki)
+           degerler 0 (unburned) olarak isaretlenir.
+
+    Yil-sinirini-asan (or. "2022-12-15" -> "2023-01-20") pencereler icin,
+    her goruntunun KENDI YILI kullanilarak dogru DOY esikleri (Aralik
+    goruntusu icin [start_doy, 366], Ocak goruntusu icin [1, end_doy])
+    server-side hesaplanir -- bu sayede basit "start_doy <= x <= end_doy"
+    karsilastirmasinin yil sinirinda YANLIS sonuc vermesi (or. Ocak'taki
+    DOY=20'nin Aralik'in DOY=349 esiginden "kucuk" oldugu icin gecersiz
+    sayilmasi) ONLENIR.
+
+    Aylik goruntuler (maskelendikten sonra) piksel-basina MAKSIMUM ile
+    birlestirilir (mevcut/onceki davranisla ayni birlestirme mantigi).
     """
+    collection_start, collection_end_exclusive = _mcd64a1_collection_query_bounds(start, end)
+
+    start_dt = datetime.strptime(start, "%Y-%m-%d")
+    end_dt = datetime.strptime(end, "%Y-%m-%d")
+    start_doy = start_dt.timetuple().tm_yday
+    end_doy = end_dt.timetuple().tm_yday
+    start_year = start_dt.year
+    end_year = end_dt.year
+
+    log.info(
+        "[MCD64A1] scientific_label_window: %s -> %s (DOY %d -> %d)",
+        start, end, start_doy, end_doy,
+    )
+    log.info(
+        "[MCD64A1] collection_query_window: %s -> %s (exclusive)",
+        collection_start, collection_end_exclusive,
+    )
+
     collection = (
         ee.ImageCollection(MCD64A1_COLLECTION)
         .filterBounds(region)
-        .filterDate(start, end)
-        .select(MCD64A1_BURNDATE_BAND)
+        .filterDate(collection_start, collection_end_exclusive)
     )
 
     size = collection.size().getInfo()
     if size == 0:
         raise ValidationError(
-            f"MCD64A1 secili AOI/pencerede ({start} -> {end}) hic goruntu "
-            "dondurmedi. AOI'yi/pencereyi kontrol edin."
+            f"MCD64A1 secili AOI/pencerede (sorgu penceresi: {collection_start} "
+            f"-> {collection_end_exclusive}, bilimsel pencere: {start} -> {end}) "
+            "hic goruntu dondurmedi. AOI'yi/pencereyi veya aylik koleksiyon "
+            "filtrelemesini kontrol edin."
         )
-    log.info("MCD64A1 goruntu sayisi: %d", size)
+    log.info("[MCD64A1] collection_image_count: %d (sorgu penceresi icinde)", size)
 
-    raw_burndate = collection.max().rename("BurnDate").clip(region)
+    label_start_year_num = ee.Number(start_year)
+    label_end_year_num = ee.Number(end_year)
+    label_start_doy_num = ee.Number(start_doy)
+    label_end_doy_num = ee.Number(end_doy)
+
+    def _mask_image_to_label_window(image: "ee.Image") -> "ee.Image":
+        """
+        Bu goruntunun KENDI YILINA gore gecerli DOY esiklerini server-side
+        hesaplar ve BurnDate bandini bu araligin DISINDA 0'a (unburned)
+        esitler. Ayni-yil pencereleri icin bu, basit [start_doy, end_doy]
+        ile ozdestir; yil-sinirini-asan pencerelerde her goruntu YALNIZCA
+        KENDI yilina dusen alt-araliga gore maskelenir.
+        """
+        img_year = ee.Number(image.date().get("year"))
+        lower = ee.Number(
+            ee.Algorithms.If(img_year.eq(label_start_year_num), label_start_doy_num, ee.Number(1))
+        )
+        upper = ee.Number(
+            ee.Algorithms.If(img_year.eq(label_end_year_num), label_end_doy_num, ee.Number(366))
+        )
+        band = image.select(MCD64A1_BURNDATE_BAND)
+        in_window = band.gte(lower).And(band.lte(upper))
+        # Pencere disindaki degerleri 0'a (unburned) esitle; maskeyi
+        # KALDIRMAZ (unmask ile 0 dolduruyoruz, boylece son max() birlesimi
+        # nodata degil gercek 0 degerleriyle calisir -- mevcut "0=unburned"
+        # konvansiyonuyla tutarli).
+        return band.updateMask(in_window).unmask(0)
+
+    masked_collection = collection.map(_mask_image_to_label_window)
+    raw_burndate = masked_collection.max().rename("BurnDate").clip(region)
     return raw_burndate
 
 
@@ -655,11 +774,20 @@ def inspect_raw_burndate_output(path: Path, start: str, end: str) -> dict:
     icerdigini (yalniz {0,1} degil) dogrular. Sonuc dict'i loglanir/dondurulur;
     "looks_binary=True" olmasi CAGIRANIN hata vermesi gerektigini gosterir
     (bu fonksiyon kendisi raise ETMEZ, yalnizca teshis eder).
-    """
-    from datetime import datetime as _dt
 
-    start_doy = _dt.strptime(start, "%Y-%m-%d").timetuple().tm_yday
-    end_doy = _dt.strptime(end, "%Y-%m-%d").timetuple().tm_yday
+    BUG FIX (yil-sinirini-asan pencereler): [start, end] farkli yillara
+    dusuyorsa (or. "2022-12-15" -> "2023-01-20"), DOY'lar basit bir
+    "start_doy <= x <= end_doy" (AND) karsilastirmasiyla test EDILEMEZ --
+    cunku Ocak'taki kucuk DOY degerleri (or. 20) Aralik'in buyuk DOY
+    esiginden (or. 349) sayisal olarak KUCUKTUR ama YINE DE GECERLIDIR
+    (bir sonraki yila ait). Bu durumda "start_doy <= x VEYA x <= end_doy"
+    (OR) mantigi kullanilir. Ayni-yil pencerelerinde davranis DEGISMEZ.
+    """
+    start_dt = datetime.strptime(start, "%Y-%m-%d")
+    end_dt = datetime.strptime(end, "%Y-%m-%d")
+    start_doy = start_dt.timetuple().tm_yday
+    end_doy = end_dt.timetuple().tm_yday
+    crosses_year = start_dt.year != end_dt.year
 
     with rasterio.open(path) as src:
         arr = src.read(1, masked=True).compressed().astype("float64")
@@ -669,14 +797,18 @@ def inspect_raw_burndate_output(path: Path, start: str, end: str) -> dict:
         return {"path": str(path), "valid_pixel_count": 0, "looks_binary": None}
 
     positive = arr[arr > 0]
-    in_range = int(np.sum((arr >= start_doy) & (arr <= end_doy)))
+    if crosses_year:
+        in_range = int(np.sum((arr >= start_doy) | (arr <= end_doy)))
+    else:
+        in_range = int(np.sum((arr >= start_doy) & (arr <= end_doy)))
     looks_binary = bool(positive.size > 0 and np.all(positive == 1.0))
 
     log.info(
         "Cikti kontrolu: min=%.1f max=%.1f count_positive=%d count_one=%d "
-        "count_in_DOY[%d-%d]=%d",
+        "count_in_DOY[%d-%d]%s=%d",
         float(arr.min()), float(arr.max()), int(positive.size),
-        int(np.sum(arr == 1)), start_doy, end_doy, in_range,
+        int(np.sum(arr == 1)), start_doy, end_doy,
+        " (yil-sinirini-asan, OR)" if crosses_year else "", in_range,
     )
     if looks_binary:
         log.error(
@@ -686,8 +818,9 @@ def inspect_raw_burndate_output(path: Path, start: str, end: str) -> dict:
         )
     elif in_range == 0:
         log.warning(
-            "UYARI: label DOY penceresinde (%d-%d) hic deger yok. Pencereyi "
-            "veya AOI'yi kontrol edin.", start_doy, end_doy,
+            "UYARI: label DOY penceresinde (%d-%d) hic deger yok. Aylik "
+            "MCD64A1 koleksiyon filtrelemesi (collection_query_window) veya "
+            "AOI'yi kontrol edin.", start_doy, end_doy,
         )
     else:
         log.info("OK: cikti gercek BurnDate DOY degerleri iceriyor gorunuyor.")
@@ -698,6 +831,8 @@ def inspect_raw_burndate_output(path: Path, start: str, end: str) -> dict:
         "count_positive": int(positive.size), "count_one": int(np.sum(arr == 1)),
         "count_in_label_doy_range": in_range,
         "looks_binary": looks_binary,
+        "label_doy_range": [start_doy, end_doy],
+        "crosses_year": crosses_year,
     }
 
 
@@ -794,11 +929,13 @@ def export_raw_mcd64a1_labels(
             raise ValidationError(f"Bolge bulunamadi: {REGION_NAME}")
         region = regions[REGION_NAME]
 
+    collection_start, collection_end_exclusive = _mcd64a1_collection_query_bounds(start, end)
     log.info(
-        "[Raw BurnDate export] AOI=%s%s, pencere=%s -> %s, scale=%dm, cikti=%s",
+        "[Raw BurnDate export] AOI=%s%s, scientific_label_window=%s -> %s, "
+        "collection_query_window=%s -> %s (exclusive), scale=%dm, cikti=%s",
         region_desc,
         f" (experiment={experiment_id})" if experiment_id else "",
-        start, end, scale, output_dir,
+        start, end, collection_start, collection_end_exclusive, scale, output_dir,
     )
 
     raw_image = build_raw_burndate_image(region, start, end)
@@ -811,6 +948,23 @@ def export_raw_mcd64a1_labels(
             f"({raw_out}). Bu, Step8A'yi sessizce bozar (butun pozitif "
             "degerler DOY=1'e esitlenmis olur). Export mantigini kontrol edin "
             "(mosaic.gt(0) KULLANILMAMALI)."
+        )
+
+    # FAIL-FAST (bug fix): pencere icinde SIFIR BurnDate degeri varsa, Step6B
+    # calistirilmadan ONCE dur. Bu genellikle iki sebepten biridir: (1)
+    # MCD64A1 AYLIK koleksiyon filtrelemesi (collection_query_window) yanlis
+    # hesaplanmis/uygulanmamis, ya da (2) AOI o pencerede gercekten hicbir
+    # yangin gormemis. Hata mesaji her ikisini de acikca isaret eder.
+    if inspection.get("count_in_label_doy_range", 0) == 0:
+        raise ValidationError(
+            "Export edilen 'raw' MCD64A1 BurnDate rasterinde bilimsel label "
+            f"penceresi ({start} -> {end}, DOY {inspection.get('label_doy_range')}) "
+            f"icinde HICBIR deger yok ({raw_out}). Bu iki nedenden biri "
+            "olabilir: (1) MCD64A1 aylik koleksiyon filtrelemesi "
+            f"(collection_query_window={collection_start} -> "
+            f"{collection_end_exclusive}) yanlis olabilir, ya da (2) AOI "
+            f"('{region_desc}') bu pencerede gercekten hicbir MCD64A1 yangini "
+            "gormemis olabilir. Step6B calistirilmadan DURDURULDU."
         )
 
     binary_path = None
@@ -830,6 +984,9 @@ def export_raw_mcd64a1_labels(
         "inspection": inspection,
         "start": start,
         "end": end,
+        "scientific_label_window": [start, end],
+        "collection_query_window": [collection_start, collection_end_exclusive],
+        "label_doy_range": inspection.get("label_doy_range"),
         "scale": scale,
         "experiment_id": experiment_id,
         "output_dir": output_dir,

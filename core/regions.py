@@ -39,10 +39,10 @@ def build_regions() -> dict:
 
     Mevcut anahtarlar (`dogu_akdeniz`, `kozan_aoi`) DEGISTIRILMEDI.
     Yeni eklenenler (`manavgat_aoi`, `manavgat_aoi_refined_bbox`,
-    `manavgat_aoi_wide_buffer`, `valencia_2022_aoi`, `zamora_2022_aoi`)
-    yalnizca Step0 deney kayit defteri tarafindan referans verildiginde
-    kullanilir; varsayilan pipeline (REGION_NAME="kozan_aoi") bunlardan
-    ETKILENMEZ.
+    `manavgat_aoi_wide_buffer`, `valencia_2022_aoi`, `zamora_2022_aoi`,
+    `bejis_aoi`) yalnizca Step0 deney kayit defteri tarafindan referans
+    verildiginde kullanilir; varsayilan pipeline (REGION_NAME="kozan_aoi")
+    bunlardan ETKILENMEZ.
 
     Manavgat icin UC anahtar vardir:
         manavgat_aoi              -> deney kaydinin (manavgat_2021) kullandigi
@@ -118,6 +118,24 @@ def build_regions() -> dict:
     zamora_merkez = ee.Geometry.Point([-6.35, 41.85])
     zamora_2022_aoi = zamora_merkez.buffer(50000).bounds()
 
+    # --- Bejis / Castellon 2022 (Akdeniz transfer wildfire AOI, Ispanya) ---
+    # Bejis yangini (Castellon, Valencian Community, Ispanya), 2022-08-15'te
+    # baslamistir. Bu, Manavgat 2021 ile karsilastirilabilir bir "Akdeniz
+    # transfer wildfire" vaka calismasi olarak eklenmistir; Kozan gibi bir
+    # kontrol bolgesi DEGILDIR (bkz. EXPERIMENTS["bejis_2022"]["role"] =
+    # "mediterranean_transfer_wildfire").
+    #
+    # Initial Bejís candidate bbox; refine after AOI preview and MCD64A1
+    # burned-landcover gate.
+    #
+    # ONEMLI: Bu KESIN yangin perimetri DEGILDIR -- yalnizca ilk aday
+    # (candidate) bir dikdortgendir. AOI onizleme (scripts/preview_experiment_aoi.py)
+    # ve Step6B burned-landcover gate calistirildiktan sonra, yanan hucre
+    # kumesi kirpiliyorsa veya ilgisiz yanginlar/cropland baskin cikiyorsa
+    # bu geometri (asagida, TEK YERDE) yeniden ayarlanmalidir -- tipki
+    # Manavgat AOI'sinin gate sonrasi netlestirilmesi gibi.
+    bejis_aoi = ee.Geometry.BBox(-1.05, 39.68, -0.35, 40.15)
+
     return {
         "dogu_akdeniz": dogu_akdeniz,
         "kozan_aoi": kozan_aoi,
@@ -126,6 +144,7 @@ def build_regions() -> dict:
         "manavgat_aoi_wide_buffer": manavgat_aoi_wide_buffer,
         "valencia_2022_aoi": valencia_2022_aoi,
         "zamora_2022_aoi": zamora_2022_aoi,
+        "bejis_aoi": bejis_aoi,
     }
 
 
@@ -140,6 +159,11 @@ def build_regions() -> dict:
 #
 # manavgat_2021: bir sonraki anchor wildfire AOI. Bu Step0 asamasinda
 # YALNIZCA kayit defterine eklenir; pipeline HENUZ calistirilmaz.
+#
+# bejis_2022: Manavgat 2021 ile karsilastirilabilir ikinci bir Akdeniz
+# transfer wildfire vaka calismasi (Ispanya, Bejis/Castellon). Bu Step0
+# asamasinda YALNIZCA kayit defterine + ilk aday AOI'ye eklenir; gate/
+# predictor/Step7/Step8/transfer modelleme HENUZ calistirilmaz.
 #
 # valencia_2022 / zamora_2022: ileriki asamalar icin disabled placeholder.
 
@@ -172,20 +196,29 @@ EXPERIMENTS = {
         "output_namespace": "manavgat_2021",
         "notes": "Anchor natural-vegetation wildfire AOI.",
     },
-    "valencia_2022": {
-        "enabled": False,
-        "region_key": "valencia_2022_aoi",
-        "display_name": "Valencia / Castellon 2022",
-        "role": "external_validation",
+    
+        "bejis_2022": {
+        "enabled": True,
+        "region_key": "bejis_aoi",
+        "display_name": "Bejís / Castellón 2022",
+        "role": "mediterranean_transfer_wildfire",
         "country": "Spain",
-        "predictor_start_date": None,
-        "predictor_end_date": None,
-        "label_start_date": None,
-        "label_end_date": None,
-        "baseline_years": [],
-        "output_namespace": "valencia_2022",
-        "notes": "Placeholder for later Mediterranean external validation.",
+        "predictor_start_date": "2022-06-15",
+        "predictor_end_date": "2022-08-14",
+        "label_start_date": "2022-08-15",
+        "label_end_date": "2022-09-30",
+        "baseline_years": [2018, 2019, 2020, 2021],
+        "output_namespace": "bejis_2022",
+        "notes": (
+            "Bejís wildfire, Castellón / Valencian Community, Spain; fire start "
+            "2022-08-15. Mediterranean transfer wildfire case comparable to "
+            "Manavgat 2021 -- NOT a negative/control AOI. Initial Bejís "
+            "candidate bbox; refine after AOI preview and MCD64A1 "
+            "burned-landcover gate. Must pass the same MCD64A1 "
+            "burned-landcover gate before modeling, exactly like Manavgat 2021."
+        ),
     },
+
     "zamora_2022": {
         "enabled": False,
         "region_key": "zamora_2022_aoi",

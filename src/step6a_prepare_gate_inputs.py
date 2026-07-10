@@ -8,8 +8,9 @@ AMAC
 Step6B burned-landcover gate'in ihtiyac duydugu MINIMUM iki rasteri, tam
 Step3/Step5 termal pipeline'ini CALISTIRMADAN hazirlar:
     1. AOI'yi kaplayan 30 m'lik bir REFERANS grid rasteri.
-    2. Ayni AOI icin ESA WorldCover v200 landcover'i + referans gride
-       nearest-neighbor ile hizalanmis kopyasi.
+    2. Ayni AOI icin ESA WorldCover v200 landcover'i (GATE ICIN 30 m'de
+       export edilir, native 10 m'de DEGIL -- bkz. asagida) + referans
+       gride nearest-neighbor ile hizalanmis kopyasi.
 
 ONEMLI: Referans raster BIR TERMAL PREDICTOR DEGILDIR. Step6B yalnizca grid
 GEOMETRISINE (width/height/CRS/transform) ihtiyac duyar -- piksel DEGERLERINI
@@ -18,11 +19,24 @@ yuzden ee.Image.constant(1) ile sabit-degerli, hizli, ucuz bir raster export
 edilir. Kozan'in gercek Step5 LST referansindan farkli olarak bu dosya HICBIR
 bilimsel/termal anlam tasimaz; sadece gate icin bir grid tanimidir.
 
+WORLDCOVER COZUNURLUGU (bug fix): ESA WorldCover v200'un NATIVE cozunurlugu
+~10 m'dir. Genis AOI'ler (or. Bejis: ~78 km x 52 km) icin 10 m'de export
+etmek GEE'nin senkron getPixels boyut limitini (~50 MB) asar (bkz. hata
+raporu: "Total request size (81561538 bytes) must be <= 50331648 bytes").
+Bu SADECE bir gate-diagnostic girdisi oldugu ve zaten referans gride
+(30 m) nearest-neighbor ile hizalandigi icin, kaynak export'u da GATE ICIN
+30 m'de yapilir (native 10 m degil) -- run_predictors_only.py'nin
+export_image_direct_or_tiled() (direct -> 2x2 -> 4x4 -> 6x6 -> 8x8 tiled
+fallback) fonksiyonu REUSE edilerek, boyut limiti asilsa bile guvenli
+sekilde tamamlanir. Bu, Manavgat icin MODIS/DEM export'larinda zaten
+kullanilan AYNI guvenli desendir -- yeni bir tiled export mantigi
+YAZILMAZ.
+
 Kategorik landcover ASLA bilinear ile resample edilmez -- hizalama icin
 Step8A'nin prepare_aligned_landcover'i (nearest-neighbor) reuse edilir; iki
 farkli/divergent hizalama implementasyonu OLUSMAZ.
 
-CIKTILAR (namespaced; legacy Kozan yollarina ASLA yazilmaz):
+CIKTILAR (namespaced; legacy Kozan/Manavgat yollarina ASLA yazilmaz):
     outputs/experiments/<experiment_id>/gate_inputs/reference_30m.tif
     outputs/experiments/<experiment_id>/gate_inputs/landcover_esa_worldcover_v200.tif
     outputs/experiments/<experiment_id>/gate_inputs/landcover_esa_worldcover_v200_aligned_to_reference.tif
@@ -66,9 +80,18 @@ GATE_REFERENCE_SCALE_M = 30
 # ESA WorldCover v200 (2021) -- projenin Step4 export'uyla ayni kaynak/band.
 WORLDCOVER_COLLECTION = "ESA/WorldCover/v200"
 WORLDCOVER_BAND = "Map"
-# WorldCover kaynak cozunurlugu ~10 m'dir; kaynak export'u da bu olcekte
-# yapilir, referans gride hizalama nearest-neighbor ile ayrica yapilir.
-WORLDCOVER_EXPORT_SCALE_M = 10
+# WorldCover'in GERCEK/native cozunurlugu ~10 m'dir (yalnizca metadata /
+# dokumantasyon icin kaydedilir).
+WORLDCOVER_NATIVE_RESOLUTION_M = 10
+# GATE ICIN kullanilan export cozunurlugu: 30 m (native 10 m DEGIL). Bu
+# gate-only, diagnostic bir kategorik landcover katmanidir ve zaten referans
+# gride (30 m) nearest-neighbor ile hizalanacaktir; 10 m'de export etmek
+# genis AOI'lerde GEE'nin senkron boyut limitini asar (bkz. modul docstring).
+GATE_LANDCOVER_EXPORT_SCALE_M = GATE_REFERENCE_SCALE_M
+
+# Geriye donuk uyumluluk icin eski isim (bazi cagiran kodlar/testler
+# WORLDCOVER_EXPORT_SCALE_M'i referans alabilir) -- ARTIK 30 m'e isaret eder.
+WORLDCOVER_EXPORT_SCALE_M = GATE_LANDCOVER_EXPORT_SCALE_M
 
 
 class Step6AError(SystemExit):
@@ -174,13 +197,32 @@ def prepare_gate_inputs(experiment_id: str, force: bool = False) -> dict:
     reference_image = ee.Image.constant(1).rename("reference").toInt16().clip(region)
     _export_image(reference_image, ref_path, GATE_REFERENCE_SCALE_M, region, EXPORT_CRS)
 
-    # --- 2) ESA WorldCover v200 kaynak export'u ---
-    log.info("[%s] ESA WorldCover v200 export ediliyor.", experiment_id)
+    # --- 2) ESA WorldCover v200 kaynak export'u (GATE ICIN 30 m, native
+    # 10 m DEGIL -- bkz. modul docstring). Boyut limiti asilirsa
+    # run_predictors_only.py'nin direct-or-tiled fallback'i (2x2 -> 4x4 ->
+    # 6x6 -> 8x8) REUSE edilir; yeni bir tiled export mantigi YAZILMAZ.
+    log.info(
+        "[%s] ESA WorldCover v200 export ediliyor (gate_export_resolution_m=%d, "
+        "native=%dm).", experiment_id, GATE_LANDCOVER_EXPORT_SCALE_M,
+        WORLDCOVER_NATIVE_RESOLUTION_M,
+    )
     worldcover = ee.ImageCollection(WORLDCOVER_COLLECTION).first()
     if worldcover is None:
         raise Step6AError(f"{WORLDCOVER_COLLECTION} koleksiyonu bos dondu.")
     lc_image = worldcover.select(WORLDCOVER_BAND).clip(region)
-    _export_image(lc_image, lc_source_path, WORLDCOVER_EXPORT_SCALE_M, region, EXPORT_CRS)
+
+    from scripts.run_predictors_only import export_image_direct_or_tiled
+
+    lc_tiles_dir = paths["gate_inputs_dir"] / "_tiles" / "landcover_esa_worldcover_v200"
+    lc_export_result = export_image_direct_or_tiled(
+        lc_image, lc_source_path, region,
+        scale=GATE_LANDCOVER_EXPORT_SCALE_M, crs=EXPORT_CRS,
+        label="landcover_esa_worldcover_v200", force=force, tiles_dir=lc_tiles_dir,
+    )
+    log.info(
+        "[%s] WorldCover export tamamlandi: transport=%s", experiment_id,
+        lc_export_result["transport"],
+    )
 
     # --- 3) Landcover'i referans gride hizala (nearest-neighbor, reuse) ---
     # Step8A'nin prepare_aligned_landcover'i reuse edilir: kategorik veri
@@ -214,13 +256,32 @@ def prepare_gate_inputs(experiment_id: str, force: bool = False) -> dict:
         "aoi_bounds": ref_bounds,
         "label_window": [exp["label_start_date"], exp["label_end_date"]],
         "worldcover_collection": WORLDCOVER_COLLECTION,
-        "worldcover_export_scale_m": WORLDCOVER_EXPORT_SCALE_M,
+        # BUG FIX: WorldCover artik native 10 m'de DEGIL, gate icin 30 m'de
+        # export ediliyor (bkz. modul docstring). Her iki deger de acikca
+        # kaydedilir, boylece "hangi cozunurluk kullanildi" hicbir zaman
+        # belirsiz olmaz.
+        "native_worldcover_resolution_m": WORLDCOVER_NATIVE_RESOLUTION_M,
+        "gate_export_resolution_m": GATE_LANDCOVER_EXPORT_SCALE_M,
+        "worldcover_export_scale_m": GATE_LANDCOVER_EXPORT_SCALE_M,
+        "worldcover_export_transport": lc_export_result["transport"],
+        "worldcover_export_tile_grid": (
+            list(lc_export_result["tile_grid"]) if lc_export_result.get("tile_grid") else None
+        ),
         "landcover_alignment_method": "nearest_neighbor_to_reference_grid",
+        "alignment_resampling": "nearest",
+        "gate_only_landcover": True,
+        "not_a_thermal_predictor": True,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "note": (
             "Gate-only reference grid: constant-valued raster used ONLY for "
             "grid geometry (width/height/CRS/transform) by Step6B. It is NOT "
-            "a thermal predictor and carries no scientific/LST meaning."
+            "a thermal predictor and carries no scientific/LST meaning. "
+            "Landcover is exported at gate_export_resolution_m (30 m) rather "
+            "than WorldCover's native_worldcover_resolution_m (10 m) because "
+            "it is a diagnostic gate input, already re-aligned to the "
+            "reference grid with nearest-neighbor resampling; exporting at "
+            "native 10 m resolution can exceed GEE's synchronous download "
+            "size limit for large AOIs."
         ),
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
