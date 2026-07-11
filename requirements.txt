@@ -1,17 +1,19 @@
-earthengine-api>=1.2,<2
-geemap>=0.35,<1
-gdown>=5.2,<6
-matplotlib>=3.8,<4
-numpy>=1.26,<3
-pandas>=2.0,<3
-python-dotenv>=1.0,<2
-rasterio>=1.4,<2
-scikit-learn==1.4.2
-pyarrow==16.1.0
+earthengine-api>=1.7,<2
+geemap>=0.37,<1
+gdown>=6,<7
+matplotlib>=3.10,<4
+numpy>=2.4,<3
+pandas>=3.0,<4
+python-dotenv>=1.2,<2
+rasterio>=1.5,<2
+scikit-learn>=1.9,<2
+pyarrow>=24,<25
 openpyxl>=3.1,<4
 
-# Optional (NOT installed by default; --model xgboost in step7c/step8b
-# fails clearly with instructions if this isn't installed; it is never
-# required for the default random_forest / hist_gradient_boosting models,
-# and step8d only supports random_forest/hist_gradient_boosting):
-#   pip install xgboost --break-system-packages
+# Optional dependency.
+# Required only when explicitly using --model xgboost in Step7C/Step8B.
+# The default random_forest / hist_gradient_boosting workflows do not require it.
+# Step8D supports only random_forest / hist_gradient_boosting.
+#
+# Install separately when needed:
+#   pip install "xgboost>=3.3,<4"

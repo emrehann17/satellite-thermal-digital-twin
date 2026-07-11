@@ -7,7 +7,6 @@ data/
 logs/
 outputs/
 old_codes/
-docs/
 
 
 # IDE ayarları
@@ -224,4 +223,3 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
->>>>>>> be8dd2fa6d26254a136b9cc0c4d29c093af01cec
