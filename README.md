@@ -43,6 +43,7 @@ Bu çalışmanın ne olduğu konusunda net olmak önemlidir: bu proje tamamlanm�
 | Step9C | Tamamlandı | Hedef-bölge spatial-block bootstrap güven aralıkları |
 | Step9D | Tamamlandı | Birleşik cross-region final raporu |
 | Step9E | Tamamlandı | Post-hoc dağılım-kayması / ilişki-kayması denetimi |
+| Step9F | Kod tamamlandı; deney henüz gerçek veriyle çalıştırılmadı | Kesifsel (exploratory), post-hoc cross-region feature-representation denemesi (bkz. Bölüm 10) |
 | `scripts/main.py` (deney-farkında CLI) | Tamamlandı | `experiment` / `transfer` / `shift-audit` / `legacy` alt-komutları (bkz. Bölüm 14) |
 | Üçüncü bağımsız bölge (external validation) | Planlandı | `zamora_2022` disabled placeholder; bkz. Bölüm 18 |
 
@@ -117,6 +118,7 @@ Experiment registry (core/regions.py)
   -> Step8 (A-E)
   -> [opsiyonel] Step9 cross-region transfer (Step9A-D)
   -> [opsiyonel] Step9E post-hoc dağılım-kayması denetimi
+  -> [opsiyonel] Step9F kesifsel cross-region feature-representation denemesi
 ```
 
 Bu iş akışının önemli özellikleri:
@@ -322,6 +324,34 @@ Bu, bir **post-hoc ranking-reversal teşhisidir**. **Tahminler resmi sonuçta TE
 
 Kaynak kod ve tam çıktılar: `src/step9e_distribution_shift_audit.py`, `scripts/run_cross_region_shift_audit.py`, `outputs/cross_region/<source>__<target>/step9e/`.
 
+### Step9F: Kesifsel (exploratory) cross-region feature-representation denemesi
+
+Step9F, Step9E'nin teşhis ettiği dağılım/ilişki kaymalarının, ÖNCEDEN SABİTLENMİŞ feature altkümeleri (`original_baseline`, `original_thermal`, `thermal_without_elevation`, `thermal_without_absolute_lst`, `thermal_without_tvdi_difference`, `thermal_without_elevation_or_absolute_lst`, `stable_core`, `stable_core_without_landcover`) ve açıkça etiketlenmiş bir region-relative temsille azalıp azalmadığını araştıran **kesifsel, post-hoc** bir denemedir.
+
+**Kod tamamlanmıştır ve `--dry-run` ile doğrulanmıştır, ancak bu README hiçbir Step9F performans sayısı İÇERMEZ** — sonuçlar yalnızca deney gerçek Manavgat/Bejís verisiyle çalıştırıldıktan sonra raporlanacaktır.
+
+İki ayrı, AÇIKÇA etiketlenmiş rejim çalıştırılır (birbirine karıştırılmaz):
+
+- **Regime A — `strict_source_only_inductive_transfer`**: tüm 8 sabit varyant; ön-işleme/eşik seçimi yalnızca kaynak (source) satırlarından.
+- **Regime B — `unsupervised_target_covariate_adaptation` / `transductive_region_relative_representation`**: yalnızca `original_thermal` ve `stable_core` varyantları; her bölgenin kendi (etiketsiz) covariate medyan/IQR istatistikleriyle region-relative normalizasyon. Bu, saf source-only transfer DEĞİLDİR — asla öyle adlandırılmaz.
+
+Step9F, Step9A-E dosyalarını **DEĞİŞTİRMEZ** (yalnızca salt-okunur girdi/provenance olarak okur), Step8A veri setlerini **DEĞİŞTİRMEZ**, hedef etiketleri normalizasyon/fit/eşik seçimi/kalibrasyon için **ASLA KULLANMAZ**, ve tahminleri **TERS ÇEVİRMEZ**. Regime A / `original_baseline` ve `original_thermal`'ın mevcut Step9B metriklerini sayısal tolerans dahilinde (1e-6) yeniden ürettiği doğrulanır; reprodüksiyon başarısız olursa Step9F fail-fast durur.
+
+Herhangi bir aday burada seçilirse, **üçüncü bağımsız bir wildfire bölgesinde test edilmeden önce, Manavgat/Bejís üzerinde daha fazla ayar yapılmadan DONDURULMALIDIR (frozen)**. `candidate_for_third_region_freeze` bayrağı yalnızca kesifsel bir tarama (screening) kuralıdır — genelleme kanıtı DEĞİLDİR.
+
+```bash
+python scripts/run_exploratory_transfer_features.py \
+  --source manavgat_2021 --target bejis_2022 --reverse --dry-run
+
+python scripts/run_exploratory_transfer_features.py \
+  --source manavgat_2021 --target bejis_2022 --reverse --force
+
+python scripts/main.py transfer-explore \
+  --source manavgat_2021 --target bejis_2022 --reverse --force
+```
+
+Kaynak kod: `src/step9f_exploratory_transfer_feature_experiment.py`, `core/cross_region_experiment.py` (paylaşılan yardımcılar), `scripts/run_exploratory_transfer_features.py`. Çıktılar (deney çalıştırıldığında): `outputs/cross_region/<source>__<target>/step9f/`.
+
 ## 11. Örnek Görseller
 
 Şu an README'de final örnek görseller bulunmamaktadır. Önceki prototip haritalar geçici olarak kaldırılmıştır.
@@ -455,6 +485,18 @@ python scripts/main.py shift-audit \
 
 `scripts/run_cross_region_shift_audit.py`'yi reuse eder; Step9A-D'yi DEĞİŞTİRMEZ, hiçbir modeli yeniden eğitmez.
 
+### `transfer-explore` — Step9F kesifsel (exploratory) feature-representation denemesi
+
+```bash
+python scripts/main.py transfer-explore \
+  --source manavgat_2021 --target bejis_2022 --reverse --dry-run
+
+python scripts/main.py transfer-explore \
+  --source manavgat_2021 --target bejis_2022 --reverse --force
+```
+
+`scripts/run_exploratory_transfer_features.py`'yi reuse eder. Bu **kesifsel, post-hoc** bir denemedir — tarafsız dış validation DEĞİLDİR, Step9'un düzeltmesi DEĞİLDİR. Step9A-E dosyalarını DEĞİŞTİRMEZ. Detaylar için bkz. Bölüm 10.
+
 ### `legacy` — yalnızca Kozan, Drive-tabanlı tam pipeline
 
 ```bash
@@ -524,6 +566,7 @@ core/
   regions.py                   # Step0 deney/bölge (experiment/region) kayıt defteri
   experiment_context.py        # Step3-Step5/5C/7/8 için deney-farkında path/tarih context'i
   pipeline_orchestrator.py     # scripts/main.py'nin kullandığı asama sırası/dispatch katmanı
+  cross_region_experiment.py   # Step9F'in paylaşılan yardımcıları (sabit varyantlar, region-relative transform, esli bootstrap)
   validation_burned_area.py    # Burned-area doğrulama mantığı
   drive_downloader.py          # Legacy Google Drive indirme yardımcıları
   gee_utils.py                 # Ortak GEE yardımcıları
@@ -548,9 +591,10 @@ src/
   step9c_cross_region_block_bootstrap.py    # Hedef-bölge spatial-block bootstrap
   step9d_build_cross_region_report.py       # Birleşik final cross-region raporu
   step9e_distribution_shift_audit.py        # Post-hoc dağılım-kayması/ilişki-kayması denetimi
+  step9f_exploratory_transfer_feature_experiment.py  # Kesifsel cross-region feature-representation denemesi
 
 scripts/
-  main.py                              # Canonical deney-farkında CLI (experiment/transfer/shift-audit/legacy)
+  main.py                              # Canonical deney-farkında CLI (experiment/transfer/shift-audit/transfer-explore/legacy)
   export_mcd64a1_raw_burndate.py       # Raw BurnDate DOY export'u için ince CLI sarmalayıcı
   preview_experiment_aoi.py            # Deney metadata + AOI önizleme (export/pipeline çalıştırmaz)
   run_label_gate_only.py               # Gate-only çalıştırıcı (Kozan: legacy; diğerleri: namespaced)
@@ -559,6 +603,7 @@ scripts/
   run_step8_modeling.py                # Deney-farkında Step8A-E çalıştırıcı
   run_cross_region_transfer.py         # Step9A-D orkestratörü
   run_cross_region_shift_audit.py      # Step9E orkestratörü
+  run_exploratory_transfer_features.py # Step9F orkestratörü (kesifsel, post-hoc)
   prepare_dem_for_experiment.py        # Kozan-dışı deneyler için namespaced DEM hazırlığı
   prepare_modis_for_step7.py           # Kozan-dışı deneyler için namespaced MODIS mean/std hazırlığı
   check_experiment_registry.py         # Step0 kayıt defteri doğrulama script'i
@@ -568,6 +613,7 @@ scripts/
 tests/
   test_pipeline_orchestrator.py        # Asama sırası, namespace güvenliği, dry-run no-execution testleri
   test_main_cli.py                     # scripts/main.py argparse/dispatch testleri
+  test_step9f.py                       # Step9F: sabit varyantlar, yasak kolon, region-relative etiket-kullanmama, esli bootstrap, reprodüksiyon kontrolü, aday tarama kuralı testleri
 
 data/       # Yerel ham/indirilmiş veri klasörleri (.gitignore'da)
 outputs/    # Her step'in ürettiği raster, tablo ve rapor çıktıları (.gitignore'da)

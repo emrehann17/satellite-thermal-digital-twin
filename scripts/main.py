@@ -93,6 +93,10 @@ EPILOG_EXAMPLES = """\
   python scripts/main.py shift-audit \\
     --source manavgat_2021 --target bejis_2022 --force
 
+  # Step9F kesifsel (exploratory) cross-region feature-representation deneyi
+  python scripts/main.py transfer-explore \\
+    --source manavgat_2021 --target bejis_2022 --reverse --force
+
   # legacy Kozan (Google Drive tabanlı) tam pipeline
   python scripts/main.py legacy --experiment kozan_2023 --force
 """
@@ -157,6 +161,21 @@ def cmd_shift_audit(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001
         return _fail("shift-audit", exc)
     log.info("[shift-audit] tamamlandı: ran=%s", result.get("ran"))
+    return 0
+
+
+def cmd_transfer_explore(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_transfer_explore_stage(
+            source_id=args.source, target_id=args.target, reverse=args.reverse,
+            dry_run=args.dry_run, force=args.force,
+            bootstrap_replicates=args.bootstrap_replicates, seed=args.seed,
+        )
+    except SystemExit as exc:
+        return _fail("transfer-explore", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("transfer-explore", exc)
+    log.info("[transfer-explore] tamamlandı: ran=%s", result.get("ran"))
     return 0
 
 
@@ -226,7 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=EPILOG_EXAMPLES,
     )
-    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,legacy}")
+    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,legacy}")
 
     # --- experiment ---
     p_exp = subparsers.add_parser(
@@ -291,6 +310,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_shift.add_argument("--force", action="store_true", help="step9e çıktısı zaten varsa üzerine yaz.")
     p_shift.add_argument("--dry-run", action="store_true", help="Hiçbir hesaplama çalıştırma; planlanan yolları/feature setlerini bas.")
     p_shift.set_defaults(func=cmd_shift_audit)
+
+    # --- transfer-explore ---
+    p_explore = subparsers.add_parser(
+        "transfer-explore",
+        help="Step9F kesifsel (exploratory) cross-region feature-representation deneyi.",
+        description=(
+            "scripts/run_exploratory_transfer_features.py'yi reuse ederek Step9F'i "
+            "calistirir. Bu KESIFSEL, POST-HOC bir denedir -- tarafsiz dis validation "
+            "DEGILDIR, Step9'un duzeltmesi DEGILDIR, transfer-safe feature setinin "
+            "KANITI DEGILDIR. Step9A-E dosyalarini DEGISTIRMEZ."
+        ),
+    )
+    p_explore.add_argument("--source", required=True, help="Kaynak (source) experiment_id.")
+    p_explore.add_argument("--target", required=True, help="Hedef (target) experiment_id.")
+    p_explore.add_argument("--reverse", action="store_true", help="Ters yonu de acikca teyit eder (Step9F zaten her iki yonu de hesaplar).")
+    p_explore.add_argument("--force", action="store_true", help="step9f çıktısı zaten varsa üzerine yaz.")
+    p_explore.add_argument("--dry-run", action="store_true", help="Hiçbir model fit/değerlendirme çalıştırma; yalnızca planlanan varyantları/rejimleri/yolları bas.")
+    p_explore.add_argument("--bootstrap-replicates", type=int, default=1000, help="Hedef-bölge eşli spatial-block bootstrap replika sayısı (varsayılan: 1000).")
+    p_explore.add_argument("--seed", type=int, default=None, help="Rastgele seed (varsayılan: Step9B ile AYNI sabit seed).")
+    p_explore.set_defaults(func=cmd_transfer_explore)
 
     # --- legacy ---
     p_legacy = subparsers.add_parser(

@@ -197,7 +197,7 @@ EXPERIMENTS = {
         "notes": "Anchor natural-vegetation wildfire AOI.",
     },
     
-        "bejis_2022": {
+        "bejis_2022": { #valenica
         "enabled": True,
         "region_key": "bejis_aoi",
         "display_name": "Bejís / Castellón 2022",

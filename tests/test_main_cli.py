@@ -19,7 +19,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from scripts.main import build_parser, cmd_experiment, cmd_legacy, cmd_shift_audit, cmd_transfer
+from scripts.main import build_parser, cmd_experiment, cmd_legacy, cmd_shift_audit, cmd_transfer, cmd_transfer_explore
 
 
 class TestParserStructure(unittest.TestCase):
@@ -89,6 +89,27 @@ class TestParserStructure(unittest.TestCase):
         self.assertEqual(args.command, "shift-audit")
         self.assertTrue(args.dry_run)
         self.assertIs(args.func, cmd_shift_audit)
+
+    def test_transfer_explore_subcommand_parses(self):
+        args = self.parser.parse_args([
+            "transfer-explore", "--source", "manavgat_2021", "--target", "bejis_2022",
+            "--reverse", "--force", "--bootstrap-replicates", "500", "--seed", "7",
+        ])
+        self.assertEqual(args.command, "transfer-explore")
+        self.assertEqual(args.source, "manavgat_2021")
+        self.assertEqual(args.target, "bejis_2022")
+        self.assertTrue(args.reverse)
+        self.assertTrue(args.force)
+        self.assertEqual(args.bootstrap_replicates, 500)
+        self.assertEqual(args.seed, 7)
+        self.assertIs(args.func, cmd_transfer_explore)
+
+    def test_transfer_explore_default_bootstrap_and_seed(self):
+        args = self.parser.parse_args([
+            "transfer-explore", "--source", "manavgat_2021", "--target", "bejis_2022", "--dry-run",
+        ])
+        self.assertEqual(args.bootstrap_replicates, 1000)
+        self.assertIsNone(args.seed)
 
     def test_legacy_subcommand_defaults_to_kozan(self):
         args = self.parser.parse_args(["legacy", "--dry-run"])

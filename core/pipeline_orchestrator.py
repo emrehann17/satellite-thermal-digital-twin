@@ -369,6 +369,20 @@ def run_shift_audit_stage(source_id: str, target_id: str, dry_run: bool, force: 
     )
 
 
+def run_transfer_explore_stage(
+    source_id: str, target_id: str, reverse: bool, dry_run: bool, force: bool,
+    bootstrap_replicates: int = 1000, seed: int | None = None,
+) -> dict:
+    """scripts/run_exploratory_transfer_features.py:main() -- Step9F (kesifsel,
+    post-hoc; Step9A-E'yi DEGISTIRMEZ, hicbir modeli onlar ADINA YENIDEN EGITMEZ)."""
+    from scripts.run_exploratory_transfer_features import main as run_exploratory_transfer_features
+
+    return run_exploratory_transfer_features(
+        source_id=source_id, target_id=target_id, reverse=reverse, dry_run=dry_run,
+        force=force, bootstrap_replicates=bootstrap_replicates, seed=seed,
+    )
+
+
 # =============================================================================
 # LEGACY: Kozan-only Step1->Step8E (Google Drive tabanli) tam pipeline.
 #
