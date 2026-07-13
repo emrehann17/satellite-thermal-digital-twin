@@ -11,6 +11,7 @@ orkestrasyon yapar (mevcut Step9E/9F CLI-wrapper deseniyle AYNI).
 CLI:
     python scripts/run_step10_self_calibrated_transfer.py --source manavgat_2021 --target bejis_2022 --reverse --dry-run
     python scripts/run_step10_self_calibrated_transfer.py --source manavgat_2021 --target bejis_2022 --reverse
+    python scripts/run_step10_self_calibrated_transfer.py --source manavgat_2021 --target bejis_2022 --reverse --report-only
 """
 
 from __future__ import annotations
@@ -95,17 +96,61 @@ def _log_dry_run(source_id: str, target_id: str, reverse: bool, bootstrap_replic
     )
 
 
+def _run_report_only(source_id: str, target_id: str) -> dict:
+    """Dispatch only Step10D using the immutable preregistration analysis_id."""
+    import json
+
+    from core.step10_shared import Step10Error, step10_output_dir
+    from src.step10d_final_report import run_step10d
+
+    preregistration_path = step10_output_dir(source_id, target_id) / "step10_preregistration.json"
+    if not preregistration_path.is_file():
+        raise Step10Error(
+            f"Report-only mode requires the existing frozen preregistration: {preregistration_path}"
+        )
+    preregistration = json.loads(preregistration_path.read_text(encoding="utf-8"))
+    analysis_id = preregistration.get("analysis_id")
+    if not analysis_id:
+        raise Step10Error("Frozen preregistration has no analysis_id.")
+    report = run_step10d(
+        source_id=source_id, target_id=target_id, analysis_id=analysis_id,
+        force=True, report_only_generation=True,
+    )
+    return {
+        "ran": True, "report_only": True, "analysis_id": analysis_id,
+        "step10d": report, "scientific_stages_called": [],
+    }
+
+
+def _log_report_only_plan(source_id: str, target_id: str) -> dict:
+    from src.step10d_final_report import report_only_plan
+
+    plan = report_only_plan(source_id, target_id)
+    log.info("[dry-run][report-only] Step10D only; Step10A/B/C will not be called.")
+    for path in plan["read_only_inputs"]:
+        log.info("[dry-run][report-only] read protected: %s", path)
+    for path in plan["writable_files_if_executed"]:
+        log.info("[dry-run][report-only] would write: %s", path)
+    log.info("[dry-run][report-only] no files written.")
+    return plan
+
+
 def main(
     source_id: str, target_id: str, reverse: bool = False, dry_run: bool = False,
     force: bool = False, bootstrap_replicates: int = STEP10_BOOTSTRAP_REPLICATES,
-    seed: int = STEP10_RANDOM_STATE,
+    seed: int = STEP10_RANDOM_STATE, report_only: bool = False,
 ) -> dict:
     if source_id == target_id:
         raise Step10RunnerError("--source ve --target ayni deney OLAMAZ.")
 
     if dry_run:
+        if report_only:
+            return {"ran": False, "reason": "dry_run", "report_only": True, "plan": _log_report_only_plan(source_id, target_id)}
         _log_dry_run(source_id, target_id, reverse, bootstrap_replicates, seed)
         return {"ran": False, "reason": "dry_run"}
+
+    if report_only:
+        return _run_report_only(source_id, target_id)
 
     if not reverse:
         log.warning(
@@ -164,6 +209,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--reverse", action="store_true", help="Ters yonu de acikca teyit eder (Step10 zaten her iki yonu de hesaplar).")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true", help="step10 ciktilari zaten varsa uzerine yaz (on-kayit HARIC -- o asla degistirilmez).")
+    parser.add_argument("--report-only", action="store_true", help="Yalnizca frozen Step10 ciktilarindan Step10D final raporlarini yeniden uret.")
     parser.add_argument("--bootstrap-replicates", type=int, default=STEP10_BOOTSTRAP_REPLICATES)
     parser.add_argument("--seed", type=int, default=STEP10_RANDOM_STATE)
     return parser.parse_args(argv)
@@ -174,4 +220,5 @@ if __name__ == "__main__":
     main(
         source_id=args.source, target_id=args.target, reverse=args.reverse, dry_run=args.dry_run,
         force=args.force, bootstrap_replicates=args.bootstrap_replicates, seed=args.seed,
+        report_only=args.report_only,
     )

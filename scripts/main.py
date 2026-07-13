@@ -47,6 +47,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import traceback
 from pathlib import Path
@@ -189,12 +190,31 @@ def cmd_self_cal_transfer(args: argparse.Namespace) -> int:
             source_id=args.source, target_id=args.target, reverse=args.reverse,
             dry_run=args.dry_run, force=args.force,
             bootstrap_replicates=args.bootstrap_replicates, seed=args.seed,
+            report_only=args.report_only,
         )
     except SystemExit as exc:
         return _fail("self-cal-transfer", exc)
     except Exception as exc:  # noqa: BLE001
         return _fail("self-cal-transfer", exc)
     log.info("[self-cal-transfer] tamamlandı: ran=%s", result.get("ran"))
+    return 0
+
+
+def cmd_step8_robustness(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_step8_robustness_stage(
+            experiments=args.experiments,
+            block_sizes_cells=args.block_sizes_cells,
+            dry_run=args.dry_run,
+            force=args.force,
+        )
+    except SystemExit as exc:
+        return _fail("step8-robustness", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("step8-robustness", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info("[step8-robustness] tamamlandı: ran=%s", result.get("ran"))
     return 0
 
 
@@ -264,7 +284,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=EPILOG_EXAMPLES,
     )
-    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,legacy}")
+    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,step8-robustness,transfer,shift-audit,transfer-explore,self-cal-transfer,legacy}")
 
     # --- experiment ---
     p_exp = subparsers.add_parser(
@@ -367,9 +387,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_selfcal.add_argument("--reverse", action="store_true", help="Ters yönü de açıkça teyit eder (Step10 zaten her iki yönü de hesaplar).")
     p_selfcal.add_argument("--force", action="store_true", help="step10 çıktılarını üzerine yaz (on-kayıt/preregistration HARİÇ -- o asla değiştirilmez).")
     p_selfcal.add_argument("--dry-run", action="store_true", help="Hiçbir fit/adapt/predict/bootstrap çalıştırma; yalnızca dondurulmuş planı bas.")
+    p_selfcal.add_argument("--report-only", action="store_true", help="Yalnızca frozen Step10 girdilerinden Step10D JSON/Markdown raporlarını yeniden üret.")
     p_selfcal.add_argument("--bootstrap-replicates", type=int, default=1000, help="Hedef-bölge eşli (N-yollu) spatial-block bootstrap replika sayısı (varsayılan: 1000).")
     p_selfcal.add_argument("--seed", type=int, default=42, help="Rastgele seed (varsayılan: STEP10_RANDOM_STATE=42).")
     p_selfcal.set_defaults(func=cmd_self_cal_transfer)
+
+    # --- step8-robustness ---
+    p_step8_robustness = subparsers.add_parser(
+        "step8-robustness",
+        help="Frozen within-region Step8 result for predefined 10/20-cell blocks.",
+        description=(
+            "Runs the exact frozen Manavgat/Bejis Step8 scientific plan at both "
+            "predefined large-block scales. Original Step8A-E outputs are read-only."
+        ),
+    )
+    p_step8_robustness.add_argument(
+        "--experiments", nargs="+", required=True,
+        help="Must be exactly: manavgat_2021 bejis_2022 (in this order).",
+    )
+    p_step8_robustness.add_argument(
+        "--block-sizes-cells", nargs="+", required=True, type=int,
+        help="Must be exactly: 10 20 (in this order).",
+    )
+    p_step8_robustness.add_argument(
+        "--force", action="store_true",
+        help="Overwrite downstream robustness outputs only; never rewrite preregistration or original Step8 outputs.",
+    )
+    p_step8_robustness.add_argument(
+        "--dry-run", action="store_true",
+        help="Resolve and print the frozen plan without fitting, bootstrapping, or writing scientific outputs.",
+    )
+    p_step8_robustness.set_defaults(func=cmd_step8_robustness)
 
     # --- legacy ---
     p_legacy = subparsers.add_parser(

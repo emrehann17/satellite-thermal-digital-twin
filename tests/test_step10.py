@@ -503,5 +503,163 @@ class TestReproductionCheckLogic(unittest.TestCase):
         self.assertEqual(calls, [("src", "tgt")])
 
 
+class TestStep10ReportOnlyQA(unittest.TestCase):
+    """Report-only regression coverage against copied frozen scientific inputs."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        import src.step10d_final_report as s10d
+
+        self.s10d = s10d
+        self.tmp = tempfile.TemporaryDirectory()
+        self.output_dir = Path(self.tmp.name)
+        self.real_output = _PROJECT_ROOT / "outputs" / "cross_region" / "manavgat_2021__bejis_2022" / "step10"
+        for name in s10d.PROTECTED_INPUT_FILENAMES:
+            shutil.copy2(self.real_output / name, self.output_dir / name)
+        self.analysis_id = json.loads((self.output_dir / "step10_preregistration.json").read_text())["analysis_id"]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _patch_output(self):
+        import unittest.mock as mock
+        return mock.patch.object(self.s10d, "step10_output_dir", return_value=self.output_dir)
+
+    def _build(self):
+        with self._patch_output():
+            return self.s10d.build_final_report("manavgat_2021", "bejis_2022", self.analysis_id)
+
+    def test_chance_status_logic_all_three_cases(self):
+        classify = self.s10d.classify_chance_status
+        self.assertEqual(classify(0.2, 0.49), "bootstrap_supported_below_chance")
+        self.assertEqual(classify(0.51, 0.8), "bootstrap_supported_above_chance")
+        self.assertEqual(classify(0.4, 0.6), "chance_level_not_excluded")
+
+    def test_paired_support_logic_all_three_cases(self):
+        classify = self.s10d.classify_paired_difference_support
+        self.assertEqual(classify(0.01, 0.2), "bootstrap_supported_positive")
+        self.assertEqual(classify(-0.2, -0.01), "bootstrap_supported_negative")
+        self.assertEqual(classify(-0.01, 0.01), "uncertain_interval_includes_zero")
+
+    def test_tables_are_complete_and_brier_is_unavailable(self):
+        report = self._build()
+        self.assertEqual(len(report["target_performance"]), 12)
+        self.assertEqual(len(report["paired_adaptation_differences"]), 24)
+        self.assertEqual(len(report["within_transfer_decomposition"]), 16)
+        self.assertTrue(all(row["brier"] is None for row in report["target_performance"]))
+
+    def test_frozen_interpretations_are_preserved(self):
+        report = self._build()
+        per_direction = report["per_direction_interpretation"]
+        forward = per_direction["manavgat_2021_to_bejis_2022"]["by_model_family"]
+        reverse = per_direction["bejis_2022_to_manavgat_2021"]["by_model_family"]
+        self.assertEqual(forward["thermal"]["covariate_recovery_zscore"], "bootstrap_supported_positive")
+        self.assertEqual(reverse["thermal"]["covariate_recovery_zscore"], "uncertain_interval_includes_zero")
+        self.assertEqual(forward["thermal"]["coral_vs_zscore"], "bootstrap_supported_positive")
+        self.assertEqual(reverse["thermal"]["coral_vs_zscore"], "bootstrap_supported_positive")
+        self.assertEqual(forward["baseline"]["coral_vs_zscore"], "uncertain_interval_includes_zero")
+        self.assertEqual(reverse["baseline"]["coral_vs_zscore"], "uncertain_interval_includes_zero")
+
+    def test_thermal_chance_status_is_method_specific(self):
+        report = self._build()
+        per_direction = report["per_direction_interpretation"]
+        forward = per_direction["manavgat_2021_to_bejis_2022"]["by_model_family"]["thermal"]["separate_questions"]
+        reverse = per_direction["bejis_2022_to_manavgat_2021"]["by_model_family"]["thermal"]["separate_questions"]
+        self.assertEqual(forward["regionwise_zscore_performance_relative_to_chance"], "chance_level_not_excluded")
+        self.assertEqual(forward["coral_after_regionwise_zscore_performance_relative_to_chance"], "chance_level_not_excluded")
+        self.assertEqual(reverse["regionwise_zscore_performance_relative_to_chance"], "bootstrap_supported_below_chance")
+        self.assertEqual(reverse["coral_after_regionwise_zscore_performance_relative_to_chance"], "bootstrap_supported_above_chance")
+
+    def test_mixed_analysis_ids_fail_fast(self):
+        path = self.output_dir / "step10_adaptation_statistics.json"
+        payload = json.loads(path.read_text())
+        payload["analysis_id"] = "f" * 64
+        path.write_text(json.dumps(payload))
+        with self._patch_output(), self.assertRaises(s10.Step10Error):
+            self.s10d.build_final_report("manavgat_2021", "bejis_2022", self.analysis_id)
+
+    def test_missing_frozen_input_fails_fast(self):
+        (self.output_dir / "step10_metrics.csv").unlink()
+        with self._patch_output(), self.assertRaises(s10.Step10Error):
+            self.s10d.run_step10d(
+                "manavgat_2021", "bejis_2022", self.analysis_id,
+                report_only_generation=True,
+            )
+
+    def test_prediction_target_label_firewall(self):
+        self.assertEqual(
+            self.s10d.find_prohibited_prediction_columns(
+                ["target_experiment", "target_cell_id", "BurnDate", "y_true", "outcome"]
+            ),
+            ["BurnDate", "outcome", "y_true"],
+        )
+        with self._patch_output():
+            qa = self.s10d.inspect_predictions_for_qa(self.output_dir / "step10_predictions.parquet")
+        self.assertFalse(qa["target_label_present_in_predictions"])
+
+    def test_only_final_reports_change_and_protected_hashes_match(self):
+        before_names = {path.name for path in self.output_dir.iterdir()}
+        before_hashes = self.s10d.protected_input_hashes(self.output_dir)
+        with self._patch_output():
+            report = self.s10d.run_step10d(
+                "manavgat_2021", "bejis_2022", self.analysis_id,
+                force=True, report_only_generation=True,
+            )
+        after_hashes = self.s10d.protected_input_hashes(self.output_dir)
+        after_names = {path.name for path in self.output_dir.iterdir()}
+        self.assertEqual(before_hashes, after_hashes)
+        self.assertEqual(after_names - before_names, set(self.s10d.REPORT_FILENAMES))
+        self.assertEqual(report["report_only_generation"]["scientific_stages_called"], [])
+
+    def test_report_output_is_deterministic(self):
+        with self._patch_output():
+            self.s10d.run_step10d("manavgat_2021", "bejis_2022", self.analysis_id, force=True, report_only_generation=True)
+            first = [(self.output_dir / name).read_bytes() for name in self.s10d.REPORT_FILENAMES]
+            self.s10d.run_step10d("manavgat_2021", "bejis_2022", self.analysis_id, force=True, report_only_generation=True)
+            second = [(self.output_dir / name).read_bytes() for name in self.s10d.REPORT_FILENAMES]
+        self.assertEqual(first, second)
+
+    def test_report_only_dispatch_calls_step10d_not_scientific_stages(self):
+        import unittest.mock as mock
+        import core.step10_shared as shared
+        import scripts.run_step10_self_calibrated_transfer as runner
+        import src.step10a_preregistration_and_audit as s10a
+        import src.step10b_label_blind_adaptation as s10b
+        import src.step10c_paired_evaluation_bootstrap as s10c
+
+        fake_report = {"analysis_id": self.analysis_id}
+        with mock.patch.object(shared, "step10_output_dir", return_value=self.output_dir), \
+             mock.patch.object(self.s10d, "run_step10d", return_value=fake_report) as step10d, \
+             mock.patch.object(s10a, "main") as step10a, \
+             mock.patch.object(s10b, "run_step10b") as step10b, \
+             mock.patch.object(s10c, "run_step10c") as step10c:
+            result = runner.main("manavgat_2021", "bejis_2022", reverse=True, report_only=True)
+        step10d.assert_called_once()
+        step10a.assert_not_called()
+        step10b.assert_not_called()
+        step10c.assert_not_called()
+        self.assertTrue(result["report_only"])
+
+    def test_report_only_dry_run_writes_nothing(self):
+        import unittest.mock as mock
+        import scripts.run_step10_self_calibrated_transfer as runner
+
+        before = {path.name: path.read_bytes() for path in self.output_dir.iterdir()}
+        with mock.patch.object(self.s10d, "step10_output_dir", return_value=self.output_dir):
+            result = runner.main(
+                "manavgat_2021", "bejis_2022", reverse=True,
+                dry_run=True, report_only=True,
+            )
+        after = {path.name: path.read_bytes() for path in self.output_dir.iterdir()}
+        self.assertEqual(before, after)
+        self.assertFalse(result["ran"])
+
+    def test_direct_runner_parser_accepts_report_only(self):
+        from scripts.run_step10_self_calibrated_transfer import parse_args
+        args = parse_args(["--source", "manavgat_2021", "--target", "bejis_2022", "--reverse", "--report-only"])
+        self.assertTrue(args.report_only)
+
+
 if __name__ == "__main__":
     unittest.main()

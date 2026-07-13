@@ -386,6 +386,7 @@ def run_transfer_explore_stage(
 def run_self_cal_transfer_stage(
     source_id: str, target_id: str, reverse: bool, dry_run: bool, force: bool,
     bootstrap_replicates: int = 1000, seed: int | None = None,
+    report_only: bool = False,
 ) -> dict:
     """scripts/run_step10_self_calibrated_transfer.py:main() -- Step10
     (preregistered, target-label-blind unsupervised covariate adaptation:
@@ -397,7 +398,21 @@ def run_self_cal_transfer_stage(
     return run_step10_self_calibrated_transfer(
         source_id=source_id, target_id=target_id, reverse=reverse, dry_run=dry_run, force=force,
         bootstrap_replicates=bootstrap_replicates or STEP10_BOOTSTRAP_REPLICATES,
-        seed=seed if seed is not None else STEP10_RANDOM_STATE,
+        seed=seed if seed is not None else STEP10_RANDOM_STATE, report_only=report_only,
+    )
+
+
+def run_step8_robustness_stage(
+    experiments: list[str], block_sizes_cells: list[int], dry_run: bool, force: bool,
+) -> dict:
+    """Dispatch the frozen Step8 large-block robustness runner unchanged."""
+    from scripts.run_step8_large_block_robustness import main as run_step8_large_block_robustness
+
+    return run_step8_large_block_robustness(
+        experiments=experiments,
+        block_sizes_cells=block_sizes_cells,
+        dry_run=dry_run,
+        force=force,
     )
 
 

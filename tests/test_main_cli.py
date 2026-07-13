@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +22,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from scripts.main import (
     build_parser, cmd_experiment, cmd_legacy, cmd_self_cal_transfer, cmd_shift_audit,
-    cmd_transfer, cmd_transfer_explore,
+    cmd_step8_robustness, cmd_transfer, cmd_transfer_explore,
 )
 
 
@@ -124,8 +125,18 @@ class TestParserStructure(unittest.TestCase):
         self.assertEqual(args.target, "bejis_2022")
         self.assertTrue(args.reverse)
         self.assertTrue(args.force)
+        self.assertFalse(args.report_only)
         self.assertEqual(args.bootstrap_replicates, 500)
         self.assertEqual(args.seed, 7)
+        self.assertIs(args.func, cmd_self_cal_transfer)
+
+    def test_self_cal_transfer_report_only_parses(self):
+        args = self.parser.parse_args([
+            "self-cal-transfer", "--source", "manavgat_2021", "--target", "bejis_2022",
+            "--reverse", "--report-only",
+        ])
+        self.assertTrue(args.report_only)
+        self.assertTrue(args.reverse)
         self.assertIs(args.func, cmd_self_cal_transfer)
 
     def test_self_cal_transfer_default_bootstrap_and_seed(self):
@@ -156,6 +167,39 @@ class TestParserStructure(unittest.TestCase):
         cmd_self_cal_transfer(args)
         if not existed_before:
             self.assertFalse(predictions_path.exists())
+
+    def test_step8_robustness_subcommand_parses_frozen_plan(self):
+        args = self.parser.parse_args([
+            "step8-robustness",
+            "--experiments", "manavgat_2021", "bejis_2022",
+            "--block-sizes-cells", "10", "20",
+            "--dry-run",
+        ])
+        self.assertEqual(args.experiments, ["manavgat_2021", "bejis_2022"])
+        self.assertEqual(args.block_sizes_cells, [10, 20])
+        self.assertTrue(args.dry_run)
+        self.assertFalse(args.force)
+        self.assertIs(args.func, cmd_step8_robustness)
+
+    def test_step8_robustness_cli_dispatches_through_orchestrator(self):
+        args = self.parser.parse_args([
+            "step8-robustness",
+            "--experiments", "manavgat_2021", "bejis_2022",
+            "--block-sizes-cells", "10", "20",
+            "--dry-run",
+        ])
+        with patch.object(
+            sys.modules["scripts.main"].orch,
+            "run_step8_robustness_stage",
+            return_value={"ran": False},
+        ) as mocked:
+            self.assertEqual(cmd_step8_robustness(args), 0)
+        mocked.assert_called_once_with(
+            experiments=["manavgat_2021", "bejis_2022"],
+            block_sizes_cells=[10, 20],
+            dry_run=True,
+            force=False,
+        )
 
     def test_legacy_subcommand_defaults_to_kozan(self):
         args = self.parser.parse_args(["legacy", "--dry-run"])

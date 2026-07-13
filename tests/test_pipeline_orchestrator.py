@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -162,6 +163,24 @@ class TestDryRunNoExecution(unittest.TestCase):
         gate_result = result["stage_results"]["gate"]
         self.assertFalse(gate_result.get("ran"))
         self.assertEqual(gate_result.get("reason"), "dry_run")
+
+
+class TestStep8RobustnessDispatch(unittest.TestCase):
+    def test_orchestrator_reuses_thin_runner(self):
+        with patch(
+            "scripts.run_step8_large_block_robustness.main",
+            return_value={"ran": False, "dry_run": True},
+        ) as mocked:
+            result = orch.run_step8_robustness_stage(
+                ["manavgat_2021", "bejis_2022"], [10, 20], dry_run=True, force=False
+            )
+        self.assertFalse(result["ran"])
+        mocked.assert_called_once_with(
+            experiments=["manavgat_2021", "bejis_2022"],
+            block_sizes_cells=[10, 20],
+            dry_run=True,
+            force=False,
+        )
 
 
 if __name__ == "__main__":
