@@ -19,7 +19,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from scripts.main import build_parser, cmd_experiment, cmd_legacy, cmd_shift_audit, cmd_transfer, cmd_transfer_explore
+from scripts.main import (
+    build_parser, cmd_experiment, cmd_legacy, cmd_self_cal_transfer, cmd_shift_audit,
+    cmd_transfer, cmd_transfer_explore,
+)
 
 
 class TestParserStructure(unittest.TestCase):
@@ -110,6 +113,49 @@ class TestParserStructure(unittest.TestCase):
         ])
         self.assertEqual(args.bootstrap_replicates, 1000)
         self.assertIsNone(args.seed)
+
+    def test_self_cal_transfer_subcommand_parses(self):
+        args = self.parser.parse_args([
+            "self-cal-transfer", "--source", "manavgat_2021", "--target", "bejis_2022",
+            "--reverse", "--force", "--bootstrap-replicates", "500", "--seed", "7",
+        ])
+        self.assertEqual(args.command, "self-cal-transfer")
+        self.assertEqual(args.source, "manavgat_2021")
+        self.assertEqual(args.target, "bejis_2022")
+        self.assertTrue(args.reverse)
+        self.assertTrue(args.force)
+        self.assertEqual(args.bootstrap_replicates, 500)
+        self.assertEqual(args.seed, 7)
+        self.assertIs(args.func, cmd_self_cal_transfer)
+
+    def test_self_cal_transfer_default_bootstrap_and_seed(self):
+        args = self.parser.parse_args([
+            "self-cal-transfer", "--source", "manavgat_2021", "--target", "bejis_2022", "--dry-run",
+        ])
+        self.assertEqual(args.bootstrap_replicates, 1000)
+        self.assertEqual(args.seed, 42)
+        self.assertFalse(args.reverse)
+
+    def test_self_cal_transfer_dry_run_dispatches_without_error(self):
+        args = self.parser.parse_args([
+            "self-cal-transfer", "--source", "manavgat_2021", "--target", "bejis_2022",
+            "--reverse", "--dry-run",
+        ])
+        exit_code = cmd_self_cal_transfer(args)
+        self.assertEqual(exit_code, 0)
+
+    def test_self_cal_transfer_dry_run_creates_no_predictions(self):
+        from core.step10_shared import step10_output_dir
+        output_dir = step10_output_dir("manavgat_2021", "bejis_2022")
+        predictions_path = output_dir / "step10_predictions.parquet"
+        existed_before = predictions_path.exists()
+        args = self.parser.parse_args([
+            "self-cal-transfer", "--source", "manavgat_2021", "--target", "bejis_2022",
+            "--reverse", "--dry-run",
+        ])
+        cmd_self_cal_transfer(args)
+        if not existed_before:
+            self.assertFalse(predictions_path.exists())
 
     def test_legacy_subcommand_defaults_to_kozan(self):
         args = self.parser.parse_args(["legacy", "--dry-run"])

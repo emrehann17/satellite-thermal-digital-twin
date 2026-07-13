@@ -97,6 +97,10 @@ EPILOG_EXAMPLES = """\
   python scripts/main.py transfer-explore \\
     --source manavgat_2021 --target bejis_2022 --reverse --force
 
+  # Step10 preregistered unsupervised self-calibrated cross-region transfer
+  python scripts/main.py self-cal-transfer \\
+    --source manavgat_2021 --target bejis_2022 --reverse --force
+
   # legacy Kozan (Google Drive tabanlı) tam pipeline
   python scripts/main.py legacy --experiment kozan_2023 --force
 """
@@ -179,6 +183,21 @@ def cmd_transfer_explore(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_self_cal_transfer(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_self_cal_transfer_stage(
+            source_id=args.source, target_id=args.target, reverse=args.reverse,
+            dry_run=args.dry_run, force=args.force,
+            bootstrap_replicates=args.bootstrap_replicates, seed=args.seed,
+        )
+    except SystemExit as exc:
+        return _fail("self-cal-transfer", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("self-cal-transfer", exc)
+    log.info("[self-cal-transfer] tamamlandı: ran=%s", result.get("ran"))
+    return 0
+
+
 def cmd_legacy(args: argparse.Namespace) -> int:
     if args.experiment not in orch.LEGACY_COMPATIBLE_EXPERIMENT_IDS:
         log.error(
@@ -245,7 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=EPILOG_EXAMPLES,
     )
-    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,legacy}")
+    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,legacy}")
 
     # --- experiment ---
     p_exp = subparsers.add_parser(
@@ -330,6 +349,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_explore.add_argument("--bootstrap-replicates", type=int, default=1000, help="Hedef-bölge eşli spatial-block bootstrap replika sayısı (varsayılan: 1000).")
     p_explore.add_argument("--seed", type=int, default=None, help="Rastgele seed (varsayılan: Step9B ile AYNI sabit seed).")
     p_explore.set_defaults(func=cmd_transfer_explore)
+
+    # --- self-cal-transfer ---
+    p_selfcal = subparsers.add_parser(
+        "self-cal-transfer",
+        help="Step10 preregistered unsupervised self-calibrated cross-region transfer.",
+        description=(
+            "scripts/run_step10_self_calibrated_transfer.py'yi reuse ederek "
+            "Step10'u (raw_source_only / regionwise_zscore / "
+            "coral_after_regionwise_zscore) calistirir. Hedef etiketleri "
+            "adaptasyon/fit/esik/kalibrasyon icin ASLA kullanilmaz. Step9A-F "
+            "dosyalarini DEGISTIRMEZ."
+        ),
+    )
+    p_selfcal.add_argument("--source", required=True, help="Kaynak (source) experiment_id.")
+    p_selfcal.add_argument("--target", required=True, help="Hedef (target) experiment_id.")
+    p_selfcal.add_argument("--reverse", action="store_true", help="Ters yönü de açıkça teyit eder (Step10 zaten her iki yönü de hesaplar).")
+    p_selfcal.add_argument("--force", action="store_true", help="step10 çıktılarını üzerine yaz (on-kayıt/preregistration HARİÇ -- o asla değiştirilmez).")
+    p_selfcal.add_argument("--dry-run", action="store_true", help="Hiçbir fit/adapt/predict/bootstrap çalıştırma; yalnızca dondurulmuş planı bas.")
+    p_selfcal.add_argument("--bootstrap-replicates", type=int, default=1000, help="Hedef-bölge eşli (N-yollu) spatial-block bootstrap replika sayısı (varsayılan: 1000).")
+    p_selfcal.add_argument("--seed", type=int, default=42, help="Rastgele seed (varsayılan: STEP10_RANDOM_STATE=42).")
+    p_selfcal.set_defaults(func=cmd_self_cal_transfer)
 
     # --- legacy ---
     p_legacy = subparsers.add_parser(

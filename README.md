@@ -43,9 +43,8 @@ Bu çalışmanın ne olduğu konusunda net olmak önemlidir: bu proje tamamlanm�
 | Step9C | Tamamlandı | Hedef-bölge spatial-block bootstrap güven aralıkları |
 | Step9D | Tamamlandı | Birleşik cross-region final raporu |
 | Step9E | Tamamlandı | Post-hoc dağılım-kayması / ilişki-kayması denetimi |
-| Step9F | Kod tamamlandı; deney henüz gerçek veriyle çalıştırılmadı | Kesifsel (exploratory), post-hoc cross-region feature-representation denemesi (bkz. Bölüm 10) |
-| `scripts/main.py` (deney-farkında CLI) | Tamamlandı | `experiment` / `transfer` / `shift-audit` / `legacy` alt-komutları (bkz. Bölüm 14) |
-| Üçüncü bağımsız bölge (external validation) | Planlandı | `zamora_2022` disabled placeholder; bkz. Bölüm 18 |
+| Step9F | Tamamlandı (kesifsel / post-hoc) | Sabit varyant paneli + region-relative adaptive rejim değerlendirildi; hiçbir aday tüm freeze-kriterlerini geçmedi (bkz. Bölüm 10) |
+| `scripts/main.py` (deney-farkında CLI) | Tamamlandı | `experiment` / `transfer` / `shift-audit` / `transfer-explore` / `self-cal-transfer` / `legacy` alt-komutları (bkz. Bölüm 14) |
 
 Step8A-E'nin üç bağımsız AOI'de (Kozan negative-control, Manavgat anchor wildfire, Bejís transfer wildfire) tamamlanmasıyla projenin metodolojik çekirdeği doğrulanmıştır: thermal feature'ların burned-area discrimination'a katkısı, label-honest bir 500 m grid ve spatial-block CV ile her bölgede bağımsız olarak ölçülmüştür. Bunun üzerine, iki wildfire AOI'si (Manavgat, Bejís) arasında bu katkının ne kadar transfer ettiği Step9A-D ile test edilmiş, ve sonuç dikkatle yorumlanmıştır: **doğrudan cross-region discrimination generalization'ı desteklenmemiştir**, ancak Brier (probability-error) iyileşmesi tutarlıdır. Step9E, bu sınırlı transferin olası nedenlerini (feature dağılım kayması, olasılık ölçek kayması, bölgeye-bağlı feature-label ilişki kayması) post-hoc olarak teşhis etmiştir.
 
@@ -119,6 +118,7 @@ Experiment registry (core/regions.py)
   -> [opsiyonel] Step9 cross-region transfer (Step9A-D)
   -> [opsiyonel] Step9E post-hoc dağılım-kayması denetimi
   -> [opsiyonel] Step9F kesifsel cross-region feature-representation denemesi
+  -> [opsiyonel] Step10 preregistered unsupervised self-calibrated transfer
 ```
 
 Bu iş akışının önemli özellikleri:
@@ -328,7 +328,7 @@ Kaynak kod ve tam çıktılar: `src/step9e_distribution_shift_audit.py`, `script
 
 Step9F, Step9E'nin teşhis ettiği dağılım/ilişki kaymalarının, ÖNCEDEN SABİTLENMİŞ feature altkümeleri (`original_baseline`, `original_thermal`, `thermal_without_elevation`, `thermal_without_absolute_lst`, `thermal_without_tvdi_difference`, `thermal_without_elevation_or_absolute_lst`, `stable_core`, `stable_core_without_landcover`) ve açıkça etiketlenmiş bir region-relative temsille azalıp azalmadığını araştıran **kesifsel, post-hoc** bir denemedir.
 
-**Kod tamamlanmıştır ve `--dry-run` ile doğrulanmıştır, ancak bu README hiçbir Step9F performans sayısı İÇERMEZ** — sonuçlar yalnızca deney gerçek Manavgat/Bejís verisiyle çalıştırıldıktan sonra raporlanacaktır.
+**Step9F tamamlandı** (post-hoc ve kesifsel). Step9B referans metrikleri 1e-6 tolerans içinde yeniden üretildi. Sekiz strict source-only varyant ve ayrıca iki region-relative adaptive varyant (yalnızca `original_thermal` ve `stable_core`) ayrı ayrı değerlendirildi. Önceden belirlenmiş `candidate_for_third_region_freeze` kriterlerinin **tamamını** geçen bir aday çıkmadı; kriterler sonuç görüldükten sonra gevşetilmedi. Nitel bulgular: mutlak-LST feature'larını çıkarmak iki yöndeki point estimate'ları iyileştirdi ve source performansını büyük ölçüde korudu, ancak ranking reversal'ı tamamen çözmedi; `stable_core` ranking reversal'ı iki yönde çözdü fakat source OOF performansında fazla kayıp oluşturdu; region-relative normalizasyon bazı transfer sorunlarını azalttı ama source performansı/Brier açısından yeni trade-off'lar getirdi. Bu README, gereksiz metrik kalabalığından kaçınmak için burada ham performans sayıları vermez — tam sayısal sonuçlar `outputs/cross_region/<source>__<target>/step9f/` altındadır. Henüz **doğrulanmış (validated) hiçbir transfer-safe temsil yoktur**; bir sonraki bilimsel karar, danışman değerlendirmesine bağlı olarak, dondurulmuş bir üçüncü-bölge dış değerlendirmesidir (bkz. Bölüm 18).
 
 İki ayrı, AÇIKÇA etiketlenmiş rejim çalıştırılır (birbirine karıştırılmaz):
 
@@ -351,6 +351,39 @@ python scripts/main.py transfer-explore \
 ```
 
 Kaynak kod: `src/step9f_exploratory_transfer_feature_experiment.py`, `core/cross_region_experiment.py` (paylaşılan yardımcılar), `scripts/run_exploratory_transfer_features.py`. Çıktılar (deney çalıştırıldığında): `outputs/cross_region/<source>__<target>/step9f/`.
+
+### Step10: Preregistered unsupervised self-calibrated cross-region transfer
+
+Step10, Step9'un ham (raw) source-only transferini referans alarak, **hedef etiketini adaptasyon/fit/eşik/kalibrasyon için hiçbir şekilde kullanmayan** iki unsupervised covariate-adaptation yöntemini dener: bölge-bazlı z-score standardizasyonu (`regionwise_zscore`) ve bunun üzerine uygulanan CORAL kovaryans hizalaması (`coral_after_regionwise_zscore`). Üç rejim karşılaştırılır: `raw_source_only`, `regionwise_zscore`, `coral_after_regionwise_zscore`.
+
+**Kod tamamlanmış ve `--dry-run` ile doğrulanmıştır; bu README hiçbir Step10 performans sayısı İÇERMEZ** — sonuçlar yalnızca deney gerçek Manavgat/Bejís verisiyle (non-dry-run) çalıştırıldıktan sonra raporlanacaktır.
+
+**Preregistration (on-kayıt):** Step10, hesaplamadan ÖNCE bilimsel tasarımının tamamını (feature setleri, model hiperparametreleri, adaptasyon tanımları, CORAL lambda, bootstrap konfigürasyonu, yorumlama kuralları) `step10_preregistration.json`'a dondurur ve `analysis_id = SHA256(canonical_scientific_config)` hesaplar. Bu dosya **immutable**dır: `--force` yalnızca downstream (Step10B-D) çıktılarını yeniler, on-kaydı ASLA değiştirmez; çalışma-zamanı bilimsel ayarları mevcut on-kayıtla uyuşmuyorsa Step10 fail-fast durur (yeni bir bilimsel tasarım, üzerine yazma değil, yeni bir analiz gerektirir).
+
+**Target-label firewall:** Step10 dört mantıksal alt-aşamaya ayrılmıştır — Step10A (preregistration + girdi denetimi), Step10B (label-blind fit/adapt/predict — hedef DataFrame'i `burned` kolonu OLMADAN işler ve etiketsiz tahminleri dondurur), Step10C (tahminler dondurulduktan SONRA hedef etiketini yükler, değerlendirir, eşli bootstrap çalıştırır), Step10D (yalnızca yorumlama, hesaplama YAPMAZ). `step10_predictions.parquet` **hedef etiketi İÇERMEZ**.
+
+**Raw reprodüksiyon kontrolü:** `raw_source_only` rejimi, mevcut Step9B metriklerini (ROC-AUC, PR-AUC) 1e-6 mutlak tolerans içinde yeniden üretmelidir; başarısız olursa Step10 fail-fast durur ve adapte edilmiş (z-score/CORAL) bilimsel rapora geçilmez.
+
+**Yorumlama kuralları** (istatistiksel anlamlılık/p-value ASLA kullanılmaz; yalnızca "bootstrap-supported" / "percentile interval excludes zero"):
+
+- Ham (raw) ROC-AUC point estimate < 0.5 ise "point-estimate düzeyinde anti-predictive"; yalnızca tam %95 CI 0.5'in altındaysa "bootstrap-supported below-chance".
+- `z-score - raw` CI'si tamamen 0'ın üzerindeyse "strong support"; yalnızca z-score ROC-AUC CI'si 0.5'in üzerindeyse "above-chance support"; aksi halde yalnızca point-estimate iyileşmesi.
+- `within - adapted` CI'si tamamen 0'ın üzerindeyse desteklenen bir residual gap raporlanır — bu, "kalan concept shift ile tutarlı" olarak ifade edilir, tek başına kanıt olarak SUNULMAZ.
+- `CORAL - z-score` CI'si 0'ı içeriyorsa, CORAL'ın basit z-score'a göre desteklenen bir iyileşme göstermediği belirtilir.
+- Aynı nitel sonuç her iki yönde de görülmüyorsa "bidirectional" değil "direction-dependent" olarak raporlanır.
+
+```bash
+python scripts/run_step10_self_calibrated_transfer.py \
+  --source manavgat_2021 --target bejis_2022 --reverse --dry-run
+
+python scripts/run_step10_self_calibrated_transfer.py \
+  --source manavgat_2021 --target bejis_2022 --reverse
+
+python scripts/main.py self-cal-transfer \
+  --source manavgat_2021 --target bejis_2022 --reverse
+```
+
+Step10, Step9A-F dosyalarını **DEĞİŞTİRMEZ**. Step10 bir olasılık kalibrasyonu (probability calibration) DEĞİLDİR ve operasyonel bir transferin kanıtı DEĞİLDİR. Kaynak kod: `src/step10a_preregistration_and_audit.py`, `src/step10b_label_blind_adaptation.py`, `src/step10c_paired_evaluation_bootstrap.py`, `src/step10d_final_report.py`, `core/step10_shared.py`, `scripts/run_step10_self_calibrated_transfer.py`. Çıktılar (deney çalıştırıldığında): `outputs/cross_region/<source>__<target>/step10/`.
 
 ## 11. Örnek Görseller
 
@@ -497,6 +530,18 @@ python scripts/main.py transfer-explore \
 
 `scripts/run_exploratory_transfer_features.py`'yi reuse eder. Bu **kesifsel, post-hoc** bir denemedir — tarafsız dış validation DEĞİLDİR, Step9'un düzeltmesi DEĞİLDİR. Step9A-E dosyalarını DEĞİŞTİRMEZ. Detaylar için bkz. Bölüm 10.
 
+### `self-cal-transfer` — Step10 preregistered unsupervised self-calibrated transfer
+
+```bash
+python scripts/main.py self-cal-transfer \
+  --source manavgat_2021 --target bejis_2022 --reverse --dry-run
+
+python scripts/main.py self-cal-transfer \
+  --source manavgat_2021 --target bejis_2022 --reverse --force
+```
+
+`scripts/run_step10_self_calibrated_transfer.py`'yi reuse eder. Hedef etiketleri adaptasyon/fit/eşik/kalibrasyon için ASLA kullanılmaz (target-label firewall). `--force`, on-kayıt (preregistration) dosyasını ASLA değiştirmez. Step9A-F dosyalarını DEĞİŞTİRMEZ. Detaylar için bkz. Bölüm 10.
+
 ### `legacy` — yalnızca Kozan, Drive-tabanlı tam pipeline
 
 ```bash
@@ -567,6 +612,7 @@ core/
   experiment_context.py        # Step3-Step5/5C/7/8 için deney-farkında path/tarih context'i
   pipeline_orchestrator.py     # scripts/main.py'nin kullandığı asama sırası/dispatch katmanı
   cross_region_experiment.py   # Step9F'in paylaşılan yardımcıları (sabit varyantlar, region-relative transform, esli bootstrap)
+  step10_shared.py             # Step10'un paylaşılan yardımcıları (region-wise z-score, CORAL, N-yollu eşli bootstrap, hashing/analysis_id)
   validation_burned_area.py    # Burned-area doğrulama mantığı
   drive_downloader.py          # Legacy Google Drive indirme yardımcıları
   gee_utils.py                 # Ortak GEE yardımcıları
@@ -592,9 +638,13 @@ src/
   step9d_build_cross_region_report.py       # Birleşik final cross-region raporu
   step9e_distribution_shift_audit.py        # Post-hoc dağılım-kayması/ilişki-kayması denetimi
   step9f_exploratory_transfer_feature_experiment.py  # Kesifsel cross-region feature-representation denemesi
+  step10a_preregistration_and_audit.py      # Step10: immutable preregistration + girdi denetimi
+  step10b_label_blind_adaptation.py         # Step10: hedef-etiket-körü (label-blind) fit/adapt/predict
+  step10c_paired_evaluation_bootstrap.py    # Step10: etiket SIMDI yüklenir; eşli değerlendirme + N-yollu bootstrap
+  step10d_final_report.py                   # Step10: yalnızca yorumlama (hesaplama YAPMAZ)
 
 scripts/
-  main.py                              # Canonical deney-farkında CLI (experiment/transfer/shift-audit/transfer-explore/legacy)
+  main.py                              # Canonical deney-farkında CLI (experiment/transfer/shift-audit/transfer-explore/self-cal-transfer/legacy)
   export_mcd64a1_raw_burndate.py       # Raw BurnDate DOY export'u için ince CLI sarmalayıcı
   preview_experiment_aoi.py            # Deney metadata + AOI önizleme (export/pipeline çalıştırmaz)
   run_label_gate_only.py               # Gate-only çalıştırıcı (Kozan: legacy; diğerleri: namespaced)
@@ -604,6 +654,7 @@ scripts/
   run_cross_region_transfer.py         # Step9A-D orkestratörü
   run_cross_region_shift_audit.py      # Step9E orkestratörü
   run_exploratory_transfer_features.py # Step9F orkestratörü (kesifsel, post-hoc)
+  run_step10_self_calibrated_transfer.py  # Step10 orkestratörü (preregistered, label-blind)
   prepare_dem_for_experiment.py        # Kozan-dışı deneyler için namespaced DEM hazırlığı
   prepare_modis_for_step7.py           # Kozan-dışı deneyler için namespaced MODIS mean/std hazırlığı
   check_experiment_registry.py         # Step0 kayıt defteri doğrulama script'i
@@ -614,6 +665,7 @@ tests/
   test_pipeline_orchestrator.py        # Asama sırası, namespace güvenliği, dry-run no-execution testleri
   test_main_cli.py                     # scripts/main.py argparse/dispatch testleri
   test_step9f.py                       # Step9F: sabit varyantlar, yasak kolon, region-relative etiket-kullanmama, esli bootstrap, reprodüksiyon kontrolü, aday tarama kuralı testleri
+  test_step10.py                       # Step10: region-wise z-score/CORAL, target-label firewall, N-yollu eşli bootstrap, preregistration immutability, within-region hizalama, raw reprodüksiyon testleri
 
 data/       # Yerel ham/indirilmiş veri klasörleri (.gitignore'da)
 outputs/    # Her step'in ürettiği raster, tablo ve rapor çıktıları (.gitignore'da)
@@ -654,12 +706,21 @@ logs/       # Runtime log dosyaları; .gitignore'da
 - `outputs/cross_region/manavgat_2021__bejis_2022/step9e/numeric_feature_shift.csv`, `categorical_landcover_shift.csv`, `label_conditional_feature_relationships.csv`, `relationship_direction_flips.csv`, `prediction_distribution_audit.csv`, `calibration_bins.csv`
 - Figürler: `feature_shift_heatmap.png`, `top_shifted_feature_distributions.png`, `label_conditional_direction_plot.png`, `landcover_distribution_comparison.png`, `prediction_probability_distributions.png`, `calibration_curves.png`
 
+**Step10 (preregistered unsupervised self-calibrated transfer, deney çalıştırıldığında):**
+- `outputs/cross_region/manavgat_2021__bejis_2022/step10/step10_preregistration.{json,md}` (immutable)
+- `outputs/cross_region/manavgat_2021__bejis_2022/step10/step10_input_audit.json`
+- `outputs/cross_region/manavgat_2021__bejis_2022/step10/step10_adaptation_statistics.json`, `step10_predictions.parquet` (hedef etiketi İÇERMEZ)
+- `outputs/cross_region/manavgat_2021__bejis_2022/step10/step10_metrics.{json,csv}`, `step10_decomposition.csv`
+- `outputs/cross_region/manavgat_2021__bejis_2022/step10/step10_bootstrap_replicates.parquet`, `step10_bootstrap_summary.{json,csv}`
+- `outputs/cross_region/manavgat_2021__bejis_2022/step10/step10_final_report.{json,md}`
+
 ## 17. Sınırlamalar
 
 - **Kozan, primary wildfire AOI'si değildir.** Kozan 2023 burned label'larının büyük çoğunluğu (533/542) cropland/anız-yakma kaynaklıdır; Kozan cropland/anız-dominant bir negative/control AOI'dir.
 - **Cross-region discrimination generalization desteklenmemiştir.** Step9A-D, Manavgat↔Bejís arasında ROC-AUC/PR-AUC delta'larının belirsiz (bir yönde negatif) olduğunu göstermiştir; yalnızca Brier (probability-error) iyileşmesi tutarlıdır (bkz. Bölüm 9). Bu sonuç yalnızca İKİ bölge (Manavgat, Bejís) arasında elde edilmiştir.
 - **Step9E teşhisi, iki bölgeye özgüdür ve nedensel değildir.** Step9E'nin bulguları (feature dağılım kayması, ilişki-yönü kayması, olasılık ölçek kayması) tanımlayıcı/betimsel diagnostiklerdir; hangi mekanizmanın ASIL nedensel sürücü olduğu kanıtlanmamıştır ve üçüncü bir bölge olmadan doğrulanamaz.
 - **Step9E'nin önerdiği herhangi bir düzeltme, henüz test edilmemiş bir hipotezdir.** Region-relative/robust normalizasyon veya feature subset seçimi gibi fikirler, AYNI iki bölgede (etiketleri zaten incelenmiş) test edilip "unbiased" ilan edilemez; bunlar yeni, bağımsız bir deney olarak ele alınmalıdır (bkz. Bölüm 18).
+- **Step10, henüz gerçek veriyle çalıştırılmamıştır.** Kod tamamlanmış ve `--dry-run` ile doğrulanmıştır, ancak Step10'un unsupervised covariate-adaptation (region-wise z-score / CORAL) sonuçları bu README'de RAPORLANMAMIŞTIR. Step10 bir olasılık kalibrasyonu değildir ve tek başına operasyonel transferin kanıtı değildir; residual gap bulguları (varsa) kalan concept shift ile TUTARLI olarak yorumlanacak, tek başına nedensel kanıt olarak SUNULMAYACAKTIR.
 - **Tek sezon/yıl (her üç AOI için):** Her deney tek bir yangın sezonunu kapsar; year-to-year robustness henüz test edilmemiştir.
 - **Cropland-excluded burnable mask:** Bu maske içinde pozitif örnek sayısı azdır, bu da bu strata için istatistiksel gücü sınırlar (özellikle Kozan).
 - **Günlük MODIS gap-fill yok:** Mevcut fusion mantığı (Step7E) bir defalık, statik bir birleştirmedir; günlük operasyonel bir veri akışı değildir.
@@ -687,6 +748,8 @@ Bu README ve proje çıktıları, aşağıdaki ifade politikasına uyar:
 - "Brier error improved" / "probability-error improved" (bkz. Bölüm 9).
 - "Step9E found diagnostic evidence consistent with domain shift and region-dependent feature-label relationships" (bkz. Bölüm 10).
 - "A third independent region or nested design is needed for a stronger generalization claim" (bkz. Bölüm 17, 18).
+- "Step10 tests unsupervised target-covariate adaptation (region-wise z-score / CORAL) without using target labels for fitting" (bkz. Bölüm 10).
+- "A residual performance gap after covariate adaptation is consistent with remaining concept shift" (yalnızca bootstrap-supported ise, bkz. Bölüm 10).
 
 **Yasak ifadeler:**
 - "Operational wildfire prediction" — proje operasyonel bir sistem değildir (bkz. Bölüm 2).
@@ -695,6 +758,8 @@ Bu README ve proje çıktıları, aşağıdaki ifade politikasına uyar:
 - "Causal fire prediction" — hiçbir aşamada nedensellik iddia edilmez.
 - "Validated correction" — Step9E bir düzeltme değil, post-hoc bir teşhistir (bkz. Bölüm 10).
 - "Transfer-safe feature set proven on Manavgat and Bejís after inspecting both labels" — bu, aynı iki bölgede etiketleri zaten görülmüş bir stratejiyi "kanıtlanmış" ilan etmek anlamına gelir ve yasaktır (bkz. Bölüm 17, 18).
+- "Step10 is probability calibration" / "Step10 proves operational transfer" / "Step10 corrected Step9" — Step10, hedef etiketlerini adaptasyon için kullanmayan bir unsupervised covariate-adaptation denemesidir; bir kalibrasyon veya düzeltme değildir (bkz. Bölüm 10).
+- "CORAL definitively outperforms region-wise standardization" — yalnızca bootstrap CI'si bunu tam olarak desteklerse ("CORAL - z-score" CI'si 0'ın tamamen üzerindeyse) böyle bir iddia yapılabilir; aksi halde "did not show supported improvement" denir.
 
 **Ayrıca (önceki politikadan korunan maddeler):**
 - "Fire-risk prediction model validated" denmez.

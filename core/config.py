@@ -638,3 +638,13 @@ if ACTIVE_EXPERIMENT_ID == "kozan_2023":
             "Step0 EXPERIMENTS['kozan_2023'] kaydi, core/config.py icindeki "
             "legacy Kozan sabitleriyle TUTARSIZ: " + "; ".join(_mismatch)
         )
+
+# =============================================================================
+# Step10: unsupervised self-calibrated cross-region transfer (preregistered)
+# =============================================================================
+STEP10_RANDOM_STATE = 42
+STEP10_BOOTSTRAP_REPLICATES = 1000
+STEP10_BOOTSTRAP_CI_LOWER_PERCENTILE = 2.5
+STEP10_BOOTSTRAP_CI_UPPER_PERCENTILE = 97.5
+STEP10_CORAL_LAMBDA = 1e-5
+STEP10_MIN_VALID_BOOTSTRAP_REPLICATES = 900
