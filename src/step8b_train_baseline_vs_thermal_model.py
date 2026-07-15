@@ -274,12 +274,35 @@ def check_no_forbidden_features(feature_list: list[str]) -> None:
 # =============================================================================
 # Spatial blocks
 # =============================================================================
-def add_spatial_block_id(df: pd.DataFrame, block_size_cells: int) -> pd.DataFrame:
+def add_spatial_block_id(
+    df: pd.DataFrame,
+    block_size_cells: int,
+    column_name: str = "spatial_block_id",
+    id_prefix: str | None = None,
+    include_row_col: bool = False,
+) -> pd.DataFrame:
+    """
+    Shared spatial-block-grouping construction: block_row = floor(row_500m /
+    block_size_cells), block_col = floor(col_500m / block_size_cells), fixed
+    origin (0, 0) implied by the raw row_500m/col_500m values.
+
+    Called with ONLY (df, block_size_cells) -- e.g. Step8B's original CLI
+    path -- this is BYTE-IDENTICAL to the pre-refactor implementation
+    (column_name defaults to "spatial_block_id", no prefix, no extra
+    columns). The optional kwargs exist so a runtime block scale (e.g. the
+    large-block robustness runner) can write a differently-named,
+    differently-prefixed group column WITHOUT touching the original
+    "spatial_block_id" column or Step8B's default behavior.
+    """
     df = df.copy()
     block_size_cells = max(int(block_size_cells), 1)
     r_block = (df["row_500m"].astype(int) // block_size_cells).astype(int)
     c_block = (df["col_500m"].astype(int) // block_size_cells).astype(int)
-    df["spatial_block_id"] = r_block.astype(str) + "_" + c_block.astype(str)
+    prefix = f"{id_prefix}_" if id_prefix else ""
+    df[column_name] = prefix + r_block.astype(str) + "_" + c_block.astype(str)
+    if include_row_col:
+        df[f"{column_name}_row"] = r_block
+        df[f"{column_name}_col"] = c_block
     return df
 
 
@@ -289,6 +312,7 @@ def make_spatial_folds(
     n_splits_requested: int,
     random_state: int,
     min_positive_folds: int = 2,
+    strict: bool = False,
 ) -> tuple[list[tuple[np.ndarray, np.ndarray]], int]:
     """
     Builds spatial-block-grouped, stratified CV folds. NEVER falls back to a
@@ -299,6 +323,19 @@ def make_spatial_folds(
 
     Returns (folds, n_splits_used) where folds is a list of (train_idx,
     test_idx) index arrays into the input arrays.
+
+    strict: opt-in, used by the large-block robustness runner (NOT by
+        Step8B's default CLI path). Same StratifiedGroupKFold algorithm and
+        same random_state -- this does not change how folds are generated,
+        only which failures are tolerated once they exist:
+          - the requested n_splits is NEVER silently reduced to 3 (frozen
+            fold count for the preregistered large-block analysis);
+          - no group/block may appear on both sides of a fold;
+          - both classes must be present on both sides of every fold;
+          - every row must land in exactly one test fold (full OOF
+            coverage).
+        strict=False (the default) is BYTE-IDENTICAL to the pre-refactor
+        implementation and is what Step8B's original CLI path always uses.
     """
     y = np.asarray(y)
     groups = np.asarray(groups)
@@ -324,6 +361,36 @@ def make_spatial_folds(
             )
             return None
         return folds
+
+    if strict:
+        folds = _try(n_splits_requested)
+        if folds is None:
+            raise Step8BError(
+                f"Strict spatial-block CV n_splits={n_splits_requested} icin "
+                "gecerli fold uretemedi (StratifiedGroupKFold). Strict modda "
+                "frozen fold sayisi ASLA dusurulmez."
+            )
+        coverage = np.zeros(len(y), dtype=int)
+        for fold_idx, (train_idx, test_idx) in enumerate(folds):
+            train_blocks = set(groups[train_idx])
+            test_blocks = set(groups[test_idx])
+            if train_blocks & test_blocks:
+                raise Step8BError(
+                    f"Strict spatial-block CV: fold {fold_idx} icin bir "
+                    "grup/blok hem train hem test tarafinda."
+                )
+            if len(np.unique(y[train_idx])) < 2 or len(np.unique(y[test_idx])) < 2:
+                raise Step8BError(
+                    f"Strict spatial-block CV: fold {fold_idx} train veya "
+                    "test tarafinda tek sinif iceriyor."
+                )
+            coverage[test_idx] += 1
+        if not np.all(coverage == 1):
+            raise Step8BError(
+                "Strict spatial-block CV: her satir tam olarak bir test "
+                "fold'unda olmali (OOF coverage ihlali)."
+            )
+        return folds, n_splits_requested
 
     for n_splits in sorted({n_splits_requested}, reverse=True):
         folds = _try(n_splits)
@@ -456,12 +523,22 @@ def train_population(
     random_state: int,
     model_name: str,
     min_positives: int,
+    group_column: str = "spatial_block_id",
+    strict_folds: bool = False,
 ) -> dict | None:
     """
     Trains Model A (baseline) and Model B (baseline+thermal) on the SAME
     spatial-block CV folds for this population. Returns a result dict, or
     None if the population must be skipped (with the reason logged/returned
     via the caller's skip bookkeeping).
+
+    group_column / strict_folds: default values reproduce Step8B's original
+    CLI behavior exactly (grouping by "spatial_block_id", fallback-capable
+    fold generation). The large-block robustness runner reuses this SAME
+    function -- it does not maintain an independent copy of the OOF
+    algorithm -- by passing group_column="large_block_id" and
+    strict_folds=True. No other code path in this function changes based on
+    these two parameters.
     """
     y = df_pop[TARGET_COLUMN].astype(int).to_numpy()
     n_pos, n_neg = int(y.sum()), int((y == 0).sum())
@@ -475,9 +552,11 @@ def train_population(
             ),
         }
 
-    groups = df_pop["spatial_block_id"].to_numpy()
+    groups = df_pop[group_column].to_numpy()
     try:
-        folds, n_splits_used = make_spatial_folds(y, groups, n_splits, random_state)
+        folds, n_splits_used = make_spatial_folds(
+            y, groups, n_splits, random_state, strict=strict_folds
+        )
     except Step8BError as exc:
         return {"skipped": True, "reason": f"spatial_cv_failed: {exc}"}
 
@@ -1015,6 +1094,30 @@ def write_summary_md(
     return path
 
 
+def filter_valid_for_modeling(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Shared valid-row filtering: keeps only Step8A's own
+    valid_for_modeling==True rows. Identical logic used by Step8B's main()
+    and by the large-block robustness runner -- extracted so there is a
+    single implementation instead of two.
+    """
+    return df[df["valid_for_modeling"] == True].reset_index(drop=True)  # noqa: E712
+
+
+def build_population_masks(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """
+    Shared population-mask construction (all_valid / cropland_dominant /
+    burnable_tree_shrub_grass / burnable_tree_shrub). Identical logic used
+    by Step8B's main() and by the large-block robustness runner.
+    """
+    return {
+        "all_valid": pd.Series(True, index=df.index),
+        "cropland_dominant": df["landcover_dominant"] == LC_CROPLAND,
+        "burnable_tree_shrub_grass": df["burnable_tree_shrub_grass"].astype(bool),
+        "burnable_tree_shrub": df["burnable_tree_shrub"].astype(bool),
+    }
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -1056,7 +1159,7 @@ def main(
     check_no_forbidden_features(BASELINE_FEATURES)
     check_no_forbidden_features(THERMAL_MODEL_FEATURES)
 
-    df = df[df["valid_for_modeling"] == True].reset_index(drop=True)  # noqa: E712
+    df = filter_valid_for_modeling(df)
     df = add_spatial_block_id(df, spatial_block_size_cells)
 
     feature_missing_counts = {
@@ -1065,12 +1168,7 @@ def main(
     log.info("Ozellik eksik-deger sayimlari: %s", feature_missing_counts)
 
     # --- Population masks ---
-    population_masks = {
-        "all_valid": pd.Series(True, index=df.index),
-        "cropland_dominant": df["landcover_dominant"] == LC_CROPLAND,
-        "burnable_tree_shrub_grass": df["burnable_tree_shrub_grass"].astype(bool),
-        "burnable_tree_shrub": df["burnable_tree_shrub"].astype(bool),
-    }
+    population_masks = build_population_masks(df)
 
     warnings_list = list(input_warnings)
 
