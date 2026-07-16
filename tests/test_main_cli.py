@@ -23,6 +23,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from scripts.main import (
     build_parser, cmd_experiment, cmd_legacy, cmd_self_cal_transfer, cmd_shift_audit,
     cmd_step8_robustness, cmd_transfer, cmd_transfer_explore,
+    cmd_step10, cmd_large_block_robustness, cmd_concept_shift,
 )
 
 
@@ -200,6 +201,108 @@ class TestParserStructure(unittest.TestCase):
             dry_run=True,
             force=False,
         )
+
+    # =========================================================================
+    # New user-facing commands: step10, large-block-robustness, concept-shift
+    # =========================================================================
+    def test_new_commands_present_in_help(self):
+        # every new command must be registered as a subparser choice
+        subparsers_action = next(
+            a for a in self.parser._actions if isinstance(a, __import__("argparse")._SubParsersAction)
+        )
+        choices = set(subparsers_action.choices.keys())
+        for command in ("step10", "large-block-robustness", "concept-shift"):
+            self.assertIn(command, choices)
+        # backward compatibility: existing commands remain
+        for command in ("experiment", "transfer", "shift-audit", "transfer-explore",
+                        "self-cal-transfer", "step8-robustness", "legacy"):
+            self.assertIn(command, choices)
+
+    def test_step10_subcommand_parses(self):
+        args = self.parser.parse_args([
+            "step10", "--source", "manavgat_2021", "--target", "bejis_2022",
+            "--reverse", "--report-only", "--dry-run",
+        ])
+        self.assertEqual(args.command, "step10")
+        self.assertEqual(args.source, "manavgat_2021")
+        self.assertEqual(args.target, "bejis_2022")
+        self.assertTrue(args.reverse)
+        self.assertTrue(args.report_only)
+        self.assertTrue(args.dry_run)
+        self.assertIs(args.func, cmd_step10)
+
+    def test_step10_delegates_and_forwards_flags(self):
+        args = self.parser.parse_args([
+            "step10", "--source", "manavgat_2021", "--target", "bejis_2022",
+            "--reverse", "--dry-run",
+        ])
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_step10_stage",
+            return_value={"ran": False},
+        ) as mocked:
+            self.assertEqual(cmd_step10(args), 0)
+        mocked.assert_called_once_with(
+            source_id="manavgat_2021", target_id="bejis_2022", reverse=True,
+            dry_run=True, force=False, report_only=False,
+            bootstrap_replicates=1000, seed=42,
+        )
+
+    def test_large_block_robustness_subcommand_parses(self):
+        args = self.parser.parse_args(["large-block-robustness", "--dry-run"])
+        self.assertEqual(args.command, "large-block-robustness")
+        self.assertTrue(args.dry_run)
+        self.assertFalse(args.force)
+        self.assertFalse(args.run_large_block_fit)
+        self.assertIs(args.func, cmd_large_block_robustness)
+
+    def test_large_block_fit_is_explicit_and_forwarded(self):
+        # default: fit is NOT requested
+        args_default = self.parser.parse_args(["large-block-robustness", "--dry-run"])
+        self.assertFalse(args_default.run_large_block_fit)
+        # explicit fit flag is forwarded to the runner
+        args_fit = self.parser.parse_args(["large-block-robustness", "--run-large-block-fit", "--force"])
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_large_block_robustness_stage",
+            return_value={"ran": False},
+        ) as mocked:
+            self.assertEqual(cmd_large_block_robustness(args_fit), 0)
+        mocked.assert_called_once_with(
+            dry_run=False, force=True, run_large_block_fit=True,
+        )
+
+    def test_concept_shift_subcommand_parses(self):
+        args = self.parser.parse_args(["concept-shift", "--dry-run"])
+        self.assertEqual(args.command, "concept-shift")
+        self.assertFalse(args.integration_only)
+        self.assertTrue(args.dry_run)
+        self.assertIs(args.func, cmd_concept_shift)
+
+    def test_concept_shift_default_runs_numeric_analysis(self):
+        args = self.parser.parse_args(["concept-shift", "--dry-run"])
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_concept_shift_stage",
+            return_value={"ran": False},
+        ) as numeric, patch.object(
+            sys.modules["scripts.main"].orch, "run_concept_shift_integration_stage",
+            return_value={"ran": False},
+        ) as integration:
+            self.assertEqual(cmd_concept_shift(args), 0)
+        numeric.assert_called_once_with(dry_run=True, force=False)
+        integration.assert_not_called()
+
+    def test_concept_shift_integration_only_is_report_only(self):
+        args = self.parser.parse_args(["concept-shift", "--integration-only", "--force"])
+        self.assertTrue(args.integration_only)
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_concept_shift_integration_stage",
+            return_value={"ran": True},
+        ) as integration, patch.object(
+            sys.modules["scripts.main"].orch, "run_concept_shift_stage",
+            return_value={"ran": True},
+        ) as numeric:
+            self.assertEqual(cmd_concept_shift(args), 0)
+        integration.assert_called_once_with(dry_run=False, force=True)
+        numeric.assert_not_called()
 
     def test_legacy_subcommand_defaults_to_kozan(self):
         args = self.parser.parse_args(["legacy", "--dry-run"])

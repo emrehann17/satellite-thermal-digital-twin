@@ -102,6 +102,21 @@ EPILOG_EXAMPLES = """\
   python scripts/main.py self-cal-transfer \\
     --source manavgat_2021 --target bejis_2022 --reverse --force
 
+  # Step10 (user-facing alias; target labels NOT used for adaptation)
+  python scripts/main.py step10 \\
+    --source manavgat_2021 --target bejis_2022 --reverse --force
+
+  # formal Step8B primary-population (all_valid) large-block robustness
+  # (2-cell equivalence gate first; add --run-large-block-fit to fit 10/20 cells)
+  python scripts/main.py large-block-robustness --dry-run
+  python scripts/main.py large-block-robustness --run-large-block-fit --force
+
+  # Step9G concept/relationship-shift diagnostic (COMPUTES metrics)
+  python scripts/main.py concept-shift --force
+
+  # Step9G canonical integration-v2 report (REPORT-ONLY; recomputes nothing)
+  python scripts/main.py concept-shift --integration-only --force
+
   # legacy Kozan (Google Drive tabanlı) tam pipeline
   python scripts/main.py legacy --experiment kozan_2023 --force
 """
@@ -218,6 +233,57 @@ def cmd_step8_robustness(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_step10(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_step10_stage(
+            source_id=args.source, target_id=args.target, reverse=args.reverse,
+            dry_run=args.dry_run, force=args.force, report_only=args.report_only,
+            bootstrap_replicates=args.bootstrap_replicates, seed=args.seed,
+        )
+    except SystemExit as exc:
+        return _fail("step10", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("step10", exc)
+    log.info("[step10] tamamlandı: ran=%s", result.get("ran"))
+    return 0
+
+
+def cmd_large_block_robustness(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_large_block_robustness_stage(
+            dry_run=args.dry_run, force=args.force,
+            run_large_block_fit=args.run_large_block_fit,
+        )
+    except SystemExit as exc:
+        return _fail("large-block-robustness", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("large-block-robustness", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info("[large-block-robustness] tamamlandı: ran=%s", result.get("ran"))
+    return 0
+
+
+def cmd_concept_shift(args: argparse.Namespace) -> int:
+    try:
+        if args.integration_only:
+            result = orch.run_concept_shift_integration_stage(
+                dry_run=args.dry_run, force=args.force,
+            )
+        else:
+            result = orch.run_concept_shift_stage(
+                dry_run=args.dry_run, force=args.force,
+            )
+    except SystemExit as exc:
+        return _fail("concept-shift", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("concept-shift", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info("[concept-shift] tamamlandı (integration_only=%s): ran=%s", args.integration_only, result.get("ran"))
+    return 0
+
+
 def cmd_legacy(args: argparse.Namespace) -> int:
     if args.experiment not in orch.LEGACY_COMPATIBLE_EXPERIMENT_IDS:
         log.error(
@@ -284,7 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=EPILOG_EXAMPLES,
     )
-    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,step8-robustness,transfer,shift-audit,transfer-explore,self-cal-transfer,legacy}")
+    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,step10,step8-robustness,large-block-robustness,concept-shift,legacy}")
 
     # --- experiment ---
     p_exp = subparsers.add_parser(
@@ -418,6 +484,94 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resolve and print the frozen plan without fitting, bootstrapping, or writing scientific outputs.",
     )
     p_step8_robustness.set_defaults(func=cmd_step8_robustness)
+
+    # --- step10 ---
+    p_step10 = subparsers.add_parser(
+        "step10",
+        help="Step10 preregistered, target-label-blind self-calibrated cross-region transfer (COMPUTES metrics).",
+        description=(
+            "Scientific purpose: preregistered unsupervised self-calibrated "
+            "cross-region transfer (raw_source_only / regionwise_zscore / "
+            "coral_after_regionwise_zscore). "
+            "Population: burnable_tree_shrub_grass (primary). "
+            "Target labels: NOT used for adaptation, normalization, CORAL "
+            "fitting, threshold selection, or calibration. "
+            "Computes metrics (unless --report-only, which only regenerates the "
+            "Step10D report from frozen inputs). Delegates to "
+            "scripts/run_step10_self_calibrated_transfer.py; Step9A-F outputs "
+            "are read-only. This is the same analysis as `self-cal-transfer`, "
+            "exposed under the user-facing name `step10`."
+        ),
+    )
+    p_step10.add_argument("--source", required=True, help="Kaynak (source) experiment_id (örn. manavgat_2021).")
+    p_step10.add_argument("--target", required=True, help="Hedef (target) experiment_id (örn. bejis_2022).")
+    p_step10.add_argument("--reverse", action="store_true", help="Ters yönü de açıkça teyit eder (Step10 zaten her iki yönü de hesaplar).")
+    p_step10.add_argument("--force", action="store_true", help="step10 çıktılarını üzerine yaz (preregistration HARİÇ -- o asla değiştirilmez).")
+    p_step10.add_argument("--dry-run", action="store_true", help="Hiçbir fit/adapt/predict/bootstrap çalıştırma; yalnızca dondurulmuş planı bas.")
+    p_step10.add_argument("--report-only", action="store_true", help="Yalnızca frozen Step10 girdilerinden Step10D JSON/Markdown raporlarını yeniden üret (metrik HESAPLAMAZ).")
+    p_step10.add_argument("--bootstrap-replicates", type=int, default=1000, help="Hedef-bölge eşli spatial-block bootstrap replika sayısı (varsayılan: 1000).")
+    p_step10.add_argument("--seed", type=int, default=42, help="Rastgele seed (varsayılan: STEP10_RANDOM_STATE=42).")
+    p_step10.set_defaults(func=cmd_step10)
+
+    # --- large-block-robustness ---
+    p_large_block = subparsers.add_parser(
+        "large-block-robustness",
+        help="Formal Step8B primary-population (all_valid) large-block robustness (COMPUTES metrics; gated).",
+        description=(
+            "Scientific purpose: test whether the formal within-region Step8B "
+            "thermal contribution survives predefined larger spatial validation "
+            "blocks (10 cells ~5 km, 20 cells ~10 km). "
+            "Population: all_valid (the FORMAL Step8B primary population), "
+            "distinct from the natural-vegetation burnable_tree_shrub_grass "
+            "sensitivity analysis. "
+            "Target labels: standard supervised within-region CV (no cross-region "
+            "adaptation). Computes metrics. "
+            "STEP8B_SPATIAL_BLOCK_SIZE_CELLS stays 2 (the frozen ~1 km reference); "
+            "10/20-cell block sizes are passed at RUNTIME. The 2-cell equivalence "
+            "gate is REQUIRED before any 10/20-cell fit: without "
+            "--run-large-block-fit the run stops after the gate. Original Step8 "
+            "outputs are never overwritten. Delegates to "
+            "scripts/run_step8_large_block_robustness_primary_all_valid.py."
+        ),
+    )
+    p_large_block.add_argument("--run-large-block-fit", action="store_true", help="Yalnızca 2-cell equivalence gate incelendikten SONRA: 10/20-cell bilimsel koşumu fit et. Bu bayrak olmadan koşum gate'ten sonra durur.")
+    p_large_block.add_argument("--force", action="store_true", help="Yalnızca downstream robustness çıktılarını üzerine yaz; preregistration'ı veya orijinal Step8 çıktılarını asla yeniden yazma.")
+    p_large_block.add_argument("--dry-run", action="store_true", help="Dondurulmuş planı çöz ve bas; fit/bootstrap yapma, bilimsel çıktı yazma.")
+    p_large_block.set_defaults(func=cmd_large_block_robustness)
+
+    # --- concept-shift ---
+    p_concept = subparsers.add_parser(
+        "concept-shift",
+        help="Step9G univariate feature-AUC direction-reversal concept/relationship-shift diagnostic.",
+        description=(
+            "Scientific purpose: per-feature univariate burned ROC-AUC "
+            "direction-reversal diagnostic between manavgat_2021 and bejis_2022, "
+            "as evidence consistent with residual concept/relationship shift "
+            "(not causal proof; not the only transfer-failure source). "
+            "Population: burnable_tree_shrub_grass (the primary cross-region "
+            "transfer population). "
+            "Target labels: burned is the ranking target for the univariate AUC; "
+            "labels are NOT used for any adaptation/normalization/inversion. "
+            "Default (no flag): runs the Step9G numeric analysis -- COMPUTES "
+            "metrics. With --integration-only: REPORT-ONLY canonical "
+            "integration-v2 that reuses frozen Step9G numbers verbatim and only "
+            "corrects Step9E/9F/10 integration (recomputes nothing). "
+            "Delegates to the Step9G module and its integration-v2 module."
+        ),
+    )
+    p_concept.add_argument(
+        "--integration-only", action="store_true",
+        help=(
+            "Bilimsel Step9G sayılarını yeniden hesaplama; yalnızca CANONICAL "
+            "integration-v2 raporunu üret (frozen Step9G çıktılarını birebir "
+            "kullanır). Çıktı: outputs/diagnostics/"
+            "step9g_univariate_feature_auc_direction_reversal_integration_v2/"
+            "manavgat_2021__bejis_2022/."
+        ),
+    )
+    p_concept.add_argument("--force", action="store_true", help="İlgili çıktılar zaten varsa üzerine yaz (orijinal frozen Step9G sayısal çıktıları HARİÇ -- onlar değişmez).")
+    p_concept.add_argument("--dry-run", action="store_true", help="Hiçbir AUC/bootstrap hesaplama, hiçbir dosya yazma; yalnızca planı bas.")
+    p_concept.set_defaults(func=cmd_concept_shift)
 
     # --- legacy ---
     p_legacy = subparsers.add_parser(

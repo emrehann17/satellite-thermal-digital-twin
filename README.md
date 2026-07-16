@@ -42,9 +42,14 @@ Bu çalışmanın ne olduğu konusunda net olmak önemlidir: bu proje tamamlanm�
 | Step9A-E | Tamamlandı | İki yönlü transfer, paired bootstrap, final rapor ve post-hoc shift audit |
 | Step9F | Tamamlandı (kesifsel / post-hoc) | Sabit varyant paneli + region-relative adaptive rejim |
 | Step10 | Tamamlandı | Preregistered, target-label-blind z-score/CORAL deneyi ve report-only QA |
-| `scripts/main.py` canonical CLI | Tamamlandı | `experiment` / `step8-robustness` / `transfer` / `shift-audit` / `transfer-explore` / `self-cal-transfer` / `legacy` |
+| Step8 formal large-block robustness (all_valid) | Tamamlandı | Formal Step8B primary population `all_valid`; 10/20-hücre; 2-hücre equivalence gate ile doğrulandı |
+| Step9G concept/relationship-shift | Tamamlandı | Univariate feature-AUC direction-reversal teşhisi (`burnable_tree_shrub_grass`) |
+| Step9G canonical integration-v2 | Tamamlandı | Report-only; frozen Step9G sayılarını birebir kullanır, Step9E/9F/10 entegrasyonunu düzeltir |
+| `scripts/main.py` canonical CLI | Tamamlandı | `experiment` / `transfer` / `shift-audit` / `transfer-explore` / `self-cal-transfer` / `step10` / `step8-robustness` / `large-block-robustness` / `concept-shift` / `legacy` |
 
-Step8A-E üç AOI üzerinde label-honest 500 m grid ve spatial-block CV ile tamamlandı. Manavgat ve Bejís için önceden belirlenmiş 10-hücre (~5 km) ve 20-hücre (~10 km) robustness koşulları da gerçek veride çalıştırıldı: primary population `burnable_tree_shrub_grass` için dört bölge-ölçek koşulunun tamamında hem delta ROC-AUC hem delta PR-AUC percentile aralıkları sıfırın tamamen üzerindeydi. Bu yalnızca predefined within-region spatial-scale robustness bulgusudur; spatial autocorrelation'ın ortadan kalktığı veya cross-region transferin başarılı olduğu anlamına gelmez.
+**Bölge kapsamı (region scope):** Şu anda yalnızca `manavgat_2021` ve `bejis_2022` aktif bilimsel deneylerdir; `kozan_2023` ilgili yerlerde negatif kontrol (cropland-dominated control) olarak kullanılır. Zamora ve başka bölgeler şu an **dahil değildir**; bu prototip yeni bir bölge, model, feature araması veya adaptasyon yöntemi eklemez.
+
+Step8A-E üç AOI üzerinde label-honest 500 m grid ve spatial-block CV ile tamamlandı. Manavgat ve Bejís için önceden belirlenmiş 10-hücre (~5 km) ve 20-hücre (~10 km) robustness koşulları da gerçek veride çalıştırıldı: formal Step8B primary population `all_valid` için dört bölge-ölçek koşulunun tamamında hem delta ROC-AUC hem delta PR-AUC percentile aralıkları sıfırın tamamen üzerindeydi. Bu yalnızca predefined within-region spatial-scale robustness bulgusudur; spatial autocorrelation'ın ortadan kalktığı veya cross-region transferin başarılı olduğu anlamına gelmez.
 
 Step9A-D doğrudan cross-region discrimination generalization'ını desteklemedi. Step9E bu sınırlı transferin olası nedenlerini post-hoc teşhis etti. Step10 target-label-blind covariate adaptation'ı değerlendirdi; sonuçları yön/yöntem bazında raporlar ve Step9'u “düzeltilmiş” ilan etmez.
 
@@ -268,9 +273,37 @@ Manavgat ve Bejís için de aynı Step8A-E zinciri (namespaced, deney-farkında)
 
 ### Manavgat/Bejís predefined large-block robustness sonucu
 
-- Primary population: `burnable_tree_shrub_grass`
+Bu bölüm iki AYRI robustness analizini net biçimde ayırır:
+
+- **Formal Step8B primary population: `all_valid`** — supervisor'ın istediği asıl robustness sorusu.
+- **Doğal-bitki-örtüsü duyarlılığı (natural-vegetation sensitivity): `burnable_tree_shrub_grass`** — dondurulmuş (frozen) ikincil duyarlılık analizi.
+
+**Neden `STEP8B_SPATIAL_BLOCK_SIZE_CELLS = 2` sabit kalıyor?** Bu değer, dondurulmuş orijinal ~1 km Step8B referansını korur (frozen ~1 km reference). Robustness analizi büyük blok boyutlarını (10 ve 20 hücre) **runtime'da** geçirir; global config asla 10/20'ye çevrilmez. Böylece orijinal Step8 çıktıları değişmeden kalır. 10/20-hücre fit'inden önce **birebir (exact) 2-hücre equivalence** doğrulandı: aynı paylaşılan Step8B kod yolu 2 hücre ile çalıştırıldığında dondurulmuş orijinal çıktıyla hücre-hücre (cell_id hizalı) eşleşti (max olasılık farkı ≤ 1e-12).
+
+- 10 hücre: ~5 km · 20 hücre: ~10 km
+
+#### Formal `all_valid` sonuçları
+
+| Experiment | Block cells | Nominal scale | Delta ROC-AUC | ROC %95 CI | Delta PR-AUC | PR %95 CI |
+|---|---:|---|---:|---|---:|---|
+| Manavgat 2021 | 10 | ~5 km | +0.053243 | [0.029428, 0.074860] | +0.048781 | [0.016436, 0.093869] |
+| Manavgat 2021 | 20 | ~10 km | +0.044433 | [0.014663, 0.077631] | +0.026045 | [0.000626, 0.055532] |
+| Bejís 2022 | 10 | ~5 km | +0.055725 | [0.030753, 0.078098] | +0.134358 | [0.059101, 0.226400] |
+| Bejís 2022 | 20 | ~10 km | +0.061286 | [0.039680, 0.087105] | +0.076055 | [0.014015, 0.155429] |
+
+Yorum (formal `all_valid`):
+
+- thermal katkısı hem ~5 km hem ~10 km ölçeğinde, her iki bölgede de korundu
+- tüm delta ROC-AUC ve delta PR-AUC aralıkları sıfırın üzerinde kaldı
+- Manavgat 10 km delta PR-AUC desteği pozitif ama sıfıra çok yakın ([0.000626, 0.055532])
+- daha büyük mekansal doğrulama ölçeklerinde mutlak AUC düştü
+- spatial autocorrelation'ın ortadan kalktığı iddia edilmez
+
+#### Doğal-bitki-örtüsü duyarlılığı (`burnable_tree_shrub_grass`) — dondurulmuş ikincil referans
+
 - Frozen analysis ID: `1759eed5dd1027bdde69413d226502c1b8548e1ad187b44bb4a896d9fe1f8edd`
 - Orijinal Step8 SHA-256 koruma kontrolü: **passed**
+- Bu tablo yeniden koşulmadı; formal `all_valid` sonucundan ayrı, dış (external) dondurulmuş bir referans olarak okunmalıdır.
 
 | Experiment | Block cells | Nominal scale | Delta ROC-AUC | ROC %95 CI | ROC support | Delta PR-AUC | PR %95 CI | PR support | Joint status |
 |---|---:|---|---:|---|---|---:|---|---|---|
@@ -387,30 +420,94 @@ Kaynak kod: `src/step9f_exploratory_transfer_feature_experiment.py`, `core/cross
 
 ### Step10: Preregistered unsupervised self-calibrated cross-region transfer
 
-Step10 gerçek Manavgat/Bejís verisiyle tamamlandı. Step9'un raw source-only transferini referans alarak, hedef etiketini adaptasyon/fit/eşik/kalibrasyon için kullanmayan `regionwise_zscore` ve `coral_after_regionwise_zscore` yöntemlerini değerlendirir. Frozen `analysis_id`: `ea075fc3b67796a0e52fd383366d5f9ab45650efd7a4792d60749c08779a17c6`.
+Step10 gerçek Manavgat/Bejís verisiyle tamamlandı. Primary transfer population: `burnable_tree_shrub_grass`. Hedef etiketleri adaptasyon, normalizasyon, CORAL fit, eşik seçimi veya kalibrasyon için **kullanılmadı**. Frozen `analysis_id`: `ea075fc3b67796a0e52fd383366d5f9ab45650efd7a4792d60749c08779a17c6`.
 
-Thermal model için yöntem-bazlı chance özeti:
+Thermal model, hedef (target) ROC-AUC ve PR-AUC ile hedef spatial-block bootstrap %95 percentile CI'ları:
 
-| Direction | Region-wise z-score chance status | CORAL chance status |
-|---|---|---|
-| Manavgat → Bejís | `chance_level_not_excluded` | `chance_level_not_excluded` |
-| Bejís → Manavgat | `bootstrap_supported_below_chance` | `bootstrap_supported_above_chance` |
+**Manavgat → Bejís:**
 
-Thermal CORAL'ın region-wise z-score'a göre ROC-AUC iyileşmesi iki yönde de bootstrap-supported'dır. Bununla birlikte adapted performans ile within-region performans arasındaki residual gap iki yönde de kalır. Bu bulgu remaining concept shift veya diğer non-covariate bölgesel farklılıklarla tutarlıdır; nedensel kanıt değildir. Step10 başarılı operasyonel transfer, universal CORAL üstünlüğü, probability calibration veya Step9'un “düzeltilmesi” olarak sunulmaz.
+| Yöntem | ROC-AUC | ROC %95 CI | PR-AUC | PR %95 CI |
+|---|---:|---|---:|---|
+| raw | 0.325834 | [0.304515, 0.348912] | 0.048758 | [0.043432, 0.054826] |
+| region-wise z-score | 0.477100 | [0.450665, 0.501836] | 0.066667 | [0.058435, 0.076135] |
+| CORAL (z-score sonrası) | 0.510540 | [0.483953, 0.534211] | 0.069581 | [0.061217, 0.079083] |
+
+**Bejís → Manavgat:**
+
+| Yöntem | ROC-AUC | ROC %95 CI | PR-AUC | PR %95 CI |
+|---|---:|---|---:|---|
+| raw | 0.443528 | [0.407765, 0.479941] | 0.034406 | [0.028893, 0.041660] |
+| region-wise z-score | 0.457338 | [0.419580, 0.496820] | 0.038513 | [0.032079, 0.046813] |
+| CORAL (z-score sonrası) | 0.555310 | [0.527802, 0.582844] | 0.042710 | [0.036622, 0.049805] |
+
+Yorum:
+
+- raw transfer her iki yönde de chance'in (0.5) altındaydı
+- basit z-score, prototip beklentisi olan \"her iki yönde >0.5\" sonucunu yeniden üretmedi
+- CORAL, yalnızca Bejís → Manavgat yönünde bootstrap-supported olarak chance'i aştı
+- adaptasyon iyileşmesi kısmi ve yöne bağlıydı (asimetrik)
+- adapted transfer, within-region performansın hâlâ belirgin biçimde altında kaldı
+
+Başarılı genel cross-region transfer iddia edilmez; Step10 operasyonel yangın tahmini, universal CORAL üstünlüğü, probability calibration veya Step9'un \"düzeltilmesi\" olarak sunulmaz.
 
 ```bash
-python scripts/main.py self-cal-transfer \
+# user-facing step10 komutu (self-cal-transfer ile aynı analiz)
+python scripts/main.py step10 \
   --source manavgat_2021 --target bejis_2022 --reverse --dry-run
 
-python scripts/main.py self-cal-transfer \
+python scripts/main.py step10 \
   --source manavgat_2021 --target bejis_2022 --reverse
 
 # Frozen Step10A-C dosyalarını değiştirmeden yalnızca Step10D raporunu üret
-python scripts/main.py self-cal-transfer \
+python scripts/main.py step10 \
   --source manavgat_2021 --target bejis_2022 --reverse --report-only
 ```
 
 Target-label firewall, raw/within reproduction, protected input hash ve analysis-ID consistency kontrolleri final report-only QA'da geçti. Brier değerleri frozen Step10 çıktılarında mevcut değildir ve report-only patch sırasında yeniden hesaplanmamıştır. Tam rapor: `outputs/cross_region/manavgat_2021__bejis_2022/step10/step10_final_report.{json,md}`.
+
+### Step9G: Concept/relationship-shift teşhisi (univariate feature-AUC direction reversal)
+
+Step9G, cross-region transfer başarısızlığı için mekanistik bir post-hoc teşhistir. Primary population: `burnable_tree_shrub_grass`.
+
+Yöntem:
+
+- ham feature değeriyle univariate burned ROC-AUC (raw feature-value; burned = pozitif sınıf)
+- inversion yok, normalizasyon yok, imputation yok
+- 10-hücre (~5 km) spatial-block bootstrap
+- landcover kategorik olduğu için numeric AUC'den çıkarıldı
+
+Bootstrap-supported direction reversal:
+
+- `elevation_mean`
+  - Manavgat: 0.374108 [0.289080, 0.471153]
+  - Bejís: 0.643282 [0.558315, 0.729006]
+
+CI'si chance'i (0.5) içeren nokta (point) reversal'ları — bunlar bootstrap-supported DEĞİLDİR:
+
+- `current_lst_mean`
+- `tvdi_difference_mean`
+- `downscaled_lst_mean`
+- `fused_lst_mean`
+
+Aynı yön (same-direction) özellikleri:
+
+- `ndvi_mean`
+- `slope_mean`
+- `lst_anomaly_mean`
+- `current_tvdi_mean`
+
+Step9E bağımsız olarak aynı beş ilişki-yönü (relationship-direction) instabilitesini işaretledi (`elevation_mean` + dört LST/TVDI özelliği). Step9F bulguları **model/temsil-seviyesi ranking-reversal** bulgularıdır; per-feature bulgular DEĞİLDİR ve öyle sunulmaz. Kanonik entegrasyon (integration-v2), frozen Step9G sayılarını birebir kullanır; hiçbir AUC/CI/reversal yeniden hesaplanmaz — yalnızca Step9E/9F/10 entegrasyonu düzeltilir ve `elevation_mean` doğru şekilde baseline (thermal değil) olarak sınıflandırılır.
+
+```bash
+# Step9G sayısal analizi (metrik HESAPLAR)
+python scripts/main.py concept-shift --dry-run
+python scripts/main.py concept-shift --force
+
+# canonical integration-v2 raporu (REPORT-ONLY; hiçbir şey yeniden hesaplanmaz)
+python scripts/main.py concept-shift --integration-only --force
+```
+
+Kanonik çıktı: `outputs/diagnostics/step9g_univariate_feature_auc_direction_reversal_integration_v2/manavgat_2021__bejis_2022/`. Sayısal Step9G analizi: `outputs/diagnostics/step9g_univariate_feature_auc_direction_reversal/manavgat_2021__bejis_2022/`.
 
 ## 11. Örnek Görseller
 
@@ -595,6 +692,31 @@ Bu analysis version deneyleri tam olarak `manavgat_2021 bejis_2022`, block size 
 
 `--dry-run` resolved/protected input yollarını, output namespace'ini, feature/model/CV ayarlarını, block reconstruction kaynağını, bootstrap ayarlarını ve preregistration durumunu basar; hiçbir model fit/bootstrap veya scientific output yazımı yapmaz. Gerçek çıktıların tamamı `outputs/robustness/step8_large_block/manavgat_2021__bejis_2022/` altındadır. `--force` yalnızca downstream robustness çıktılarını yenileyebilir; immutable preregistration veya orijinal Step8A-E dosyalarını değiştiremez.
 
+### `large-block-robustness` — formal Step8B primary-population (all_valid) robustness
+
+```bash
+# 2-hücre equivalence gate + plan (fit YAPMAZ)
+python scripts/main.py large-block-robustness --dry-run
+
+# gate incelendikten SONRA 10/20-hücre bilimsel koşumu fit et
+python scripts/main.py large-block-robustness --run-large-block-fit --force
+```
+
+`scripts/run_step8_large_block_robustness_primary_all_valid.py`'yi reuse eder. Formal Step8B primary population `all_valid` için 10 (~5 km) ve 20 (~10 km) hücre robustness'ını test eder. `STEP8B_SPATIAL_BLOCK_SIZE_CELLS` global config **2 olarak kalır** (frozen ~1 km referans); büyük blok boyutları runtime'da geçilir. 10/20-hücre fit'i **yalnızca** 2-hücre equivalence gate geçtikten sonra ve `--run-large-block-fit` verildiğinde başlar. Orijinal Step8 çıktıları asla üzerine yazılmaz. Bu, doğal-bitki-örtüsü (`burnable_tree_shrub_grass`) `step8-robustness` komutundan ayrı, formal `all_valid` analizidir.
+
+### `concept-shift` — Step9G concept/relationship-shift teşhisi
+
+```bash
+# Step9G sayısal analizi (metrik HESAPLAR)
+python scripts/main.py concept-shift --dry-run
+python scripts/main.py concept-shift --force
+
+# canonical integration-v2 raporu (REPORT-ONLY; hiçbir şey yeniden hesaplanmaz)
+python scripts/main.py concept-shift --integration-only --force
+```
+
+Varsayılan (bayraksız) mod Step9G univariate feature-AUC direction-reversal analizini çalıştırır (population `burnable_tree_shrub_grass`; ham feature değeriyle burned ROC-AUC; inversion/normalizasyon/imputation yok; 10-hücre spatial-block bootstrap). `--integration-only` yalnızca kanonik integration-v2 raporunu üretir: frozen Step9G sayıları birebir kullanılır, hiçbir AUC/CI/reversal yeniden hesaplanmaz. Kanonik çıktı `..._integration_v2/` namespace'indedir. Orijinal Step9G sayısal çıktıları değişmez.
+
 ### `legacy` — yalnızca Kozan, Drive-tabanlı tam pipeline
 
 ```bash
@@ -756,7 +878,13 @@ logs/       # Runtime log dosyaları; .gitignore'da
 - Kozan (legacy): `outputs/step7d/downscaled_lst_celsius.tif`, `outputs/step7e/fused_lst_celsius.tif`, `outputs/step8a/step8a_500m_modeling_dataset.parquet`, `outputs/step8b/step8b_model_comparison_metrics.json`, `outputs/step8b/step8b_predictions.parquet`, `outputs/step8c/step8c_bootstrap_metrics.json`, `outputs/step8d/step8d_ablation_metrics.json`, `outputs/step8e/step8e_summary.md`
 - Manavgat / Bejís (namespaced): aynı dosya adları, `outputs/experiments/<experiment_id>/step7*/` ve `outputs/experiments/<experiment_id>/step8*/` altında
 
-**Step8 predefined large-block robustness (tamamlandı):**
+**Step8 formal large-block robustness — primary population `all_valid` (canonical; tamamlandı):**
+- `outputs/robustness/step8_large_block_primary_all_valid/manavgat_2021__bejis_2022/step8_large_block_primary_all_valid_preregistration.{json,md}` (immutable)
+- `step8b_two_cell_equivalence_audit.{json,md}` (10/20-hücre fit'inden önce 2-hücre birebir eşdeğerlik)
+- `manavgat_2021/` ve `bejis_2022/` altında `block_10_cells/` / `block_20_cells/`: block/fold QA, OOF predictions, metrics, paired-block bootstrap
+- `step8_large_block_primary_all_valid_comparison.csv`, `step8_large_block_primary_all_valid_final_report.{json,md}`
+
+**Step8 large-block robustness — doğal-bitki-örtüsü duyarlılığı `burnable_tree_shrub_grass` (dondurulmuş ikincil referans):**
 - `outputs/robustness/step8_large_block/manavgat_2021__bejis_2022/step8_large_block_preregistration.{json,md}` (immutable)
 - `step8_large_block_input_audit.json`
 - `manavgat_2021/` ve `bejis_2022/` altında `block_10_cells/` / `block_20_cells/`: block/fold QA, OOF predictions, metrics ve paired-block bootstrap summary/replicates
@@ -783,9 +911,33 @@ logs/       # Runtime log dosyaları; .gitignore'da
 - `outputs/cross_region/manavgat_2021__bejis_2022/step10/step10_bootstrap_replicates.parquet`, `step10_bootstrap_summary.{json,csv}`
 - `outputs/cross_region/manavgat_2021__bejis_2022/step10/step10_final_report.{json,md}`
 
+**Step9G concept/relationship-shift — sayısal analiz (canonical numeric; tamamlandı):**
+- `outputs/diagnostics/step9g_univariate_feature_auc_direction_reversal/manavgat_2021__bejis_2022/step9g_preregistration.{json,md}` (immutable)
+- `step9g_univariate_auc_by_region.csv`, `step9g_direction_reversal_table.csv`, `step9g_bootstrap_replicates.parquet`
+- `step9g_landcover_descriptive.csv`, `step9g_step9e_feature_integration.csv`, `step9g_step9f_model_level_integration.json`
+- `step9g_final_report.{json,md}`, `step9g_auc_direction_plot.png`
+
+**Step9G integration-v2 (CANONICAL entegrasyon raporu; report-only; tamamlandı):**
+- `outputs/diagnostics/step9g_univariate_feature_auc_direction_reversal_integration_v2/manavgat_2021__bejis_2022/step9g_integration_correction_manifest.json`
+- `step9g_integration_correction_final_report.{json,md}`, `step9g_integration_correction_per_feature.csv`, `step9g_integration_availability_before_after.csv`
+- Not: frozen Step9G sayısal çıktılarını birebir kullanır; hiçbir AUC/CI/reversal yeniden hesaplanmaz.
+
 ## 17. Sınırlamalar
 
-- **Step8 large-block sonucu yalnızca iki bölge ve iki predefined ölçek içindir.** Dört koşulda bootstrap support bulunması spatial autocorrelation'ın elimine edildiğini, residual spatial dependence olmadığını veya başka block size'ların eşdeğer davranacağını kanıtlamaz. Elverişli bir ölçek post hoc seçilmemiştir.
+**Bilimsel sonuçların özeti (restrained wording):**
+
+- within-region thermal katkısı bootstrap-supported'dır ve predefined daha büyük mekansal bloklarda (10/20 hücre) korunur
+- ham (raw) cross-region discrimination transferi başarısız oldu
+- unsupervised adaptation kısmi ve asimetrik (yöne bağlı) bir kısmi iyileşme sağladı
+- feature-seviyesi ilişki-yönü (relationship-direction) instabilitesi, residual concept/relationship shift ile tutarlıdır
+- bu nedensel kanıt değildir
+- concept shift'in transfer başarısızlığının TEK kaynağı olduğu kanıtlanmamıştır
+- bu bir operasyonel yangın erken-uyarı sistemi değildir
+
+Kullanılmayan ifadeler: \"statistically significant\", \"causal thermal effect\", \"spatial autocorrelation eliminated\", \"successful generalization\", \"operational prediction system\".
+
+- **Step8 large-block sonucu yalnızca iki bölge ve iki predefined ölçek içindir.** Dört koşulda bootstrap support bulunması spatial autocorrelation'ın elimine edildiğini, residual spatial dependence olmadığını veya başka block size'ların eşdeğer davranacağını kanıtlamaz. Elverişli bir ölçek post hoc seçilmemiştir. Formal `all_valid` analizi ile doğal-bitki-örtüsü `burnable_tree_shrub_grass` duyarlılığı ayrı raporlanır; ikincisi dondurulmuş dış referanstır.
+- **Step9G univariate direction-reversal teşhisi marjinaldir ve nedensel değildir.** Tek bootstrap-supported reversal `elevation_mean`'dir; dört LST/TVDI point reversal'ının CI'ları chance'i içerir ve bootstrap-supported DEĞİLDİR. Bu, bir Random Forest'ın neden zayıf transfer ettiğini KANITLAMAZ; yalnızca frozen Step9 diagnostikleriyle tutarlı mekanistik bir teşhistir. Step9F bulguları model/temsil-seviyesidir, per-feature değildir.
 - **Kozan, primary wildfire AOI'si değildir.** Kozan 2023 burned label'larının büyük çoğunluğu (533/542) cropland/anız-yakma kaynaklıdır; Kozan cropland/anız-dominant bir negative/control AOI'dir.
 - **Cross-region discrimination generalization desteklenmemiştir.** Step9A-D, Manavgat↔Bejís arasında ROC-AUC/PR-AUC delta'larının belirsiz (bir yönde negatif) olduğunu göstermiştir; yalnızca Brier (probability-error) iyileşmesi tutarlıdır (bkz. Bölüm 9). Bu sonuç yalnızca İKİ bölge (Manavgat, Bejís) arasında elde edilmiştir.
 - **Step9E teşhisi, iki bölgeye özgüdür ve nedensel değildir.** Step9E'nin bulguları (feature dağılım kayması, ilişki-yönü kayması, olasılık ölçek kayması) tanımlayıcı/betimsel diagnostiklerdir; hangi mekanizmanın ASIL nedensel sürücü olduğu kanıtlanmamıştır ve üçüncü bir bölge olmadan doğrulanamaz.

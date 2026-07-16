@@ -416,6 +416,59 @@ def run_step8_robustness_stage(
     )
 
 
+def run_step10_stage(
+    source_id: str, target_id: str, reverse: bool, dry_run: bool, force: bool,
+    report_only: bool = False, bootstrap_replicates: int = 1000, seed: int | None = None,
+) -> dict:
+    """Thin alias of run_self_cal_transfer_stage for the user-facing `step10`
+    command. Step10 IS the preregistered, target-label-blind self-calibrated
+    transfer; target labels are never used for adaptation/normalization/CORAL/
+    threshold/calibration. Delegates to the existing runner; no scientific
+    logic is duplicated here."""
+    return run_self_cal_transfer_stage(
+        source_id=source_id, target_id=target_id, reverse=reverse,
+        dry_run=dry_run, force=force, bootstrap_replicates=bootstrap_replicates,
+        seed=seed, report_only=report_only,
+    )
+
+
+def run_large_block_robustness_stage(
+    dry_run: bool, force: bool, run_large_block_fit: bool = False,
+) -> dict:
+    """Dispatch the FORMAL Step8B primary-population (all_valid) large-block
+    robustness runner. The 2-cell equivalence gate is required before any
+    10/20-cell fit; without --run-large-block-fit the run stops after the gate.
+    Original Step8 outputs are read-only. Delegates to the standalone runner's
+    callable; no analysis logic is duplicated here."""
+    from scripts.run_step8_large_block_robustness_primary_all_valid import main as run_primary_all_valid
+
+    return run_primary_all_valid(
+        dry_run=dry_run, force=force, run_large_block_fit=run_large_block_fit,
+    )
+
+
+def run_concept_shift_stage(dry_run: bool, force: bool) -> dict:
+    """Dispatch the completed Step9G univariate feature-AUC direction-reversal
+    analysis (population burnable_tree_shrub_grass; raw feature-value ROC-AUC;
+    no inversion/normalization/imputation; 10-cell spatial-block bootstrap).
+    This COMPUTES metrics. Target labels are not used for any adaptation.
+    Delegates to the Step9G module's callable."""
+    from src.step9g_univariate_feature_auc_direction_reversal import run_analysis as run_step9g
+
+    return run_step9g(dry=dry_run, force=force)
+
+
+def run_concept_shift_integration_stage(dry_run: bool, force: bool) -> dict:
+    """Dispatch the CANONICAL Step9G integration-v2 report layer. This is
+    REPORT-ONLY: it reuses the frozen Step9G numeric outputs verbatim (no AUC/
+    bootstrap/CI/reversal recomputation) and only corrects how Step9E/9F/10 are
+    integrated. Writes under the canonical integration_v2 namespace; original
+    Step9G outputs are immutable. Delegates to the v2 module's callable."""
+    from src.step9g_integration_correction_v2 import run_correction as run_step9g_integration_v2
+
+    return run_step9g_integration_v2(dry=dry_run, force=force)
+
+
 # =============================================================================
 # LEGACY: Kozan-only Step1->Step8E (Google Drive tabanli) tam pipeline.
 #
