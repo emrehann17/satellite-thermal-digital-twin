@@ -751,21 +751,52 @@ def build_raw_burndate_image(region: "ee.Geometry", start: str, end: str) -> "ee
     return raw_burndate
 
 
-def export_raster_image(image: "ee.Image", out_path: Path, scale: int, region: "ee.Geometry", crs: str) -> None:
-    """GEE image'ini verilen scale/region/crs ile GeoTIFF olarak indirir."""
+def export_raster_image(
+    image: "ee.Image", out_path: Path, scale: int, region: "ee.Geometry", crs: str,
+    force: bool = True, label: str | None = None, tiles_dir: Path | None = None,
+    band_count: int = 1,
+) -> None:
+    """
+    GEE image'ini verilen scale/region/crs ile GeoTIFF olarak indirir.
+
+    BUG FIX (Mugla 2021): eskiden `geemap.ee_export_image`'i DOGRUDAN, hicbir
+    tiled-fallback OLMADAN cagiriyordu -- genis AOI'lerde GEE'nin senkron
+    50331648-byte boyut limitine carpiyordu (bkz. reference_30m.tif icin
+    AYNI hata: "Total request size (63226200 bytes) must be <= 50331648
+    bytes", Mugla 2021 gate_inputs export'unda). Artik
+    `scripts.run_predictors_only.export_image_direct_or_tiled()`'i kullanir
+    (on-filtre boyut tahmini + gerekirse 2x2->4x4->6x6->8x8 tiled fallback +
+    atomik yazma + hizalama QA) -- WorldCover/reference_30m export'larinda
+    ZATEN kullanilan AYNI guvenli desen; yeni bir tiled export mantigi
+    YAZILMAZ.
+
+    force=True varsayilani bu fonksiyonun ESKI davranisini (cagrildiginda
+    HER ZAMAN (yeniden) export etmesi -- var olan dosyayi asla sessizce
+    atlamamasi) korur; mevcut cagiranlarin hicbiri onceden bir skip-if-exists
+    kontrolu YAPMIYORDU.
+
+    label/tiles_dir verilmezse out_path'ten turetilir (mevcut 3 cagiran da
+    -- export_raw_mcd64a1_labels (raw + binary) ve
+    export_raw_mcd64a1_prelabel_labels -- pozisyonel olarak ayni ilk 5
+    parametreyi kullanir; bu yeni parametreler GERIYE DONUK UYUMLU sekilde
+    EKLENMISTIR, mevcut cagri imzalarini DEGISTIRMEZ).
+    """
+    from scripts.run_predictors_only import export_image_direct_or_tiled
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_label = label or out_path.stem
+    resolved_tiles_dir = tiles_dir or (out_path.parent / "_tiles" / out_path.stem)
     log.info("Export basliyor -> %s (scale=%dm, crs=%s)", out_path, scale, crs)
-    geemap.ee_export_image(
-        image,
-        filename=str(out_path),
-        scale=scale,
-        region=region,
-        crs=crs,
-        file_per_band=False,
+    result = export_image_direct_or_tiled(
+        image, out_path, region, scale=scale, crs=crs, label=resolved_label,
+        force=force, tiles_dir=resolved_tiles_dir, band_count=band_count,
     )
     if not out_path.exists():
         raise ValidationError(f"Export dosyasi olusmadi: {out_path}")
-    log.info("Yazildi: %s", out_path)
+    log.info(
+        "Yazildi: %s (transport=%s, tile_grid=%s)",
+        out_path, result["transport"], result.get("tile_grid"),
+    )
 
 
 def inspect_raw_burndate_output(path: Path, start: str, end: str) -> dict:
@@ -990,6 +1021,120 @@ def export_raw_mcd64a1_labels(
         "scale": scale,
         "experiment_id": experiment_id,
         "output_dir": output_dir,
+    }
+
+
+def export_raw_mcd64a1_prelabel_labels(
+    experiment_id: str,
+    pre_label_start: str | None = None,
+    pre_label_end: str | None = None,
+    raw_out: Path | None = None,
+    scale: int = VALIDATION_LABEL_EXPORT_SCALE,
+) -> dict:
+    """
+    Exports a SEPARATE raw MCD64A1 BurnDate raster over the PRE-LABEL window
+    [pre_label_start, pre_label_end] (typically = the predictor window), used
+    ONLY to identify cells that already burned BEFORE label_start so Step6B can
+    EXCLUDE them (leakage safety).
+
+    Reuses build_raw_burndate_image()/export_raster_image()/
+    inspect_raw_burndate_output() -- the SAME month-aligned collection query +
+    per-image DOY masking used for the label-window export -- so the pre-label
+    raster contains only BurnDate DOY values inside the pre-label window.
+
+    KEY DIFFERENCE vs export_raw_mcd64a1_labels(): a ZERO pre-label burn count
+    is a VALID result (an AOI may simply have had no earlier burns) and is
+    reported honestly, NOT treated as a fatal error. A binary-looking raster is
+    still rejected (that indicates an export bug, not "no burns").
+
+    experiment_id is REQUIRED (this is only meaningful for experiment-aware,
+    namespaced runs). It never writes to Kozan's legacy shared directory.
+    """
+    if not GEE_IMPORTS_OK:
+        raise ValidationError(
+            "GEE importlari basarisiz; pre-label MCD64A1 BurnDate export'u icin "
+            f"GEE ortami gerekli. Gercek hata: {GEE_IMPORT_ERROR}."
+        )
+    if not GEEMAP_AVAILABLE:
+        raise ValidationError("geemap yok; pre-label MCD64A1 BurnDate export'u yapilamiyor.")
+
+    from core.regions import (
+        get_active_experiment,
+        get_experiment_output_root,
+        get_region_for_experiment,
+    )
+
+    experiment = get_active_experiment(experiment_id)
+    if pre_label_start is None or pre_label_end is None:
+        window = experiment.get("pre_label_burn_window")
+        if window:
+            pre_label_start = pre_label_start or window[0]
+            pre_label_end = pre_label_end or window[1]
+    # Fallback: predictor window (pre-label window == predictor window by design).
+    pre_label_start = pre_label_start or experiment.get("predictor_start_date")
+    pre_label_end = pre_label_end or experiment.get("predictor_end_date")
+    if pre_label_start is None or pre_label_end is None:
+        raise ValidationError(
+            f"'{experiment_id}' icin pre-label penceresi cozulemedi "
+            "(pre_label_burn_window / predictor penceresi tanimsiz)."
+        )
+    label_start = experiment.get("label_start_date")
+    if label_start is not None and not (pre_label_end < label_start):
+        raise ValidationError(
+            f"Pre-label penceresi bitisi ({pre_label_end}) label_start "
+            f"({label_start}) tarihinden ONCE olmalidir; aksi halde pre-label "
+            "ve label pencereleri cakisir."
+        )
+
+    if raw_out is None:
+        output_dir = get_experiment_output_root(experiment_id) / "validation" / "labels"
+        raw_out = output_dir / "mcd64a1_prelabel_raw.tif"
+    raw_out = Path(raw_out)
+
+    try:
+        init_gee(GEE_PROJECT)
+    except Exception as exc:  # noqa: BLE001
+        raise ValidationError(
+            f"GEE init/auth basarisiz: {type(exc).__name__}: {exc}. "
+            "'earthengine authenticate' calistirin ve GEE_PROJECT'i kontrol edin."
+        ) from exc
+
+    region = get_region_for_experiment(experiment_id)
+    log.info(
+        "[Pre-label BurnDate export] experiment=%s, pre_label_window=%s -> %s, "
+        "scale=%dm, cikti=%s",
+        experiment_id, pre_label_start, pre_label_end, scale, raw_out,
+    )
+
+    raw_image = build_raw_burndate_image(region, pre_label_start, pre_label_end)
+    export_raster_image(raw_image, raw_out, scale, region, EXPORT_CRS)
+    inspection = inspect_raw_burndate_output(raw_out, pre_label_start, pre_label_end)
+
+    if inspection.get("looks_binary"):
+        raise ValidationError(
+            "Export edilen pre-label MCD64A1 BurnDate rasteri BINARY gorunuyor "
+            f"({raw_out}); export mantigini kontrol edin (mosaic.gt(0) "
+            "KULLANILMAMALI)."
+        )
+
+    pre_label_positive = inspection.get("count_in_label_doy_range", 0)
+    if pre_label_positive == 0:
+        # Honest zero result: NOT fatal (unlike the label export). No cell will
+        # be excluded; report it so the advisor can sanity-check the AOI.
+        log.warning(
+            "[Pre-label BurnDate export] pre-label penceresinde (%s -> %s) HIC "
+            "BurnDate degeri yok. Bu GECERLI bir sonuc olabilir (AOI'de erken "
+            "yangin yok) ama AOI/urun-cozunurlugu acisindan da kontrol edilmeli.",
+            pre_label_start, pre_label_end,
+        )
+
+    return {
+        "raw_path": raw_out,
+        "inspection": inspection,
+        "pre_label_window": [pre_label_start, pre_label_end],
+        "pre_label_positive_pixel_count": pre_label_positive,
+        "scale": scale,
+        "experiment_id": experiment_id,
     }
 
 

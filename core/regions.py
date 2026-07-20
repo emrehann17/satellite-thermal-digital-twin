@@ -30,6 +30,37 @@ import ee
 from core.paths import PROJECT_ROOT
 
 # =============================================================================
+# 0) AOI bbox sabitleri (test-edilebilir; ee.Geometry OLMADAN da erisilebilir)
+# =============================================================================
+# ee.Geometry.BBox nesnesinden koordinatlari cekmek genelde bir GEE server
+# cagrisi (.getInfo) gerektirir. Testlerin (ve provenance/hash mantiginin)
+# GEE auth OLMADAN AOI koordinatlarini dogrulayabilmesi icin, Muğla bbox'i
+# ONCE burada (lon_min, lat_min, lon_max, lat_max) sırasında -- ee.Geometry.BBox
+# ile AYNI argüman sırası -- bir Python tuple olarak tanimlanir; build_regions()
+# geometriyi bu sabitten uretir. CRS = EPSG:4326 (projenin EXPORT_CRS'i).
+#
+# Muğla 2021: Marmaris / Bodrum / Milas / Köyceğiz 2021 yaz yanginlarini ve
+# cevredeki dogal-bitki-ortusu (orman/makilik) alanlari kapsayan CALISMA AOI'si.
+# KESIN yangin perimetri DEGILDIR; Step6B burned-landcover gate ile
+# dogrulanmalidir (Manavgat/Bejís gibi, gate sonrasi netlestirilebilir).
+#
+# Hedef sehir merkezleri (yaklasik) -- bbox bunlarin TAMAMINI marjla icermeli:
+#   Bodrum    ~ (lon 27.43, lat 37.03)
+#   Milas     ~ (lon 27.78, lat 37.32)
+#   Marmaris  ~ (lon 28.27, lat 36.85)
+#   Köyceğiz  ~ (lon 28.69, lat 36.97)
+# Secilen sinirlar:
+#   lon_min 27.10  : Bodrum yarimadasinin batisi (Turgutreis ~27.25) dahil.
+#   lat_min 36.60  : Marmaris'in guneyindeki kiyi/orman seridini kapsar.
+#   lon_max 28.90  : Köyceğiz'in ve Marmaris'in dogu yayilimini kapsar.
+#   lat_max 37.45  : Milas/Yeniköy yanginlarinin kuzey yayilimini kapsar.
+# Not: bbox genis gorunse de buyuk bolumu Ege/Akdeniz DENIZIdir (Bodrum ve
+# Marmaris yarimadalari); province-wide bir AOI DEGILDIR. Dort hedef yangin
+# bu araliga gercekten yayilmistir (Bodrum <-> Köyceğiz ~110 km).
+MUGLA_AOI_BBOX = (27.10, 36.60, 28.90, 37.45)
+
+
+# =============================================================================
 # 1) Region geometrileri (mevcut + yeni placeholder'lar)
 # =============================================================================
 
@@ -136,6 +167,15 @@ def build_regions() -> dict:
     # Manavgat AOI'sinin gate sonrasi netlestirilmesi gibi.
     bejis_aoi = ee.Geometry.BBox(-1.05, 39.68, -0.35, 40.15)
 
+    # --- Muğla 2021 (ayni ulke/ayni yil transfer wildfire; internship sorusu:
+    # transfer basarisizligi BOLGESEL mi yoksa YANGIN-OLAYINA-OZGU mu?) ---
+    # Candidate bbox; module-seviyesi MUGLA_AOI_BBOX sabitinden (TEK KAYNAK)
+    # uretilir. Manavgat/Bejís gibi KESIN yangin perimetri DEGILDIR; Step6B
+    # burned-landcover gate ile dogrulanmali, gate sonrasi netlestirilebilir.
+    # AOI, gate GORULMEDEN once tanimlanir; sonuca gore covertly ayarlanmaz.
+    mugla_aoi_candidate_bbox = ee.Geometry.BBox(*MUGLA_AOI_BBOX)
+    mugla_aoi = mugla_aoi_candidate_bbox
+
     return {
         "dogu_akdeniz": dogu_akdeniz,
         "kozan_aoi": kozan_aoi,
@@ -145,6 +185,8 @@ def build_regions() -> dict:
         "valencia_2022_aoi": valencia_2022_aoi,
         "zamora_2022_aoi": zamora_2022_aoi,
         "bejis_aoi": bejis_aoi,
+        "mugla_aoi": mugla_aoi,
+        "mugla_aoi_candidate_bbox": mugla_aoi_candidate_bbox,
     }
 
 
@@ -216,6 +258,51 @@ EXPERIMENTS = {
             "candidate bbox; refine after AOI preview and MCD64A1 "
             "burned-landcover gate. Must pass the same MCD64A1 "
             "burned-landcover gate before modeling, exactly like Manavgat 2021."
+        ),
+    },
+
+    "mugla_2021": {
+        "enabled": True,
+        "region_key": "mugla_aoi",
+        "display_name": "Muğla 2021",
+        "role": "same_country_same_year_transfer_wildfire",
+        "country": "Turkey",
+        "predictor_start_date": "2021-06-01",
+        "predictor_end_date": "2021-07-28",
+        "label_start_date": "2021-07-29",
+        "label_end_date": "2021-09-15",
+        "baseline_years": [2017, 2018, 2019, 2020],
+        "output_namespace": "mugla_2021",
+        # --- LEAKAGE-SAFE PRE-LABEL EXCLUSION (Muğla-specific) ---------------
+        # A separate fire around Bördübet / Marmaris burned ~2021-06-21..25,
+        # which is INSIDE the predictor window (2021-06-01..2021-07-28). Cells
+        # that already burned BEFORE label_start (2021-07-29) carry post-fire
+        # hot/dry/bare predictor signatures and would contaminate the predictor
+        # population (temporal leakage). They must be EXCLUDED from the whole
+        # analysis universe -- NOT treated as unburned negatives.
+        #
+        # The canonical label raster (mcd64a1_raw.tif) is DOY-masked to the
+        # label window, so it sets pre-label BurnDate to 0 (indistinguishable
+        # from genuinely-unburned). Excluding pre-label burns therefore
+        # REQUIRES a SEPARATE pre-label BurnDate raster over the pre-label
+        # window below. When exclude_pre_label_burns is True, the gate reads
+        # that extra raster and drops any cell with a positive pre-label
+        # BurnDate before evaluating natural-vegetation composition.
+        "exclude_pre_label_burns": True,
+        "pre_label_burn_window": ["2021-06-01", "2021-07-28"],
+        "notes": (
+            "Muğla 2021 (Marmaris/Bodrum/Milas/Köyceğiz). Same-country, "
+            "same-year Mediterranean pine wildfire, added as the first/highest-"
+            "priority NEW event to test whether cross-region transfer failure "
+            "is REGIONAL or WILDFIRE-EVENT-SPECIFIC. NOT a negative/control AOI. "
+            "Candidate bbox (MUGLA_AOI_BBOX); refine after AOI preview + MCD64A1 "
+            "burned-landcover gate, exactly like Manavgat 2021 / Bejís 2022. "
+            "LEAKAGE: a Bördübet/Marmaris fire (~2021-06-21..25) lies inside the "
+            "predictor window; exclude_pre_label_burns=True removes any cell "
+            "that burned before label_start (2021-07-29) from the analysis "
+            "universe. Gate result must be sent to the advisor; passing the gate "
+            "does NOT authorize downstream predictor/Step7/Step8/Step9/Step10 "
+            "execution (downstream_authorized=false)."
         ),
     },
 

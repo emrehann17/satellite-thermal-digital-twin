@@ -832,6 +832,72 @@ def doy_to_month_and_date(doy: float, label_start: str, label_end: str) -> tuple
 
 
 # =============================================================================
+# Day-of-year -> position relative to the label window (leakage-safe gating)
+# =============================================================================
+def classify_burndate_relative_to_label(
+    doy: float, label_start: str, label_end: str
+) -> str:
+    """
+    Classifies an MCD64A1 BurnDate day-of-year relative to the label window.
+
+    Returns one of:
+        "in_window"  -> maps to a calendar date inside [label_start, label_end]
+                        (a genuine label-window burn).
+        "pre_label"  -> maps to a calendar date strictly BEFORE label_start
+                        (an EARLIER burn; must be EXCLUDED for leakage safety,
+                        never treated as an unburned negative).
+        "post_label" -> maps to a calendar date strictly AFTER label_end
+                        (a later burn; out-of-window but NOT a pre-label leak).
+        "unmapped"   -> value is not finite/positive, or cannot be mapped
+                        (treated as "no burn" -> unburned, same as before).
+
+    This is a PURE function (datetime only). It does NOT change any existing
+    behaviour: build_dataset() and Step6B keep using doy_to_month_and_date()
+    for the burned/unburned decision. This helper is used ONLY where a
+    leakage-safe pre-label exclusion is explicitly requested
+    (experiment flag exclude_pre_label_burns=True, currently Muğla 2021).
+
+    Single-year label windows (e.g. Muğla 2021-07-29 -> 2021-09-15) are the
+    common case; a window spanning a year boundary is handled by trying every
+    year the window touches for the in-window test, then comparing against the
+    label_start year (pre) / label_end year (post) calendars.
+    """
+    if not np.isfinite(doy) or doy <= 0:
+        return "unmapped"
+    doy_int = int(round(doy))
+
+    start_dt = datetime.strptime(label_start, "%Y-%m-%d")
+    end_dt = datetime.strptime(label_end, "%Y-%m-%d")
+
+    # 1) In-window? (reuse the exact same mapping logic as doy_to_month_and_date)
+    for year in range(start_dt.year, end_dt.year + 1):
+        try:
+            candidate = datetime(year, 1, 1) + timedelta(days=doy_int - 1)
+        except (OverflowError, ValueError):
+            continue
+        if start_dt <= candidate <= end_dt:
+            return "in_window"
+
+    # 2) Pre-label? (date in the label_start year is strictly before label_start)
+    try:
+        cand_start_year = datetime(start_dt.year, 1, 1) + timedelta(days=doy_int - 1)
+        if cand_start_year < start_dt:
+            return "pre_label"
+    except (OverflowError, ValueError):
+        pass
+
+    # 3) Post-label? (date in the label_end year is strictly after label_end)
+    try:
+        cand_end_year = datetime(end_dt.year, 1, 1) + timedelta(days=doy_int - 1)
+        if cand_end_year > end_dt:
+            return "post_label"
+    except (OverflowError, ValueError):
+        pass
+
+    return "unmapped"
+
+
+# =============================================================================
 # Native 500 m block grid
 # =============================================================================
 def compute_block_size_pixels() -> int:

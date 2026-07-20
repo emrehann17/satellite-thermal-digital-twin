@@ -26,11 +26,21 @@ raporu: "Total request size (81561538 bytes) must be <= 50331648 bytes").
 Bu SADECE bir gate-diagnostic girdisi oldugu ve zaten referans gride
 (30 m) nearest-neighbor ile hizalandigi icin, kaynak export'u da GATE ICIN
 30 m'de yapilir (native 10 m degil) -- run_predictors_only.py'nin
-export_image_direct_or_tiled() (direct -> 2x2 -> 4x4 -> 6x6 -> 8x8 tiled
-fallback) fonksiyonu REUSE edilerek, boyut limiti asilsa bile guvenli
-sekilde tamamlanir. Bu, Manavgat icin MODIS/DEM export'larinda zaten
-kullanilan AYNI guvenli desendir -- yeni bir tiled export mantigi
-YAZILMAZ.
+export_image_direct_or_tiled() (on-filtre boyut tahmini + direct -> 2x2 ->
+4x4 -> 6x6 -> 8x8 tiled fallback) fonksiyonu REUSE edilerek, boyut limiti
+asilsa bile guvenli sekilde tamamlanir. Bu, Manavgat icin MODIS/DEM
+export'larinda zaten kullanilan AYNI guvenli desendir -- yeni bir tiled
+export mantigi YAZILMAZ.
+
+REFERENCE_30M BOYUT LIMITI (bug fix, Mugla 2021): sabit-degerli referans
+grid export'u da (genis AOI'lerde) AYNI GEE senkron boyut limitine
+carpabilir -- Mugla AOI'sinde gozlemlendi ("Total request size (63226200
+bytes) must be <= 50331648 bytes"). Bu ONCEDEN `_export_image()` (yalnizca
+direct, tiled fallback'i OLMAYAN bir yardimci) ile export ediliyordu; artik
+WorldCover ile AYNI `export_image_direct_or_tiled()` yolunu kullanir (bkz.
+asagida). `_export_image()` fonksiyonu artik SADECE bu guvenli yolun ince
+bir sarmalayicisi olarak tutulur (geriye donuk uyumluluk icin), dogrudan
+guvensiz bir export YAPMAZ.
 
 Kategorik landcover ASLA bilinear ile resample edilmez -- hizalama icin
 Step8A'nin prepare_aligned_landcover'i (nearest-neighbor) reuse edilir; iki
@@ -131,25 +141,41 @@ def _init_gee_or_fail() -> None:
         ) from exc
 
 
-def _export_image(image, out_path: Path, scale: int, region, crs: str) -> None:
-    try:
-        import geemap
-    except Exception as exc:  # noqa: BLE001
-        raise Step6AError(f"geemap import edilemedi: {type(exc).__name__}: {exc}") from exc
+def _export_image(image, out_path: Path, scale: int, region, crs: str, force: bool = True) -> dict:
+    """
+    DEPRECATED (bug fix, Mugla 2021): bu fonksiyon eskiden `geemap.ee_export_image`'i
+    DOGRUDAN, hicbir tiled-fallback OLMADAN cagiriyordu -- genis AOI'lerde
+    (or. Mugla) GEE'nin senkron 50331648-byte boyut limitine carpiyordu.
+    Artik `scripts.run_predictors_only.export_image_direct_or_tiled()`'in
+    ince bir sarmalayicisidir (on-filtre boyut tahmini + gerekirse tiled
+    fallback + atomik yazma + hizalama QA). Geriye donuk uyumluluk icin
+    tutulur; YENI kod dogrudan `export_image_direct_or_tiled`'i tercih
+    etmelidir (bkz. WorldCover export'u, asagida).
+
+    force=True varsayilani, bu fonksiyonun ESKI davranisini (cagrildiginda
+    HER ZAMAN (yeniden) export etmesi -- var olan dosyayi asla sessizce
+    atlamamasi) korur; var-olan-dosyayi-atlama karari zaten cagiran tarafta
+    (prepare_gate_inputs'un basindaki all_exist kontrolu) verilir.
+
+    Export sonucunu (transport/tile_grid/tile_count/estimated_bytes/
+    alignment_qa iceren dict) dondurur -- cagiran taraf metadata'ya
+    yazabilsin diye.
+    """
+    from scripts.run_predictors_only import export_image_direct_or_tiled
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    log.info("Export basliyor -> %s (scale=%dm, crs=%s)", out_path, scale, crs)
-    geemap.ee_export_image(
-        image,
-        filename=str(out_path),
-        scale=scale,
-        region=region,
-        crs=crs,
-        file_per_band=False,
+    tiles_dir = out_path.parent / "_tiles" / out_path.stem
+    result = export_image_direct_or_tiled(
+        image, out_path, region, scale=scale, crs=crs, label=out_path.stem,
+        force=force, tiles_dir=tiles_dir, band_count=1,
     )
     if not out_path.exists():
         raise Step6AError(f"Export dosyasi olusmadi: {out_path}")
-    log.info("Yazildi: %s", out_path)
+    log.info(
+        "Yazildi: %s (transport=%s, tile_grid=%s)",
+        out_path, result["transport"], result.get("tile_grid"),
+    )
+    return result
 
 
 def prepare_gate_inputs(experiment_id: str, force: bool = False) -> dict:
@@ -195,7 +221,7 @@ def prepare_gate_inputs(experiment_id: str, force: bool = False) -> dict:
         "grid geometrisi icin, termal anlami YOK).", experiment_id,
     )
     reference_image = ee.Image.constant(1).rename("reference").toInt16().clip(region)
-    _export_image(reference_image, ref_path, GATE_REFERENCE_SCALE_M, region, EXPORT_CRS)
+    ref_export_result = _export_image(reference_image, ref_path, GATE_REFERENCE_SCALE_M, region, EXPORT_CRS)
 
     # --- 2) ESA WorldCover v200 kaynak export'u (GATE ICIN 30 m, native
     # 10 m DEGIL -- bkz. modul docstring). Boyut limiti asilirsa
@@ -254,6 +280,11 @@ def prepare_gate_inputs(experiment_id: str, force: bool = False) -> dict:
         "scale_m": GATE_REFERENCE_SCALE_M,
         "reference_shape_wh": ref_shape,
         "aoi_bounds": ref_bounds,
+        "reference_export_transport": ref_export_result["transport"],
+        "reference_export_tile_grid": (
+            list(ref_export_result["tile_grid"]) if ref_export_result.get("tile_grid") else None
+        ),
+        "reference_export_estimated_bytes": ref_export_result.get("estimated_bytes"),
         "label_window": [exp["label_start_date"], exp["label_end_date"]],
         "worldcover_collection": WORLDCOVER_COLLECTION,
         # BUG FIX: WorldCover artik native 10 m'de DEGIL, gate icin 30 m'de

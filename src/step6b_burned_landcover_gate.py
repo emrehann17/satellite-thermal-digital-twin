@@ -121,6 +121,7 @@ from src.step8a_prepare_500m_modeling_dataset import (
     Step8AError,
     _grid_matches,
     align_label_to_reference,
+    classify_burndate_relative_to_label,
     compute_block_size_pixels,
     doy_to_month_and_date,
     inspect_label_raster,
@@ -149,6 +150,55 @@ def _safe_fraction(numerator: int, denominator: int):
     if denominator <= 0:
         return None
     return float(numerator / denominator)
+
+
+def _date_to_doy(date_str: str) -> int:
+    """'YYYY-MM-DD' -> day-of-year (1..366). Pure; for the Bördübet check."""
+    from datetime import datetime
+
+    return int(datetime.strptime(date_str, "%Y-%m-%d").timetuple().tm_yday)
+
+
+def classify_gate_decision(
+    burned_count: int,
+    natural_fraction,
+    cropland_fraction,
+    min_positives: int,
+    natural_threshold: float,
+    cropland_threshold: float,
+) -> tuple[str, str]:
+    """
+    Pure, testable implementation of the supervisor-specified gate decision
+    rules. Returns (decision, reason). This is the SAME logic Step6B has
+    always used; it is only extracted so the natural-vegetation gate decision
+    can be unit-tested without building rasters.
+
+    Note: the natural-vegetation numerator is tree+shrub+GRASS
+    (burned_natural_vegetation_fraction), NOT tree+shrub. tree+shrub is
+    reported separately and never conflated with the pass rule.
+    """
+    if burned_count < min_positives:
+        return (
+            "insufficient_burned_positives",
+            f"burned_count={burned_count} < min_positives={min_positives}.",
+        )
+    if natural_fraction is not None and natural_fraction >= natural_threshold:
+        return (
+            "wildfire_candidate_pass",
+            f"burned_tree_shrub_grass_count/burned_count="
+            f"{natural_fraction:.3f} >= natural_threshold={natural_threshold}.",
+        )
+    if cropland_fraction is not None and cropland_fraction >= cropland_threshold:
+        return (
+            "cropland_dominated_control",
+            f"burned_cropland_dominant_count/burned_count="
+            f"{cropland_fraction:.3f} >= cropland_threshold={cropland_threshold}.",
+        )
+    return (
+        "mixed_or_uncertain",
+        "Ne natural (tree+shrub+grass dominant) ne de cropland-dominant "
+        "esigi karsilandi (mixed/uncertain burned-landcover kompozisyonu).",
+    )
 
 
 def _resolve_explicit_landcover(
@@ -211,6 +261,11 @@ def compute_gate(
     min_positives: int,
     natural_threshold: float,
     cropland_threshold: float,
+    exclude_pre_label_burns: bool = False,
+    pre_label_label_path: Path | None = None,
+    predictor_start: str | None = None,
+    predictor_end: str | None = None,
+    bordubet_check_window: tuple[str, str] | None = None,
 ) -> dict:
     """
     Reconstructs approximate native ~500 m MCD64A1 cells from the 30 m
@@ -218,6 +273,20 @@ def compute_gate(
     cell, determines (a) burned/unburned from the raw BurnDate raster and
     (b) the dominant landcover class -- WITHOUT reading any continuous
     predictor raster.
+
+    LEAKAGE-SAFE PRE-LABEL EXCLUSION (opt-in; default OFF = legacy behaviour):
+        When exclude_pre_label_burns is True, a SEPARATE pre-label BurnDate
+        raster (pre_label_label_path, exported over [predictor_start,
+        label_start)) is read. Any cell with a positive pre-label BurnDate is
+        marked pre_label_burn_excluded and REMOVED from the analysis universe
+        BEFORE the burned/unburned + natural-vegetation composition is
+        evaluated: it is NOT counted as burned, NOT counted as unburned, and
+        NOT included in any gate denominator. This is required because the
+        canonical label raster is DOY-masked to the label window and therefore
+        sets pre-label burns to 0 (indistinguishable from truly-unburned),
+        which would otherwise leak already-burned cells into the negatives.
+        With exclude_pre_label_burns=False the function behaves EXACTLY as
+        before (Kozan/Manavgat/Bejís unchanged).
     """
     with rasterio.open(reference_path) as ref:
         ref_w, ref_h = ref.width, ref.height
@@ -242,6 +311,40 @@ def compute_gate(
 
     burn_month_available = (label_kind == LABEL_KIND_RAW)
 
+    # --- Pre-label exclusion setup (opt-in) ---
+    pre_label_src = None
+    aligned_pre_label_path = None
+    if exclude_pre_label_burns:
+        if not burn_month_available:
+            raise Step6BError(
+                "exclude_pre_label_burns=True icin gercek raw BurnDate "
+                "(DOY) etiketi gerekir; binary fallback ile pre-label "
+                "burn tarihi belirlenemez."
+            )
+        if pre_label_label_path is None:
+            raise Step6BError(
+                "exclude_pre_label_burns=True verildi ama pre_label_label_path "
+                "yok. Pre-label burn'leri dislamak icin [predictor_start, "
+                "label_start) penceresi uzerinden AYRI bir MCD64A1 BurnDate "
+                "rasteri gereklidir (canonical label rasteri label penceresine "
+                "DOY-maskeli oldugu icin pre-label burn'leri 0'a esitler). "
+                "Bkz. export_raw_mcd64a1_prelabel_labels()."
+            )
+        aligned_pre_label_path = align_label_to_reference(
+            Path(pre_label_label_path), ref_profile, output_dir
+        )
+        pre_label_src = rasterio.open(aligned_pre_label_path)
+
+    # Bördübet predictor-window fire check DOY bounds (default 2021-06-21..25).
+    bord_doy_lo = bord_doy_hi = None
+    if bordubet_check_window is not None:
+        bord_doy_lo = _date_to_doy(bordubet_check_window[0])
+        bord_doy_hi = _date_to_doy(bordubet_check_window[1])
+    pred_doy_lo = pred_doy_hi = None
+    if predictor_start is not None and predictor_end is not None:
+        pred_doy_lo = _date_to_doy(predictor_start)
+        pred_doy_hi = _date_to_doy(predictor_end)
+
     total_cells = 0
     burned_count = 0
     unburned_count = 0
@@ -251,28 +354,53 @@ def compute_gate(
     unburned_cells_without_valid_landcover = 0
     warnings_list: list[str] = []
 
+    # --- Pre-label exclusion + temporal QA accumulators ---
+    pre_label_excluded_count = 0
+    pre_label_excluded_dominant_counts: dict = {}
+    pre_label_excluded_without_valid_landcover = 0
+    temporal_qa = {
+        "cell_level_note": (
+            "Counts are per reconstructed ~500 m cell (representative BurnDate "
+            "= mode of positive DOY within the cell), not per 30 m pixel."
+        ),
+        "count_before_predictor_start": 0,
+        "count_within_predictor_window": 0,
+        "count_between_predictor_end_and_label_start": 0,
+        "count_within_label_window": 0,
+        "count_after_label_end": 0,
+        "count_missing_or_zero_burndate": 0,
+        "count_pre_label_burn_excluded": 0,
+        "bordubet_window": (
+            list(bordubet_check_window) if bordubet_check_window else None
+        ),
+        "bordubet_window_burned_cell_count": 0,
+        "min_nonzero_burndate_iso": None,
+        "max_nonzero_burndate_iso": None,
+        "out_of_span_note": (
+            "count_before_predictor_start and count_after_label_end are 0 by "
+            "export construction: the pre-label raster is DOY-masked to "
+            "[predictor_start, label_start) and the label raster to "
+            "[label_start, label_end]; burns outside that combined span are "
+            "not exported. Detecting them would require a wider export."
+        ),
+    }
+    _min_doy_seen = None
+    _max_doy_seen = None
+
+    def _iso_for_doy(doy_val: float, year: int) -> str:
+        from datetime import datetime as _dt, timedelta as _td
+        return (_dt(year, 1, 1) + _td(days=int(round(doy_val)) - 1)).strftime("%Y-%m-%d")
+
+    _label_year = int(label_start[:4])
+
     for tile in tiles:
         col_off, row_off, w, h = tile["write_window"]
         window = Window(col_off, row_off, w, h)
         total_cells += 1
 
-        # --- Label (BurnDate) ---
-        label_arr = label_src.read(1, window=window, masked=True).astype("float32").filled(np.nan)
-        valid_label = label_arr[np.isfinite(label_arr)]
-        positive_doy = valid_label[valid_label > 0]
-
-        burned_flag = 0
-        if positive_doy.size > 0:
-            if burn_month_available:
-                rep_doy, _rep_count, _n = mode_and_agreement(positive_doy)
-                month, _iso = doy_to_month_and_date(rep_doy, label_start, label_end)
-                burned_flag = 1 if month is not None else 0
-            else:
-                # Binary fallback label: no DOY/month info; any positive
-                # value (i.e. 1) means burned.
-                burned_flag = 1
-
         # --- Landcover (dominant class within the same 500 m block) ---
+        # Computed FIRST so that pre-label-EXCLUDED cells also get a dominant
+        # landcover breakdown (task requirement: excluded-by-landcover).
         lc_arr = landcover_src.read(1, window=window, masked=True)
         lc_filled = lc_arr.filled(landcover_nodata).astype("float64")
         lc_valid = ~np.ma.getmaskarray(lc_arr)
@@ -286,21 +414,87 @@ def compute_gate(
             dominant_class = int(uniq[int(np.argmax(counts))])
             dominant_name = _dominant_landcover_name(dominant_class)
 
+        # --- Pre-label burn exclusion (leakage-safe; opt-in) ---
+        # A cell that already burned BEFORE label_start is removed from the
+        # ENTIRE analysis universe here -- never counted as burned OR unburned
+        # and never in any denominator.
+        if pre_label_src is not None:
+            pre_arr = pre_label_src.read(1, window=window, masked=True).astype("float32").filled(np.nan)
+            pre_valid = pre_arr[np.isfinite(pre_arr)]
+            pre_positive = pre_valid[pre_valid > 0]
+            if pre_positive.size > 0:
+                rep_pre_doy, _c, _n = mode_and_agreement(pre_positive)
+                pre_label_excluded_count += 1
+                if dominant_name is not None:
+                    pre_label_excluded_dominant_counts[dominant_name] = (
+                        pre_label_excluded_dominant_counts.get(dominant_name, 0) + 1
+                    )
+                else:
+                    pre_label_excluded_without_valid_landcover += 1
+                # Temporal QA for the excluded (pre-label) cell.
+                temporal_qa["count_pre_label_burn_excluded"] += 1
+                if pred_doy_lo is not None and pred_doy_lo <= rep_pre_doy <= pred_doy_hi:
+                    temporal_qa["count_within_predictor_window"] += 1
+                elif pred_doy_hi is not None and rep_pre_doy > pred_doy_hi:
+                    # after predictor_end but before label_start (contiguous
+                    # windows -> normally 0)
+                    temporal_qa["count_between_predictor_end_and_label_start"] += 1
+                if bord_doy_lo is not None and bord_doy_lo <= rep_pre_doy <= bord_doy_hi:
+                    temporal_qa["bordubet_window_burned_cell_count"] += 1
+                _iso = _iso_for_doy(rep_pre_doy, _label_year)
+                if _min_doy_seen is None or rep_pre_doy < _min_doy_seen:
+                    _min_doy_seen = rep_pre_doy
+                    temporal_qa["min_nonzero_burndate_iso"] = _iso
+                if _max_doy_seen is None or rep_pre_doy > _max_doy_seen:
+                    _max_doy_seen = rep_pre_doy
+                    temporal_qa["max_nonzero_burndate_iso"] = _iso
+                continue  # EXCLUDED: do not count as burned or unburned
+
+        # --- Label (BurnDate) within the label window ---
+        label_arr = label_src.read(1, window=window, masked=True).astype("float32").filled(np.nan)
+        valid_label = label_arr[np.isfinite(label_arr)]
+        positive_doy = valid_label[valid_label > 0]
+
+        burned_flag = 0
+        rep_label_doy = None
+        if positive_doy.size > 0:
+            if burn_month_available:
+                rep_label_doy, _rep_count, _n = mode_and_agreement(positive_doy)
+                month, _iso_lbl = doy_to_month_and_date(rep_label_doy, label_start, label_end)
+                burned_flag = 1 if month is not None else 0
+            else:
+                # Binary fallback label: no DOY/month info; any positive
+                # value (i.e. 1) means burned.
+                burned_flag = 1
+
         if burned_flag == 1:
             burned_count += 1
             if dominant_name is not None:
                 burned_dominant_counts[dominant_name] = burned_dominant_counts.get(dominant_name, 0) + 1
             else:
                 burned_cells_without_valid_landcover += 1
+            # Temporal QA (in-window burned cell).
+            temporal_qa["count_within_label_window"] += 1
+            if rep_label_doy is not None:
+                _iso = _iso_for_doy(rep_label_doy, _label_year)
+                if _min_doy_seen is None or rep_label_doy < _min_doy_seen:
+                    _min_doy_seen = rep_label_doy
+                    temporal_qa["min_nonzero_burndate_iso"] = _iso
+                if _max_doy_seen is None or rep_label_doy > _max_doy_seen:
+                    _max_doy_seen = rep_label_doy
+                    temporal_qa["max_nonzero_burndate_iso"] = _iso
         else:
             unburned_count += 1
             if dominant_name is not None:
                 unburned_dominant_counts[dominant_name] = unburned_dominant_counts.get(dominant_name, 0) + 1
             else:
                 unburned_cells_without_valid_landcover += 1
+            temporal_qa["count_missing_or_zero_burndate"] += 1
 
     label_src.close()
     landcover_src.close()
+    if pre_label_src is not None:
+        pre_label_src.close()
 
     if burned_cells_without_valid_landcover > 0:
         warnings_list.append(
@@ -330,28 +524,57 @@ def compute_gate(
     burned_cropland_fraction = _safe_fraction(burned_cropland_dominant_count, burned_count)
     burned_tree_shrub_fraction = _safe_fraction(burned_tree_shrub_count, burned_count)
 
-    # --- Decision rules (supervisor-specified) ---
-    if burned_count < min_positives:
-        decision = "insufficient_burned_positives"
-        reason = f"burned_count={burned_count} < min_positives={min_positives}."
-    elif burned_natural_vegetation_fraction is not None and burned_natural_vegetation_fraction >= natural_threshold:
-        decision = "wildfire_candidate_pass"
-        reason = (
-            f"burned_tree_shrub_grass_count/burned_count="
-            f"{burned_natural_vegetation_fraction:.3f} >= natural_threshold={natural_threshold}."
+    # --- Pre-label excluded cells: landcover breakdown (tree/shrub/grass/...) ---
+    excl_tree = pre_label_excluded_dominant_counts.get("tree_cover", 0)
+    excl_shrub = pre_label_excluded_dominant_counts.get("shrubland", 0)
+    excl_grass = pre_label_excluded_dominant_counts.get("grassland", 0)
+    excl_crop = pre_label_excluded_dominant_counts.get("cropland", 0)
+    excl_other = (
+        pre_label_excluded_count
+        - excl_tree - excl_shrub - excl_grass - excl_crop
+        - pre_label_excluded_without_valid_landcover
+    )
+    pre_label_excluded_breakdown = {
+        "total": pre_label_excluded_count,
+        "tree_cover": excl_tree,
+        "shrubland": excl_shrub,
+        "grassland": excl_grass,
+        "tree_shrub": excl_tree + excl_shrub,
+        "tree_shrub_grass": excl_tree + excl_shrub + excl_grass,
+        "cropland": excl_crop,
+        "other": excl_other,
+        "without_valid_landcover": pre_label_excluded_without_valid_landcover,
+        "by_dominant_class": pre_label_excluded_dominant_counts,
+    }
+
+    # --- Leakage-safety assertion: excluded cells NEVER became burned/unburned.
+    # Every considered cell is exactly one of {excluded, burned, unburned}.
+    analysis_universe_cells = burned_count + unburned_count
+    partition_ok = (pre_label_excluded_count + analysis_universe_cells) == total_cells
+    if not partition_ok:
+        raise Step6BError(
+            "LEAKAGE-SAFETY ASSERTION FAILED: pre_label_excluded "
+            f"({pre_label_excluded_count}) + burned ({burned_count}) + "
+            f"unburned ({unburned_count}) != total_cells ({total_cells}). "
+            "A pre-label excluded cell must never enter burned/unburned counts."
         )
-    elif burned_cropland_fraction is not None and burned_cropland_fraction >= cropland_threshold:
-        decision = "cropland_dominated_control"
-        reason = (
-            f"burned_cropland_dominant_count/burned_count="
-            f"{burned_cropland_fraction:.3f} >= cropland_threshold={cropland_threshold}."
+    if exclude_pre_label_burns and pre_label_excluded_count > 0:
+        warnings_list.append(
+            f"{pre_label_excluded_count} hucre label_start ({label_start}) "
+            "ONCESI yandigi icin analiz evreninden DISLANDI (pre_label_burn_"
+            "excluded); bu hucreler ne burned ne unburned sayildi, hicbir "
+            "gate paydasinda YOK."
         )
-    else:
-        decision = "mixed_or_uncertain"
-        reason = (
-            "Ne natural (tree+shrub+grass dominant) ne de cropland-dominant "
-            "esigi karsilanmadi (mixed/uncertain burned-landcover kompozisyonu)."
-        )
+
+    # --- Decision rules (supervisor-specified; pure, extracted for testing) ---
+    decision, reason = classify_gate_decision(
+        burned_count=burned_count,
+        natural_fraction=burned_natural_vegetation_fraction,
+        cropland_fraction=burned_cropland_fraction,
+        min_positives=min_positives,
+        natural_threshold=natural_threshold,
+        cropland_threshold=cropland_threshold,
+    )
 
     return {
         "gate_level": GATE_LEVEL_500M,
@@ -359,8 +582,21 @@ def compute_gate(
         "burn_month_available": burn_month_available,
         "block_size_pixels": block_size,
         "total_valid_cells_or_pixels_considered": total_cells,
+        "analysis_universe_cells_after_exclusions": analysis_universe_cells,
         "burned_count": burned_count,
         "unburned_count": unburned_count,
+        # --- Pre-label leakage-safe exclusion ---
+        "exclude_pre_label_burns": bool(exclude_pre_label_burns),
+        "pre_label_burn_excluded_count": pre_label_excluded_count,
+        "pre_label_burn_excluded_breakdown": pre_label_excluded_breakdown,
+        "pre_label_burn_exclusion_rule": (
+            f"valid nonzero BurnDate calendar date < label_start ({label_start})"
+            if exclude_pre_label_burns else "not_applied"
+        ),
+        "temporal_label_qa": temporal_qa,
+        # Gate is diagnostic + advisor-gated: passing NEVER auto-authorizes
+        # predictor/Step7/Step8/Step9/Step10.
+        "downstream_authorized": False,
         "burned_landcover_dominant_counts": burned_dominant_counts,
         "unburned_landcover_dominant_counts": unburned_dominant_counts,
         "burned_tree_cover_count": burned_tree_cover_count,
@@ -390,6 +626,10 @@ def compute_gate(
             "landcover_path": str(landcover_path),
             "label_start": label_start,
             "label_end": label_end,
+            "predictor_start": predictor_start,
+            "predictor_end": predictor_end,
+            "pre_label_label_path": str(pre_label_label_path) if pre_label_label_path else None,
+            "aligned_pre_label_path": str(aligned_pre_label_path) if aligned_pre_label_path else None,
         },
     }
 
@@ -407,13 +647,16 @@ def write_json(gate: dict, out_path: Path) -> Path:
 def write_csv(gate: dict, out_path: Path) -> Path:
     scalar_fields = [
         "gate_level", "label_kind", "burn_month_available", "block_size_pixels",
-        "total_valid_cells_or_pixels_considered", "burned_count", "unburned_count",
+        "total_valid_cells_or_pixels_considered",
+        "analysis_universe_cells_after_exclusions",
+        "exclude_pre_label_burns", "pre_label_burn_excluded_count",
+        "burned_count", "unburned_count",
         "burned_tree_cover_count", "burned_shrubland_count", "burned_grassland_count",
         "burned_cropland_count", "burned_tree_shrub_grass_count", "burned_tree_shrub_count",
         "burned_cropland_dominant_count", "burned_natural_vegetation_fraction",
         "burned_cropland_fraction", "burned_tree_shrub_fraction",
         "burned_cells_without_valid_landcover", "unburned_cells_without_valid_landcover",
-        "decision", "reason",
+        "decision", "reason", "downstream_authorized",
     ]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="", encoding="utf-8") as f:
@@ -425,6 +668,18 @@ def write_csv(gate: dict, out_path: Path) -> Path:
             writer.writerow([f"burned_landcover_dominant_counts__{cls_name}", count])
         for cls_name, count in sorted(gate.get("unburned_landcover_dominant_counts", {}).items()):
             writer.writerow([f"unburned_landcover_dominant_counts__{cls_name}", count])
+        breakdown = gate.get("pre_label_burn_excluded_breakdown", {}) or {}
+        for key in ["total", "tree_cover", "shrubland", "grassland", "tree_shrub",
+                    "tree_shrub_grass", "cropland", "other", "without_valid_landcover"]:
+            if key in breakdown:
+                writer.writerow([f"pre_label_burn_excluded__{key}", breakdown[key]])
+        qa = gate.get("temporal_label_qa", {}) or {}
+        for key in ["count_within_predictor_window", "count_within_label_window",
+                    "count_between_predictor_end_and_label_start",
+                    "count_missing_or_zero_burndate", "bordubet_window_burned_cell_count",
+                    "min_nonzero_burndate_iso", "max_nonzero_burndate_iso"]:
+            if key in qa:
+                writer.writerow([f"temporal_qa__{key}", qa[key]])
     log.info("CSV yazildi: %s", out_path)
     return out_path
 
@@ -470,6 +725,66 @@ def write_markdown(gate: dict, out_path: Path) -> Path:
     for cls_name, count in sorted(gate["burned_landcover_dominant_counts"].items(), key=lambda kv: -kv[1]):
         lines.append(f"| {cls_name} | {count} |")
     lines.append("")
+
+    # --- Pre-label leakage-safe exclusion ---
+    if gate.get("exclude_pre_label_burns"):
+        b = gate.get("pre_label_burn_excluded_breakdown", {}) or {}
+        lines.append("## Pre-label burn exclusion (leakage safety)")
+        lines.append("")
+        lines.append(
+            "Cells whose MCD64A1 BurnDate maps to a calendar date BEFORE "
+            f"`label_start` ({gate['inputs']['label_start']}) were removed from "
+            "the ENTIRE analysis universe BEFORE composition was evaluated. "
+            "They are NOT counted as burned, NOT counted as unburned, and NOT "
+            "in any gate denominator. Rule: "
+            f"`{gate.get('pre_label_burn_exclusion_rule')}`."
+        )
+        lines.append("")
+        lines.append(f"- total AOI cells considered: `{gate['total_valid_cells_or_pixels_considered']}`")
+        lines.append(f"- pre_label_burn_excluded_count: `{gate['pre_label_burn_excluded_count']}`")
+        lines.append(f"- analysis universe after exclusions: `{gate['analysis_universe_cells_after_exclusions']}`")
+        lines.append("")
+        lines.append("| Excluded cells by dominant landcover | Count |")
+        lines.append("|---|---|")
+        for key in ["tree_cover", "shrubland", "grassland", "tree_shrub",
+                    "tree_shrub_grass", "cropland", "other", "without_valid_landcover"]:
+            lines.append(f"| {key} | {b.get(key, 0)} |")
+        lines.append("")
+
+        qa = gate.get("temporal_label_qa", {}) or {}
+        lines.append("## Temporal BurnDate QA (cell-level)")
+        lines.append("")
+        lines.append(f"_{qa.get('cell_level_note', '')}_")
+        lines.append("")
+        lines.append("| Metric | Value |")
+        lines.append("|---|---|")
+        for key in [
+            "min_nonzero_burndate_iso", "max_nonzero_burndate_iso",
+            "count_before_predictor_start", "count_within_predictor_window",
+            "count_between_predictor_end_and_label_start", "count_within_label_window",
+            "count_after_label_end", "count_missing_or_zero_burndate",
+            "count_pre_label_burn_excluded", "bordubet_window_burned_cell_count",
+        ]:
+            lines.append(f"| {key} | {qa.get(key)} |")
+        lines.append("")
+        if qa.get("bordubet_window"):
+            lines.append(
+                f"Bördübet predictor-window fire check "
+                f"({qa['bordubet_window'][0]} .. {qa['bordubet_window'][1]}): "
+                f"`{qa.get('bordubet_window_burned_cell_count', 0)}` cell(s) "
+                "with BurnDate in that window intersect the AOI "
+                "(all gate cells are within-AOI by construction). A zero here "
+                "is reported honestly and may indicate an AOI/product-resolution issue."
+            )
+            lines.append("")
+        lines.append(f"_{qa.get('out_of_span_note', '')}_")
+        lines.append("")
+
+    lines.append(f"**downstream_authorized: `{gate.get('downstream_authorized')}`** "
+                 "(passing the gate does NOT authorize predictor/Step7/Step8/"
+                 "Step9/Step10; advisor review required).")
+    lines.append("")
+
     if gate["warnings"]:
         lines.append("## Warnings")
         lines.append("")
@@ -507,6 +822,11 @@ def main(
     min_positives: int = STEP6_BURNED_LANDCOVER_GATE_MIN_POSITIVES,
     natural_threshold: float = STEP6_BURNED_LANDCOVER_GATE_NATURAL_THRESHOLD,
     cropland_threshold: float = STEP6_BURNED_LANDCOVER_GATE_CROPLAND_THRESHOLD,
+    exclude_pre_label_burns: bool = False,
+    pre_label_raster_arg: str | None = None,
+    predictor_start: str | None = None,
+    predictor_end: str | None = None,
+    bordubet_check_window: tuple[str, str] | None = None,
 ) -> dict:
     """
     Path-aware davranis (Step0C):
@@ -576,6 +896,21 @@ def main(
         landcover_path, landcover_info = resolve_landcover(reference_path)
     log.info("Landcover rasteri (hizali): %s", landcover_path)
 
+    pre_label_path = None
+    if exclude_pre_label_burns:
+        if not pre_label_raster_arg:
+            raise Step6BError(
+                "exclude_pre_label_burns=True verildi ama --pre-label-raster "
+                "(pre_label_raster_arg) yok. [predictor_start, label_start) "
+                "penceresi uzerinden AYRI bir MCD64A1 BurnDate rasteri gerekli."
+            )
+        pre_label_path = Path(pre_label_raster_arg)
+        if not pre_label_path.is_absolute():
+            pre_label_path = BASE_DIR / pre_label_path
+        if not pre_label_path.exists():
+            raise Step6BError(f"Pre-label BurnDate rasteri bulunamadi: {pre_label_path}")
+        log.info("Pre-label exclusion AKTIF; pre-label raster: %s", pre_label_path)
+
     gate = compute_gate(
         label_path=label_path,
         label_kind=label_kind,
@@ -587,6 +922,11 @@ def main(
         min_positives=min_positives,
         natural_threshold=natural_threshold,
         cropland_threshold=cropland_threshold,
+        exclude_pre_label_burns=exclude_pre_label_burns,
+        pre_label_label_path=pre_label_path,
+        predictor_start=predictor_start,
+        predictor_end=predictor_end,
+        bordubet_check_window=bordubet_check_window,
     )
     gate["label_raster_diagnostics"] = label_diag
     gate["landcover_info"] = landcover_info
@@ -640,6 +980,25 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--min-positives", type=int, default=STEP6_BURNED_LANDCOVER_GATE_MIN_POSITIVES)
     parser.add_argument("--natural-threshold", type=float, default=STEP6_BURNED_LANDCOVER_GATE_NATURAL_THRESHOLD)
     parser.add_argument("--cropland-threshold", type=float, default=STEP6_BURNED_LANDCOVER_GATE_CROPLAND_THRESHOLD)
+    # --- Leakage-safe pre-label burn exclusion (opt-in; Muğla 2021) ---
+    parser.add_argument(
+        "--exclude-pre-label-burns", action="store_true",
+        help="Cells that burned BEFORE label_start are excluded from the whole "
+        "analysis universe (requires --pre-label-raster).",
+    )
+    parser.add_argument(
+        "--pre-label-raster", type=str, default=None,
+        help="AYRI MCD64A1 BurnDate rasteri, [predictor_start, label_start) "
+        "penceresi uzerinden export edilmis (pre-label burn'leri belirlemek icin).",
+    )
+    parser.add_argument("--predictor-start", type=str, default=None,
+                        help="Predictor penceresi baslangici (temporal QA icin).")
+    parser.add_argument("--predictor-end", type=str, default=None,
+                        help="Predictor penceresi bitisi (temporal QA icin).")
+    parser.add_argument("--bordubet-start", type=str, default=None,
+                        help="Bördübet predictor-window fire check baslangici (or. 2021-06-21).")
+    parser.add_argument("--bordubet-end", type=str, default=None,
+                        help="Bördübet predictor-window fire check bitisi (or. 2021-06-25).")
     return parser.parse_args(argv)
 
 
@@ -656,4 +1015,12 @@ if __name__ == "__main__":
         min_positives=args.min_positives,
         natural_threshold=args.natural_threshold,
         cropland_threshold=args.cropland_threshold,
+        exclude_pre_label_burns=args.exclude_pre_label_burns,
+        pre_label_raster_arg=args.pre_label_raster,
+        predictor_start=args.predictor_start,
+        predictor_end=args.predictor_end,
+        bordubet_check_window=(
+            (args.bordubet_start, args.bordubet_end)
+            if args.bordubet_start and args.bordubet_end else None
+        ),
     )
