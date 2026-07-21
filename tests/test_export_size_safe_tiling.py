@@ -517,5 +517,302 @@ class TestUnaffectedScientificState(unittest.TestCase):
             self.assertEqual(e["label_end_date"], le, exp_id)
 
 
+# =============================================================================
+# NEW (Mugla 2021 band_count QA bug fix): per-product expected_band_count
+# wiring through _export_predictors_direct() -> nested _export() ->
+# export_image_direct_or_tiled(band_count=...). Regression coverage for the
+# "Alignment QA: beklenmeyen bant sayisi (2 != 1)" failure caused by relying
+# on a single global band_count default for products with different real
+# band counts (current LST/NDVI = 2 bands; baseline LST/NDVI = 1 band).
+#
+# Task numbering (bug-fix prompt):
+#   1  current LST export call passes band_count=2
+#   2  current NDVI export call passes band_count=2
+#   3  every baseline LST export call passes band_count=1
+#   4  every baseline NDVI export call passes band_count=1
+#   5  a 2-band synthetic raster passes QA with expected_band_count=2
+#   6  the same raster fails fast with expected_band_count=1
+#   7  a 1-band synthetic raster passes QA with expected_band_count=1
+#   8  band_count reaches the pre-flight size estimate too (same
+#      source-of-truth used for both the estimate and the alignment QA)
+#   9  skipped_existing behavior is unaffected (no retroactive QA)
+#  10  Manavgat/Bejis/Kozan frozen outputs are not written to -- not
+#      exercised here (no live frozen data in this environment; verified by
+#      code review instead, see task report: this change only touches
+#      scripts/run_predictors_only.py's _export() wrapper and its own 4
+#      call sites, none of which touch legacy/other-experiment paths)
+# =============================================================================
+def _write_multiband_geotiff(path: Path, band_arrays, transform, crs="EPSG:4326", dtype="float32"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(
+        path, "w", driver="GTiff", height=band_arrays[0].shape[0], width=band_arrays[0].shape[1],
+        count=len(band_arrays), dtype=dtype, crs=crs, transform=transform,
+    ) as dst:
+        for i, arr in enumerate(band_arrays, start=1):
+            dst.write(arr.astype(dtype), i)
+
+
+def _make_fake_step3_module(baseline_lst_years, baseline_ndvi_years):
+    """Fake src.step3_landsat_lst: never touches GEE. Current_* functions
+    return a plain marker image; baseline_* collection functions return a
+    chainable fake collection (.filter(...).first()) matching the real
+    `ee.Image(collection.filter(ee.Filter.eq(...)).first()).select(...)`
+    call shape in _export_predictors_direct()."""
+    mod = types.ModuleType("src.step3_landsat_lst")
+
+    class _FakeCollection:
+        def filter(self, _f):
+            return self
+
+        def first(self):
+            return "fake_ee_image_ref"
+
+    def get_current_period_median(region, region_name, end_date, window_days):
+        return "current_lst_image_marker", {}
+
+    def get_current_period_ndvi_median(region, region_name, end_date, window_days):
+        return "current_ndvi_image_marker", {}
+
+    def get_landsat_baseline_window_median_collection(
+        region, region_name, end_date, window_days, baseline_start, baseline_end,
+    ):
+        windows = [{"year": y, "window_end": f"{y}-07-28"} for y in baseline_lst_years]
+        return _FakeCollection(), {"windows": windows}
+
+    def get_landsat_baseline_window_ndvi_collection(
+        region, region_name, end_date, window_days, baseline_start, baseline_end,
+    ):
+        windows = [{"year": y, "window_end": f"{y}-07-28"} for y in baseline_ndvi_years]
+        return _FakeCollection(), {"windows": windows}
+
+    mod.get_current_period_median = get_current_period_median
+    mod.get_current_period_ndvi_median = get_current_period_ndvi_median
+    mod.get_landsat_baseline_window_median_collection = get_landsat_baseline_window_median_collection
+    mod.get_landsat_baseline_window_ndvi_collection = get_landsat_baseline_window_ndvi_collection
+    return mod
+
+
+def _make_fake_ee_module_with_image():
+    """Extends the minimal fake `ee` module (Geometry.BBox only) with
+    Image/Filter, needed by the baseline-year selection chain."""
+
+    class _FakeEEImage:
+        def __init__(self, ref):
+            self.ref = ref
+
+        def select(self, _band):
+            return self
+
+    class _FakeFilter:
+        @staticmethod
+        def eq(a, b):
+            return (a, b)
+
+    mod = _make_fake_ee_module()
+    mod.Image = _FakeEEImage
+    mod.Filter = _FakeFilter
+    return mod
+
+
+def _make_fake_gee_utils_module():
+    mod = types.ModuleType("core.gee_utils")
+    mod.init_gee = lambda project=None: None
+    return mod
+
+
+def _build_minimal_ctx(tmp: Path, baseline_years: list[int]) -> dict:
+    """Minimal ctx dict covering exactly the keys _export_predictors_direct()
+    and _write_predictor_export_metadata() read -- entirely inside a temp
+    dir, so no real repo/output paths are ever touched by this test."""
+    data_root = tmp / "data"
+    return {
+        "experiment_id": "test_experiment",
+        "data_root": data_root,
+        "baseline_input_dir": data_root / "landsat_timeseries",
+        "current_period_dir": data_root / "current_period",
+        "ndvi_baseline_dir": data_root / "ndvi_timeseries",
+        "ndvi_current_dir": data_root / "ndvi_current_period",
+        "region_key": "test_region",
+        "predictor_start_date": "2021-06-01",
+        "predictor_end_date": "2021-07-28",
+        "current_period_end_date": "2021-07-28",
+        "current_period_days": 58,
+        "baseline_start_date": f"{min(baseline_years)}-01-01",
+        "baseline_end_date": f"{max(baseline_years)}-12-31",
+        "baseline_years": baseline_years,
+        "landsat_file_prefix": "test_landsat",
+        "output_root": tmp,
+    }
+
+
+class TestPredictorExportBandCountWiring(unittest.TestCase):
+    """Task items 1-4: each _export_predictors_direct() product calls
+    export_image_direct_or_tiled() with the PRODUCT-SPECIFIC real band count
+    (current=2, baseline=1 per year) -- not a silent global default."""
+
+    def _run_with_spy(self, baseline_years=(2018, 2019)):
+        calls = {}
+
+        def _spy(image, out_path, region, scale, crs, label, force, *,
+                  tiles_dir, cleanup_tiles=False, band_count=1, run_alignment_qa=True):
+            calls[label] = band_count
+            return {
+                "path": out_path, "transport": "direct", "tile_grid": None,
+                "tile_count": None, "estimated_bytes": None,
+                "direct_skipped_preflight": False, "alignment_qa": None,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _build_minimal_ctx(Path(tmp), list(baseline_years))
+            fake_ee = _make_fake_ee_module_with_image()
+            fake_geemap = types.ModuleType("geemap")  # never called: export is spied
+            fake_step3 = _make_fake_step3_module(list(baseline_years), list(baseline_years))
+            fake_gee_utils = _make_fake_gee_utils_module()
+
+            with patch.dict(sys.modules, {
+                "ee": fake_ee,
+                "geemap": fake_geemap,
+                "src.step3_landsat_lst": fake_step3,
+                "core.gee_utils": fake_gee_utils,
+            }):
+                with patch.object(rpo, "get_region", lambda _ctx: _FakeBBox(0.0, 0.0, 0.01, 0.01)):
+                    with patch.object(rpo, "export_image_direct_or_tiled", side_effect=_spy):
+                        rpo._export_predictors_direct(ctx, force=False)
+        return calls
+
+    def test_1_current_lst_band_count_is_2(self):
+        calls = self._run_with_spy()
+        self.assertEqual(calls["current_lst"], 2)
+
+    def test_2_current_ndvi_band_count_is_2(self):
+        calls = self._run_with_spy()
+        self.assertEqual(calls["current_ndvi"], 2)
+
+    def test_3_baseline_lst_band_count_is_1_for_every_year(self):
+        years = (2017, 2018, 2019, 2020)
+        calls = self._run_with_spy(baseline_years=years)
+        for year in years:
+            self.assertEqual(calls[f"baseline_lst_{year}"], 1)
+
+    def test_4_baseline_ndvi_band_count_is_1_for_every_year(self):
+        years = (2017, 2018, 2019, 2020)
+        calls = self._run_with_spy(baseline_years=years)
+        for year in years:
+            self.assertEqual(calls[f"baseline_ndvi_{year}"], 1)
+
+
+# =============================================================================
+# 5-7. Alignment QA respects the CALLER-SUPPLIED expected band count (accepts
+#      a matching count, fails fast on a mismatch) -- no hardcoded global
+#      band-count assumption.
+# =============================================================================
+class TestAlignmentQARespectsExpectedBandCount(unittest.TestCase):
+    def setUp(self):
+        self.deg_per_pixel = 0.001
+        self.transform = from_origin(0.0, 0.004, self.deg_per_pixel, self.deg_per_pixel)
+        self.scale = _scale_for_deg_per_pixel(self.deg_per_pixel)
+        self.region = _FakeBBox(0.0, 0.0, 0.004, 0.004)
+
+    def test_5_two_band_raster_passes_qa_with_expected_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "two_band.tif"
+            arr = np.ones((4, 4), dtype="float32")
+            _write_multiband_geotiff(out_path, [arr, arr], self.transform)
+            report = rpo._validate_export_alignment(
+                out_path, self.region, self.scale, "EPSG:4326", expected_band_count=2,
+            )
+            self.assertEqual(report["band_count"], 2)
+
+    def test_6_two_band_raster_fails_fast_with_expected_1(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "two_band.tif"
+            arr = np.ones((4, 4), dtype="float32")
+            _write_multiband_geotiff(out_path, [arr, arr], self.transform)
+            with self.assertRaises(rpo.PredictorRunnerError):
+                rpo._validate_export_alignment(
+                    out_path, self.region, self.scale, "EPSG:4326", expected_band_count=1,
+                )
+
+    def test_7_single_band_raster_passes_qa_with_expected_1(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "one_band.tif"
+            arr = np.ones((4, 4), dtype="float32")
+            _write_multiband_geotiff(out_path, [arr], self.transform)
+            report = rpo._validate_export_alignment(
+                out_path, self.region, self.scale, "EPSG:4326", expected_band_count=1,
+            )
+            self.assertEqual(report["band_count"], 1)
+
+
+# =============================================================================
+# 8. band_count reaches the pre-flight size estimate too (same
+#    source-of-truth used for both _estimate_request_bytes and the alignment
+#    QA -- see export_image_direct_or_tiled()).
+# =============================================================================
+class TestBandCountReachesSizeEstimate(unittest.TestCase):
+    def test_estimated_bytes_scales_with_band_count(self):
+        fake_geemap = _make_generic_fake_geemap_module(fill_value=1)
+        mugla_like_region = _FakeBBox(27.10, 36.60, 28.90, 37.45)
+
+        estimated_bytes = {}
+        for band_count in (1, 2):
+            with tempfile.TemporaryDirectory() as tmp:
+                out_path = Path(tmp) / f"band_{band_count}.tif"
+                tiles_dir = Path(tmp) / "_tiles"
+                with _StubGEEContext(geemap_module=fake_geemap):
+                    # run_alignment_qa=False: this test isolates the
+                    # pre-flight ESTIMATE only -- the fake geemap tiles are
+                    # always single-band regardless of the requested
+                    # band_count, so alignment QA is out of scope here (see
+                    # tests 5-7 above for QA accept/reject coverage).
+                    result = rpo.export_image_direct_or_tiled(
+                        _FakeImage(), out_path, mugla_like_region, scale=30,
+                        crs="EPSG:4326", label=f"band_count_{band_count}", force=False,
+                        tiles_dir=tiles_dir, tile_rows=2, tile_cols=2,
+                        band_count=band_count, run_alignment_qa=False,
+                    )
+                estimated_bytes[band_count] = result["estimated_bytes"]
+
+        self.assertIsNotNone(estimated_bytes[1])
+        self.assertIsNotNone(estimated_bytes[2])
+        self.assertEqual(estimated_bytes[2], estimated_bytes[1] * 2)
+
+
+# =============================================================================
+# 9. skipped_existing behavior is unaffected by band_count: a pre-existing
+#    output is skipped (transport="skipped_existing") and NEVER retroactively
+#    QA'd against whatever band_count the current call happens to request --
+#    this protects old/frozen files (e.g. Manavgat/Bejis) whose real band
+#    count may not match what a newer caller would ask for.
+# =============================================================================
+class TestSkippedExistingUnaffectedByBandCount(unittest.TestCase):
+    def test_skip_existing_ignores_band_count_no_retroactive_qa(self):
+        def _fail_if_called(*_a, **_k):
+            raise AssertionError("geemap.ee_export_image must not be called for an existing file")
+
+        fake_geemap = types.ModuleType("geemap")
+        fake_geemap.ee_export_image = _fail_if_called
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "frozen_one_band.tif"
+            # Frozen legacy file: only 1 real band, but this call asks for 2
+            # (as current-period products correctly do post-fix) -- must NOT
+            # be retroactively rejected.
+            arr = np.ones((4, 4), dtype="float32")
+            _write_multiband_geotiff(out_path, [arr], from_origin(0.0, 0.004, 0.001, 0.001))
+            tiles_dir = Path(tmp) / "_tiles"
+            fake_region = _FakeBBox(0.0, 0.0, 0.004, 0.004)
+
+            with _StubGEEContext(geemap_module=fake_geemap):
+                result = rpo.export_image_direct_or_tiled(
+                    _FakeImage(), out_path, fake_region, scale=30,
+                    crs="EPSG:4326", label="frozen", force=False,
+                    tiles_dir=tiles_dir, band_count=2,
+                )
+
+            self.assertEqual(result["transport"], "skipped_existing")
+            self.assertIsNone(result["alignment_qa"])
+
+
 if __name__ == "__main__":
     unittest.main()

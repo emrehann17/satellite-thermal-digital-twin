@@ -49,7 +49,21 @@ class TestParserStructure(unittest.TestCase):
         self.assertTrue(args.dry_run)
         self.assertFalse(args.force)
         self.assertFalse(args.export_labels)
+        self.assertIsNone(args.seam_products)
+        self.assertIsNone(args.seam_scales)
         self.assertIs(args.func, cmd_experiment)
+
+    def test_seam_audit_stage_and_overrides_parse(self):
+        args = self.parser.parse_args([
+            "experiment", "--experiment", "mugla_2021",
+            "--from-stage", "seam-audit", "--to-stage", "seam-audit",
+            "--predictor-mode", "local-only", "--dry-run",
+            "--seam-products", "current_lst,fused_lst",
+            "--seam-scales", "native,modeling_500m",
+        ])
+        self.assertEqual(args.from_stage, "seam-audit")
+        self.assertEqual(args.seam_products, "current_lst,fused_lst")
+        self.assertEqual(args.seam_scales, "native,modeling_500m")
 
     def test_experiment_missing_required_arg_raises_systemexit(self):
         with self.assertRaises(SystemExit):

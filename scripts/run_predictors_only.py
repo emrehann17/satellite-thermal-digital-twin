@@ -588,7 +588,7 @@ def export_image_direct_or_tiled(
     tile_cols: int = 2,
     cleanup_tiles: bool = False,
     bytes_per_pixel: int = DEFAULT_ESTIMATE_BYTES_PER_PIXEL,
-    band_count: int = 2,
+    band_count: int = 1,
     run_alignment_qa: bool = True,
 ) -> dict:
     """
@@ -631,6 +631,17 @@ def export_image_direct_or_tiled(
     (daha ince) grid'e geçilir. Boyutla/dosya-eksikliğiyle İLGİSİZ bir hata
     (auth, geometry, vb.) alınırsa döngü durur ve hata olduğu gibi
     fırlatılır.
+
+    band_count: cagiran tarafin EXPORT EDILEN GORUNTUNUN GERCEK bant sayisini
+        acikca gecmesi gereken parametre -- boyut tahmininde
+        (_estimate_request_bytes) VE hizalama QA'da (_validate_export_alignment,
+        expected_band_count olarak) AYNI degerdir. Varsayilan (1) yalnizca
+        tek-bantli urunler icindir (or. baseline LST/NDVI, DEM, MODIS,
+        WorldCover); iki-bantli urunler (current-period LST/NDVI: deger +
+        valid-count) BU DEGERI ACIKCA band_count=2 OLARAK GECMELIDIR --
+        aksi halde alignment QA yanlis bant sayisini bekler/kabul eder.
+        Bkz. scripts/run_predictors_only.py:_export_predictors_direct._export()
+        icin urun-basina expected_band_count kablolamasi.
 
     Döner: {"path": Path,
             "transport": "direct" | "tiled_direct_fallback" | "tiled_preflight_skip" | "skipped_existing",
@@ -813,11 +824,25 @@ def _export_predictors_direct(ctx: dict, force: bool, cleanup_tiles: bool = Fals
     written = {}
     export_transport_log = {}
 
-    def _export(image, out_path: Path, label: str) -> None:
+    def _export(
+        image,
+        out_path: Path,
+        label: str,
+        *,
+        expected_band_count: int,
+    ) -> None:
+        """
+        expected_band_count: bu urunun GERCEK bant sayisi (or. current LST/NDVI
+        icin 2 -- deger + valid-count; baseline LST/NDVI icin 1 -- yalniz
+        deger). export_image_direct_or_tiled()'a hem boyut tahmininde hem
+        hizalama QA'sinda kullanilacak TEK source-of-truth olarak (band_count=)
+        gecirilir -- global/sessiz bir varsayima ASLA guvenilmez.
+        """
         tiles_dir = ctx["data_root"] / "_tiles" / label
         result = export_image_direct_or_tiled(
             image, out_path, region, scale, EXPORT_CRS, label, force,
             tiles_dir=tiles_dir, cleanup_tiles=cleanup_tiles,
+            band_count=expected_band_count,
         )
         written[label] = str(result["path"])
         export_transport_log[label] = {
@@ -827,6 +852,7 @@ def _export_predictors_direct(ctx: dict, force: bool, cleanup_tiles: bool = Fals
             "scale": scale,
             "crs": EXPORT_CRS,
             "path": str(result["path"]),
+            "expected_band_count": expected_band_count,
         }
 
     # --- Current period LST (Celsius + valid count) ---
@@ -837,14 +863,14 @@ def _export_predictors_direct(ctx: dict, force: bool, cleanup_tiles: bool = Fals
     current_lst_image, _ = step3.get_current_period_median(
         region, region_name, ctx["current_period_end_date"], ctx["current_period_days"],
     )
-    _export(current_lst_image, current_lst_path, "current_lst")
+    _export(current_lst_image, current_lst_path, "current_lst", expected_band_count=2)
 
     # --- Current period NDVI (NDVI + valid count) ---
     current_ndvi_path = ctx["ndvi_current_dir"] / "current_ndvi_median.tif"
     current_ndvi_image, _ = step3.get_current_period_ndvi_median(
         region, region_name, ctx["current_period_end_date"], ctx["current_period_days"],
     )
-    _export(current_ndvi_image, current_ndvi_path, "current_ndvi")
+    _export(current_ndvi_image, current_ndvi_path, "current_ndvi", expected_band_count=2)
 
     # --- Baseline LST, yıl başına tek bant (ST_B10 DN; Step5 dn_to_celsius ile çevirir) ---
     baseline_lst_collection, baseline_lst_meta = step3.get_landsat_baseline_window_median_collection(
@@ -859,7 +885,7 @@ def _export_predictors_direct(ctx: dict, force: bool, cleanup_tiles: bool = Fals
             ee.Image(baseline_lst_collection.filter(ee.Filter.eq("baseline_year", year)).first())
             .select("ST_B10")
         )
-        _export(year_image, out_path, f"baseline_lst_{year}")
+        _export(year_image, out_path, f"baseline_lst_{year}", expected_band_count=1)
 
     # --- Baseline NDVI, yıl başına tek bant ---
     baseline_ndvi_collection, baseline_ndvi_meta = step3.get_landsat_baseline_window_ndvi_collection(
@@ -874,7 +900,7 @@ def _export_predictors_direct(ctx: dict, force: bool, cleanup_tiles: bool = Fals
             ee.Image(baseline_ndvi_collection.filter(ee.Filter.eq("baseline_year", year)).first())
             .select("NDVI")
         )
-        _export(year_image, out_path, f"baseline_ndvi_{year}")
+        _export(year_image, out_path, f"baseline_ndvi_{year}", expected_band_count=1)
 
     _write_predictor_export_metadata(ctx, export_transport_log)
 

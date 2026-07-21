@@ -125,6 +125,12 @@ def build_experiment_context(experiment_id: str) -> dict:
         "baseline_years": baseline_years,
         "baseline_start_date": f"{min(baseline_years)}-01-01",
         "baseline_end_date": f"{max(baseline_years)}-12-31",
+        # Leakage-safe pre-label exclusion (opt-in per experiment; currently
+        # only mugla_2021). Step8A reads this to decide whether the Step6B
+        # gate's cell-level exclusion manifest is REQUIRED (fail-fast if
+        # missing) -- see src/step8a_prepare_500m_modeling_dataset.py
+        # read_pre_label_exclusion_manifest().
+        "exclude_pre_label_burns": bool(exp.get("exclude_pre_label_burns", False)),
         "current_period_days": current_period_days,
         "current_period_end_date": current_period_end_date,
         "output_root": output_root,

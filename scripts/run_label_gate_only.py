@@ -433,6 +433,7 @@ def main(
                 predictor_start=exp["predictor_start_date"],
                 predictor_end=exp["predictor_end_date"],
                 bordubet_check_window=("2021-06-21", "2021-06-25"),
+                experiment_id=experiment_id,
             )
         gate_result = run_gate(**gate_kwargs)
 

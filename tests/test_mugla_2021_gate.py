@@ -37,6 +37,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import rasterio
 from rasterio.transform import from_origin
 
@@ -49,11 +50,14 @@ from core.config import EXPORT_CRS
 from src.step6b_burned_landcover_gate import (
     classify_gate_decision,
     compute_gate,
+    write_pre_label_exclusion_manifest,
+    Step6BError,
     _date_to_doy,
 )
 from src.step8a_prepare_500m_modeling_dataset import (
     classify_burndate_relative_to_label,
     compute_block_size_pixels,
+    compute_cell_identity,
 )
 
 LS, LE = "2021-07-29", "2021-09-15"
@@ -177,9 +181,12 @@ class TestExistingExperimentsUnchanged(unittest.TestCase):
 
 
 # =============================================================================
-# End-to-end synthetic gate (tests 7/8/9/10/13/14/15)
+# End-to-end synthetic gate fixture (shared by tests 7/8/9/10/13/14/15 and
+# the pre-label exclusion manifest tests below) -- a plain mixin, NOT a
+# TestCase, so inheriting it never causes unittest to re-discover/re-run the
+# same test_* methods under two class names.
 # =============================================================================
-class TestSyntheticGateExclusion(unittest.TestCase):
+class _SyntheticGateFixture:
     """Builds tiny real GeoTIFFs (no GEE) and runs compute_gate."""
 
     BS = 17
@@ -223,7 +230,14 @@ class TestSyntheticGateExclusion(unittest.TestCase):
             pre_label_label_path=(prep if excl else None),
             predictor_start="2021-06-01", predictor_end="2021-07-28",
             bordubet_check_window=("2021-06-21", "2021-06-25"),
+            experiment_id="mugla_2021",
         )
+
+
+# =============================================================================
+# End-to-end synthetic gate (tests 7/8/9/10/13/14/15)
+# =============================================================================
+class TestSyntheticGateExclusion(_SyntheticGateFixture, unittest.TestCase):
 
     def test_07_excluded_not_modeling_eligible(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -290,18 +304,197 @@ class TestSyntheticGateExclusion(unittest.TestCase):
 
 
 # =============================================================================
+# Cell-level pre-label exclusion manifest (the actual join-safety bug fix)
+#
+# Task numbering (pre-label exclusion manifest bug-fix prompt):
+#   1  gate produces the correct number of unique excluded cells from a
+#      synthetic pre-label raster
+#   2  duplicate cell_id in the manifest fails fast
+#   3  a gate-aggregate vs. manifest count mismatch fails fast
+# =============================================================================
+class TestPreLabelExclusionManifest(_SyntheticGateFixture, unittest.TestCase):
+    """Reuses the synthetic-gate fixture (2x2 block grid, cell (1,1)
+    pre-label-excluded, cell (0,0) in-window burned)."""
+
+    def test_01_manifest_rows_match_gate_excluded_cell(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._run(tmp, excl=True)
+            rows = g["pre_label_excluded_manifest_rows"]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(g["pre_label_burn_excluded_count"], 1)
+
+            expected_cell_id, expected_row, expected_col = compute_cell_identity(
+                row_off=1 * self.BS, col_off=1 * self.BS, block_size=self.BS,
+            )
+            row = rows[0]
+            self.assertEqual(row["cell_id"], expected_cell_id)
+            self.assertEqual(row["row_500m"], expected_row)
+            self.assertEqual(row["col_500m"], expected_col)
+            self.assertEqual(row["experiment_id"], "mugla_2021")
+            self.assertEqual(row["exclusion_reason"], "pre_label_burn_excluded")
+            self.assertEqual(row["pre_label_burn_date"], "2021-06-21")
+            # cell (1,1) landcover is tree_cover (lc_code=10, default fixture)
+            self.assertEqual(row["landcover_dominant"], "tree_cover")
+            self.assertTrue(row["burnable_tree_shrub"])
+            self.assertTrue(row["burnable_tree_shrub_grass"])
+
+    def test_01b_manifest_not_present_when_exclusion_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._run(tmp, excl=False)
+            self.assertNotIn("pre_label_excluded_manifest_rows", g)
+
+    def test_write_manifest_creates_parquet_csv_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._run(tmp, excl=True)
+            out_dir = Path(tmp) / "manifest_out"
+            result = write_pre_label_exclusion_manifest(
+                rows=g["pre_label_excluded_manifest_rows"],
+                experiment_id="mugla_2021",
+                output_dir=out_dir,
+                exclusion_rule=g["pre_label_burn_exclusion_rule"],
+                predictor_start="2021-06-01",
+                label_start=LS,
+                source_raster=Path(tmp) / "pre.tif",
+                gate_excluded_count=g["pre_label_burn_excluded_count"],
+            )
+            parquet_path = Path(result["parquet_path"])
+            csv_path = Path(result["csv_path"])
+            metadata_path = Path(result["metadata_path"])
+            self.assertTrue(parquet_path.exists())
+            self.assertTrue(csv_path.exists())
+            self.assertTrue(metadata_path.exists())
+            self.assertEqual(result["excluded_cell_count"], 1)
+
+            df = pd.read_parquet(parquet_path)
+            self.assertTrue(df["cell_id"].notna().all())
+            self.assertTrue(df["cell_id"].is_unique)
+            self.assertEqual(
+                df[["row_500m", "col_500m"]].drop_duplicates().shape[0], len(df),
+            )
+
+            import json as _json
+            metadata = _json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["excluded_cell_count"], 1)
+            self.assertEqual(metadata["experiment_id"], "mugla_2021")
+            self.assertTrue(metadata["exclude_pre_label_burns"])
+            self.assertEqual(metadata["parquet_path"], str(parquet_path))
+            self.assertEqual(metadata["csv_path"], str(csv_path))
+
+    def test_02_duplicate_cell_id_fails_fast(self):
+        rows = [
+            {
+                "experiment_id": "mugla_2021", "cell_id": "r1_c1", "row_500m": 1,
+                "col_500m": 1, "pre_label_burn_date": "2021-06-21",
+                "exclusion_reason": "pre_label_burn_excluded",
+                "landcover_dominant": "tree_cover", "burnable_tree_shrub": True,
+                "burnable_tree_shrub_grass": True,
+            },
+            {
+                "experiment_id": "mugla_2021", "cell_id": "r1_c1", "row_500m": 1,
+                "col_500m": 1, "pre_label_burn_date": "2021-06-22",
+                "exclusion_reason": "pre_label_burn_excluded",
+                "landcover_dominant": "tree_cover", "burnable_tree_shrub": True,
+                "burnable_tree_shrub_grass": True,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(Step6BError):
+                write_pre_label_exclusion_manifest(
+                    rows=rows, experiment_id="mugla_2021", output_dir=Path(tmp),
+                    exclusion_rule="x", predictor_start="2021-06-01", label_start=LS,
+                    source_raster=Path(tmp) / "pre.tif", gate_excluded_count=2,
+                )
+
+    def test_03_gate_manifest_count_mismatch_fails_fast(self):
+        rows = [
+            {
+                "experiment_id": "mugla_2021", "cell_id": "r1_c1", "row_500m": 1,
+                "col_500m": 1, "pre_label_burn_date": "2021-06-21",
+                "exclusion_reason": "pre_label_burn_excluded",
+                "landcover_dominant": "tree_cover", "burnable_tree_shrub": True,
+                "burnable_tree_shrub_grass": True,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(Step6BError):
+                write_pre_label_exclusion_manifest(
+                    # gate says 2 were excluded, manifest only has 1 -> mismatch
+                    rows=rows, experiment_id="mugla_2021", output_dir=Path(tmp),
+                    exclusion_rule="x", predictor_start="2021-06-01", label_start=LS,
+                    source_raster=Path(tmp) / "pre.tif", gate_excluded_count=2,
+                )
+
+    def test_gate_json_embeds_manifest_paths_only_when_enabled(self):
+        from src.step6b_burned_landcover_gate import main as run_gate6b
+        with tempfile.TemporaryDirectory() as tmp:
+            refp, lcp, lblp, prep, d = self._build(tmp)
+            out_dir = Path(tmp) / "gate_out"
+            result = run_gate6b(
+                output_dir_arg=str(out_dir), force=True,
+                label_raster_arg=str(lblp), reference_30m_arg=str(refp),
+                landcover_path_arg=str(lcp), label_start=LS, label_end=LE,
+                min_positives=1, natural_threshold=0.5, cropland_threshold=0.5,
+                exclude_pre_label_burns=True, pre_label_raster_arg=str(prep),
+                predictor_start="2021-06-01", predictor_end="2021-07-28",
+                bordubet_check_window=("2021-06-21", "2021-06-25"),
+                experiment_id="mugla_2021",
+            )
+            self.assertIsNotNone(result["manifest_result"])
+            self.assertEqual(result["manifest_result"]["excluded_cell_count"], 1)
+
+            import json as _json
+            gate_json = _json.loads((out_dir / "burned_landcover_gate.json").read_text(encoding="utf-8"))
+            self.assertIn("pre_label_exclusion_manifest", gate_json)
+            self.assertNotIn("pre_label_excluded_manifest_rows", gate_json)
+            self.assertEqual(
+                gate_json["pre_label_exclusion_manifest"]["excluded_cell_count"], 1,
+            )
+
+    def test_experiment_id_required_when_exclusion_enabled(self):
+        from src.step6b_burned_landcover_gate import main as run_gate6b
+        with tempfile.TemporaryDirectory() as tmp:
+            refp, lcp, lblp, prep, d = self._build(tmp)
+            out_dir = Path(tmp) / "gate_out"
+            with self.assertRaises(Step6BError):
+                run_gate6b(
+                    output_dir_arg=str(out_dir), force=True,
+                    label_raster_arg=str(lblp), reference_30m_arg=str(refp),
+                    landcover_path_arg=str(lcp), label_start=LS, label_end=LE,
+                    min_positives=1, natural_threshold=0.5, cropland_threshold=0.5,
+                    exclude_pre_label_burns=True, pre_label_raster_arg=str(prep),
+                    predictor_start="2021-06-01", predictor_end="2021-07-28",
+                    bordubet_check_window=("2021-06-21", "2021-06-25"),
+                    experiment_id=None,
+                )
+
+
+# =============================================================================
 # Dry-run + stage isolation + manifest (tests 17/18/20)
 # =============================================================================
 class TestRunnerBehaviour(unittest.TestCase):
     def test_17_dry_run_writes_no_files(self):
         from scripts.run_label_gate_only import main as gate_main, _namespaced_paths
+        paths = _namespaced_paths("mugla_2021")
+
+        def snapshot(path):
+            path = Path(path)
+            if not path.exists():
+                return None
+            stat = path.stat()
+            return (stat.st_mtime_ns, stat.st_size, path.read_bytes())
+
+        before = {
+            key: snapshot(paths[key])
+            for key in ["raw_path", "pre_label_raw_path", "manifest_path"]
+        }
         res = gate_main(experiment_id="mugla_2021", dry_run=True)
         self.assertFalse(res["ran"])
         self.assertEqual(res["reason"], "dry_run")
-        paths = _namespaced_paths("mugla_2021")
         for key in ["raw_path", "pre_label_raw_path", "manifest_path"]:
-            self.assertFalse(Path(paths[key]).exists(),
-                             f"dry-run must not create {key}")
+            self.assertEqual(
+                snapshot(paths[key]), before[key],
+                f"dry-run must neither create nor modify {key}",
+            )
 
     def test_18_gate_only_no_step7_step8(self):
         import core.pipeline_orchestrator as orch

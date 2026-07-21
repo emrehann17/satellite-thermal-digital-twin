@@ -129,6 +129,7 @@ def fmt(x, nd=4, pct=False):
 
 
 def build_dataset_section(step8a: dict) -> dict:
+    pre_label = step8a.get("pre_label_exclusion", {}) or {}
     return {
         "total_500m_cells": step8a.get("total_500m_cells"),
         "valid_modeling_cells": step8a.get("valid_modeling_cells"),
@@ -144,6 +145,12 @@ def build_dataset_section(step8a: dict) -> dict:
         "burned_count_within_each_burnable_mask": step8a.get("burned_count_within_each_burnable_mask"),
         "cropland_burned_count": step8a.get("cropland_burned_count"),
         "burned_count_within_primary_burnable_mask": step8a.get("burned_count_within_primary_burnable_mask"),
+        # --- Pre-label exclusion (leakage-safe; opt-in per experiment) ---
+        "exclude_pre_label_burns": step8a.get("exclude_pre_label_burns", False),
+        "pre_label_burn_excluded_count": pre_label.get("pre_label_burn_excluded_count"),
+        "analysis_eligible_count": pre_label.get("analysis_eligible_count"),
+        "predictor_invalid_count_among_eligible": pre_label.get("predictor_invalid_count_among_eligible"),
+        "final_modeling_row_count": step8a.get("valid_modeling_cells"),
     }
 
 
@@ -719,6 +726,13 @@ def write_summary_md(
     lines.append(f"- Total 500 m cells: `{dataset.get('total_500m_cells')}`; valid modeling cells: `{dataset.get('valid_modeling_cells')}`.")
     lines.append(f"- Burned: `{dataset.get('burned_cell_count')}`; unburned: `{dataset.get('unburned_cell_count')}`; burned rate: `{fmt(dataset.get('burned_rate'), pct=True) if dataset.get('burned_rate') is not None else 'n/a'}`.")
     lines.append(f"- Label source: `{dataset.get('label_source')}` ({dataset.get('label_source_description')}).")
+    if dataset.get("exclude_pre_label_burns"):
+        lines.append(
+            f"- Pre-label burn exclusion: `{dataset.get('pre_label_burn_excluded_count')}` cell(s) excluded; "
+            f"analysis eligible: `{dataset.get('analysis_eligible_count')}`; "
+            f"predictor-invalid among eligible: `{dataset.get('predictor_invalid_count_among_eligible')}`; "
+            f"final modeling rows: `{dataset.get('final_modeling_row_count')}`."
+        )
     bmc = dataset.get("burn_month_counts") or {}
     bmc_str = ", ".join(
         f"{name}={bmc.get(str(num), bmc.get(num, 'n/a'))}"

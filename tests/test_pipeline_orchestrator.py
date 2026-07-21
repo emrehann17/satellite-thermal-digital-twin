@@ -29,7 +29,7 @@ import core.pipeline_orchestrator as orch
 
 class TestStageOrdering(unittest.TestCase):
     def test_stage_order_is_the_documented_sequence(self):
-        self.assertEqual(orch.STAGE_ORDER, ["gate", "predictors", "step7", "step8"])
+        self.assertEqual(orch.STAGE_ORDER, ["gate", "predictors", "scene-provenance", "step7", "seam-audit", "seam-localization", "step8"])
 
     def test_full_range_returns_all_stages(self):
         self.assertEqual(orch.validate_stage_range("gate", "step8"), orch.STAGE_ORDER)
@@ -38,7 +38,7 @@ class TestStageOrdering(unittest.TestCase):
         self.assertEqual(orch.validate_stage_range("predictors", "predictors"), ["predictors"])
 
     def test_partial_range(self):
-        self.assertEqual(orch.validate_stage_range("predictors", "step8"), ["predictors", "step7", "step8"])
+        self.assertEqual(orch.validate_stage_range("predictors", "step8"), ["predictors", "scene-provenance", "step7", "seam-audit", "seam-localization", "step8"])
 
     def test_reversed_range_raises(self):
         with self.assertRaises(SystemExit):
@@ -133,6 +133,7 @@ class TestDescribeExperimentPlan(unittest.TestCase):
         self.assertFalse(plan["is_kozan"])
         self.assertIn("experiments", Path(plan["output_root"]).parts)
         self.assertIn("manavgat_2021", Path(plan["output_root"]).parts)
+        self.assertEqual(Path(plan["seam_audit_output_dir"]).parts[-2:], ("seam_audit", "v2"))
 
 
 class TestDryRunNoExecution(unittest.TestCase):

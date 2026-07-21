@@ -93,6 +93,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import numpy as np
+import pandas as pd
 import rasterio
 from rasterio.windows import Window
 
@@ -123,6 +124,7 @@ from src.step8a_prepare_500m_modeling_dataset import (
     align_label_to_reference,
     classify_burndate_relative_to_label,
     compute_block_size_pixels,
+    compute_cell_identity,
     doy_to_month_and_date,
     inspect_label_raster,
     mode_and_agreement,
@@ -136,6 +138,14 @@ BASE_DIR = PROJECT_ROOT
 log, log_file = setup_logger("step6b_burned_landcover_gate")
 
 GATE_LEVEL_500M = "500m_reconstructed_mcd64a1_cell"
+
+# Canonical cell-level pre-label exclusion manifest filenames (see
+# write_pre_label_exclusion_manifest() below). Parquet is the canonical
+# machine-readable artifact Step8A reads; CSV is the same rows for human
+# review only.
+PRE_LABEL_EXCLUSION_MANIFEST_PARQUET = "pre_label_excluded_cells.parquet"
+PRE_LABEL_EXCLUSION_MANIFEST_CSV = "pre_label_excluded_cells.csv"
+PRE_LABEL_EXCLUSION_MANIFEST_METADATA = "pre_label_excluded_cells_metadata.json"
 
 
 class Step6BError(SystemExit):
@@ -266,6 +276,7 @@ def compute_gate(
     predictor_start: str | None = None,
     predictor_end: str | None = None,
     bordubet_check_window: tuple[str, str] | None = None,
+    experiment_id: str | None = None,
 ) -> dict:
     """
     Reconstructs approximate native ~500 m MCD64A1 cells from the 30 m
@@ -358,6 +369,13 @@ def compute_gate(
     pre_label_excluded_count = 0
     pre_label_excluded_dominant_counts: dict = {}
     pre_label_excluded_without_valid_landcover = 0
+    # Cell-level rows for the canonical exclusion manifest (see
+    # write_pre_label_exclusion_manifest()); populated ONLY when
+    # exclude_pre_label_burns is True. Popped from the returned dict before
+    # burned_landcover_gate.json/.md/.csv are written (main()) -- kept OUT
+    # of those aggregate reports so existing experiments' gate outputs are
+    # never affected by this feature.
+    pre_label_excluded_rows: list[dict] = []
     temporal_qa = {
         "cell_level_note": (
             "Counts are per reconstructed ~500 m cell (representative BurnDate "
@@ -397,6 +415,7 @@ def compute_gate(
         col_off, row_off, w, h = tile["write_window"]
         window = Window(col_off, row_off, w, h)
         total_cells += 1
+        cell_id, row_500m, col_500m = compute_cell_identity(row_off, col_off, block_size)
 
         # --- Landcover (dominant class within the same 500 m block) ---
         # Computed FIRST so that pre-label-EXCLUDED cells also get a dominant
@@ -448,6 +467,21 @@ def compute_gate(
                 if _max_doy_seen is None or rep_pre_doy > _max_doy_seen:
                     _max_doy_seen = rep_pre_doy
                     temporal_qa["max_nonzero_burndate_iso"] = _iso
+                pre_label_excluded_rows.append({
+                    "experiment_id": experiment_id,
+                    "cell_id": cell_id,
+                    "row_500m": row_500m,
+                    "col_500m": col_500m,
+                    "pre_label_burn_date": _iso,
+                    "exclusion_reason": "pre_label_burn_excluded",
+                    # QA/audit only -- NOT the Step8 population definition
+                    # (that stays owned by Step8A's burnable_threshold logic).
+                    "landcover_dominant": dominant_name,
+                    "burnable_tree_shrub": bool(dominant_name in ("tree_cover", "shrubland")),
+                    "burnable_tree_shrub_grass": bool(
+                        dominant_name in ("tree_cover", "shrubland", "grassland")
+                    ),
+                })
                 continue  # EXCLUDED: do not count as burned or unburned
 
         # --- Label (BurnDate) within the label window ---
@@ -594,6 +628,12 @@ def compute_gate(
             if exclude_pre_label_burns else "not_applied"
         ),
         "temporal_label_qa": temporal_qa,
+        # Cell-level rows for the manifest writer (main() pops this key
+        # before writing burned_landcover_gate.json/.md/.csv -- never
+        # persisted in the aggregate gate reports). Present only when
+        # exclusion is enabled, so other experiments' gate dicts are
+        # byte-for-byte unaffected by this key's mere existence.
+        **({"pre_label_excluded_manifest_rows": pre_label_excluded_rows} if exclude_pre_label_burns else {}),
         # Gate is diagnostic + advisor-gated: passing NEVER auto-authorizes
         # predictor/Step7/Step8/Step9/Step10.
         "downstream_authorized": False,
@@ -743,6 +783,13 @@ def write_markdown(gate: dict, out_path: Path) -> Path:
         lines.append(f"- total AOI cells considered: `{gate['total_valid_cells_or_pixels_considered']}`")
         lines.append(f"- pre_label_burn_excluded_count: `{gate['pre_label_burn_excluded_count']}`")
         lines.append(f"- analysis universe after exclusions: `{gate['analysis_universe_cells_after_exclusions']}`")
+        manifest_info = gate.get("pre_label_exclusion_manifest")
+        if manifest_info:
+            lines.append(
+                f"- cell-level exclusion manifest: `{manifest_info['parquet_path']}` "
+                f"({manifest_info['excluded_cell_count']} unique cell_id; Step8A reads this "
+                "verbatim to remove the same cells from its own analysis universe)."
+            )
         lines.append("")
         lines.append("| Excluded cells by dominant landcover | Count |")
         lines.append("|---|---|")
@@ -809,6 +856,107 @@ def write_markdown(gate: dict, out_path: Path) -> Path:
 
 
 # =============================================================================
+# Cell-level pre-label exclusion manifest (the actual bug fix: Step8A must
+# know WHICH cells the gate excluded, not just how many)
+# =============================================================================
+_MANIFEST_COLUMNS = [
+    "experiment_id", "cell_id", "row_500m", "col_500m",
+    "pre_label_burn_date", "exclusion_reason",
+    "landcover_dominant", "burnable_tree_shrub", "burnable_tree_shrub_grass",
+]
+
+
+def write_pre_label_exclusion_manifest(
+    rows: list[dict],
+    experiment_id: str,
+    output_dir: Path,
+    exclusion_rule: str,
+    predictor_start: str | None,
+    label_start: str,
+    source_raster: Path,
+    gate_excluded_count: int,
+) -> dict:
+    """
+    Writes the canonical CELL-LEVEL pre-label exclusion manifest (parquet +
+    CSV + metadata JSON) Step8A reads to remove the SAME physical cells from
+    its own analysis universe. This is the actual fix for the "gate excludes
+    N cells in aggregate but Step8A doesn't know which N" bug -- Step8A must
+    NEVER reimplement/re-derive this exclusion set independently; it reads
+    this manifest verbatim (see src.step8a_prepare_500m_modeling_dataset
+    .read_pre_label_exclusion_manifest()).
+
+    Fail-fast integrity checks (never silently write an ambiguous manifest):
+        - cell_id must be non-null and unique
+        - (row_500m, col_500m) pairs must be unique (same cardinality as cell_id)
+        - unique cell_id count MUST equal the gate's own aggregate
+          pre_label_burn_excluded_count (single source of truth check)
+    """
+    manifest_df = pd.DataFrame(rows, columns=_MANIFEST_COLUMNS)
+    manifest_df["experiment_id"] = experiment_id
+
+    if not manifest_df.empty:
+        if manifest_df["cell_id"].isna().any():
+            raise Step6BError(
+                "Pre-label exclusion manifest: cell_id null deger iceriyor."
+            )
+        if not manifest_df["cell_id"].is_unique:
+            dupes = manifest_df.loc[manifest_df["cell_id"].duplicated(), "cell_id"].tolist()
+            raise Step6BError(
+                f"Pre-label exclusion manifest: tekrarlanan cell_id degerleri: {dupes}."
+            )
+        if manifest_df[["row_500m", "col_500m"]].drop_duplicates().shape[0] != len(manifest_df):
+            raise Step6BError(
+                "Pre-label exclusion manifest: (row_500m, col_500m) ciftleri "
+                "cell_id ile ayni sayida degil -- hucre-kimligi semasi tutarsiz."
+            )
+
+    unique_count = int(manifest_df["cell_id"].nunique())
+    if unique_count != gate_excluded_count:
+        raise Step6BError(
+            "Pre-label exclusion manifest sayisi gate aggregate sonucuyla "
+            f"UYUSMUYOR: gate pre_label_burn_excluded_count={gate_excluded_count}, "
+            f"manifest unique cell_id={unique_count}. Bunlar BIREBIR ayni olmali."
+        )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    parquet_path = output_dir / PRE_LABEL_EXCLUSION_MANIFEST_PARQUET
+    csv_path = output_dir / PRE_LABEL_EXCLUSION_MANIFEST_CSV
+    metadata_path = output_dir / PRE_LABEL_EXCLUSION_MANIFEST_METADATA
+
+    manifest_df.to_parquet(parquet_path, index=False)
+    manifest_df.to_csv(csv_path, index=False)
+
+    metadata = {
+        "experiment_id": experiment_id,
+        "exclude_pre_label_burns": True,
+        "exclusion_rule": exclusion_rule,
+        "predictor_start": predictor_start,
+        "label_start": label_start,
+        "excluded_cell_count": unique_count,
+        "cell_id_scheme": (
+            "r{row_500m}_c{col_500m}, native ~500m MCD64A1-grid block index "
+            "(src.step8a_prepare_500m_modeling_dataset.compute_cell_identity) "
+            "-- SAME scheme Step8A uses; never independently reimplemented."
+        ),
+        "source_raster": str(source_raster),
+        "parquet_path": str(parquet_path),
+        "csv_path": str(csv_path),
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    log.info(
+        "Pre-label exclusion manifest yazildi: %s (%d unique cell_id; parquet+csv+metadata).",
+        parquet_path, unique_count,
+    )
+    return {
+        "parquet_path": str(parquet_path),
+        "csv_path": str(csv_path),
+        "metadata_path": str(metadata_path),
+        "excluded_cell_count": unique_count,
+    }
+
+
+# =============================================================================
 # Orchestration
 # =============================================================================
 def main(
@@ -827,6 +975,7 @@ def main(
     predictor_start: str | None = None,
     predictor_end: str | None = None,
     bordubet_check_window: tuple[str, str] | None = None,
+    experiment_id: str | None = None,
 ) -> dict:
     """
     Path-aware davranis (Step0C):
@@ -909,6 +1058,12 @@ def main(
             pre_label_path = BASE_DIR / pre_label_path
         if not pre_label_path.exists():
             raise Step6BError(f"Pre-label BurnDate rasteri bulunamadi: {pre_label_path}")
+        if not experiment_id:
+            raise Step6BError(
+                "exclude_pre_label_burns=True verildi ama experiment_id yok. "
+                "Cell-level pre-label exclusion manifest'i deney kimligiyle "
+                "damgalamak icin experiment_id ZORUNLUDUR."
+            )
         log.info("Pre-label exclusion AKTIF; pre-label raster: %s", pre_label_path)
 
     gate = compute_gate(
@@ -927,9 +1082,31 @@ def main(
         predictor_start=predictor_start,
         predictor_end=predictor_end,
         bordubet_check_window=bordubet_check_window,
+        experiment_id=experiment_id,
     )
     gate["label_raster_diagnostics"] = label_diag
     gate["landcover_info"] = landcover_info
+
+    # Manifest rows never go into the aggregate JSON/MD/CSV -- popped here,
+    # written to their own dedicated files below.
+    manifest_rows = gate.pop("pre_label_excluded_manifest_rows", None)
+
+    manifest_result = None
+    if exclude_pre_label_burns:
+        manifest_result = write_pre_label_exclusion_manifest(
+            rows=manifest_rows or [],
+            experiment_id=experiment_id,
+            output_dir=out_dir,
+            exclusion_rule=gate.get("pre_label_burn_exclusion_rule", "not_applied"),
+            predictor_start=predictor_start,
+            label_start=label_start,
+            source_raster=pre_label_path,
+            gate_excluded_count=gate["pre_label_burn_excluded_count"],
+        )
+        # Only added to the gate dict (and therefore burned_landcover_gate.json)
+        # for exclusion-enabled runs -- other experiments' gate JSON is
+        # byte-for-byte unaffected by this feature.
+        gate["pre_label_exclusion_manifest"] = manifest_result
 
     json_path = write_json(gate, out_dir / "burned_landcover_gate.json")
     md_path = write_markdown(gate, out_dir / "burned_landcover_gate.md")
@@ -950,6 +1127,7 @@ def main(
         "md_path": str(md_path),
         "csv_path": str(csv_path),
         "burned_count": gate["burned_count"],
+        "manifest_result": manifest_result,
     }
 
 
@@ -999,6 +1177,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Bördübet predictor-window fire check baslangici (or. 2021-06-21).")
     parser.add_argument("--bordubet-end", type=str, default=None,
                         help="Bördübet predictor-window fire check bitisi (or. 2021-06-25).")
+    parser.add_argument(
+        "--experiment-id", type=str, default=None,
+        help="Deney kimligi (yalniz --exclude-pre-label-burns ile ZORUNLU; "
+        "cell-level exclusion manifest'ini damgalamak icin kullanilir).",
+    )
     return parser.parse_args(argv)
 
 
@@ -1023,4 +1206,5 @@ if __name__ == "__main__":
             (args.bordubet_start, args.bordubet_end)
             if args.bordubet_start and args.bordubet_end else None
         ),
+        experiment_id=args.experiment_id,
     )

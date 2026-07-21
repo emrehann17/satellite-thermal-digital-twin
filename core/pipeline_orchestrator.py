@@ -6,7 +6,7 @@ BILIMSEL OLMAYAN orkestrasyon katmani.
 
 Bu modul:
     - asama (stage) tanimlarini ve sirasini tutar (gate -> predictors ->
-      step7 -> step8)
+      step7 -> seam-audit -> step8)
     - asama araligini (--from-stage/--to-stage) dogrular
     - bir deney (experiment) icin insan-okunabilir bir "plan" (ExperimentContext
       + asama listesi + predictor modu + output kokleri) uretir
@@ -51,7 +51,7 @@ class OrchestratorError(SystemExit):
 # =============================================================================
 # Asama (stage) tanimlari
 # =============================================================================
-STAGE_ORDER = ["gate", "predictors", "step7", "step8"]
+STAGE_ORDER = ["gate", "predictors", "scene-provenance", "step7", "seam-audit", "seam-localization", "step8"]
 PREDICTOR_MODES = ("export", "local-only")
 
 LEGACY_EXPERIMENT_ID = "kozan_2023"
@@ -178,6 +178,9 @@ def describe_experiment_plan(
                 "step8d_output_dir", "step8e_output_dir",
             )
         },
+        "seam_audit_output_dir": ctx["output_root"] / "qa" / "seam_audit" / "v2",
+        "scene_provenance_output_dir": ctx["output_root"] / "qa" / "source_scene_provenance" / "v1",
+        "seam_localization_output_dir": ctx["output_root"] / "qa" / "seam_localization" / "v1",
         "stages": stages,
         "predictor_mode": predictor_mode,
         "export_labels": export_labels,
@@ -201,6 +204,9 @@ def log_experiment_plan(plan: dict) -> None:
         log.info("[plan]   %s: %s", k, v)
     for k, v in plan["step8_output_dirs"].items():
         log.info("[plan]   %s: %s", k, v)
+    log.info("[plan] seam_audit_output_dir: %s", plan["seam_audit_output_dir"])
+    log.info("[plan] scene_provenance_output_dir: %s", plan["scene_provenance_output_dir"])
+    log.info("[plan] seam_localization_output_dir: %s", plan["seam_localization_output_dir"])
 
 
 # =============================================================================
@@ -267,10 +273,49 @@ def run_step8_stage(experiment_id: str, dry_run: bool, force: bool) -> dict:
     return run_step8_modeling(experiment_id=experiment_id, dry_run=dry_run, force=force)
 
 
+def run_seam_audit_stage(
+    experiment_id: str, dry_run: bool, force: bool,
+    products: list[str] | str | None = None,
+    scales: list[str] | str | None = None,
+) -> dict:
+    """Read-only Seam Audit V2 stage; V1 remains available as an audit record."""
+    from scripts.run_seam_audit_v2 import main as run_seam_audit
+
+    return run_seam_audit(
+        experiment_id=experiment_id, dry_run=dry_run, force=force,
+        products=products, scales=scales,
+    )
+
+
+def run_scene_provenance_stage(
+    experiment_id: str, dry_run: bool, force: bool, mode: str = "metadata_only",
+) -> dict:
+    """Build local scene metadata and lineage; never submit GEE tasks."""
+    from scripts.run_source_scene_provenance import main as runner
+
+    return runner(experiment_id=experiment_id, dry_run=dry_run, force=force, mode=mode)
+
+
+def run_seam_localization_stage(
+    experiment_id: str, dry_run: bool, force: bool,
+    manual_boundaries: list[str] | str | None = None,
+) -> dict:
+    """Track stable boundary identities through producer-ordered artifacts."""
+    from scripts.run_seam_localization import main as runner
+
+    return runner(
+        experiment_id=experiment_id, dry_run=dry_run, force=force,
+        manual_boundaries=manual_boundaries,
+    )
+
+
 STAGE_DISPATCH: dict[str, Callable] = {
     "gate": run_gate_stage,
     "predictors": run_predictors_stage,
+    "scene-provenance": run_scene_provenance_stage,
     "step7": run_step7_stage,
+    "seam-audit": run_seam_audit_stage,
+    "seam-localization": run_seam_localization_stage,
     "step8": run_step8_stage,
 }
 
@@ -278,6 +323,10 @@ STAGE_DISPATCH: dict[str, Callable] = {
 def dispatch_stage(
     stage: str, experiment_id: str, dry_run: bool, force: bool,
     predictor_mode: str, export_labels: bool,
+    seam_products: list[str] | str | None = None,
+    seam_scales: list[str] | str | None = None,
+    provenance_mode: str = "metadata_only",
+    manual_boundaries: list[str] | str | None = None,
 ) -> dict:
     """Tek bir asamayi ilgili runner'a dispatch eder.
 
@@ -290,8 +339,14 @@ def dispatch_stage(
         return run_gate_stage(experiment_id, dry_run, force, export_labels)
     if stage == "predictors":
         return run_predictors_stage(experiment_id, dry_run, force, predictor_mode)
+    if stage == "scene-provenance":
+        return run_scene_provenance_stage(experiment_id, dry_run, force, provenance_mode)
     if stage == "step7":
         return run_step7_stage(experiment_id, dry_run, force)
+    if stage == "seam-audit":
+        return run_seam_audit_stage(experiment_id, dry_run, force, seam_products, seam_scales)
+    if stage == "seam-localization":
+        return run_seam_localization_stage(experiment_id, dry_run, force, manual_boundaries)
     if stage == "step8":
         return run_step8_stage(experiment_id, dry_run, force)
     raise OrchestratorError(f"Bilinmeyen asama: '{stage}'. Gecerli asamalar: {STAGE_ORDER}.")
@@ -300,6 +355,10 @@ def dispatch_stage(
 def run_experiment_plan(
     experiment_id: str, from_stage: str, to_stage: str,
     predictor_mode: str, export_labels: bool, dry_run: bool, force: bool,
+    seam_products: list[str] | str | None = None,
+    seam_scales: list[str] | str | None = None,
+    provenance_mode: str = "metadata_only",
+    manual_boundaries: list[str] | str | None = None,
 ) -> dict:
     """Tam bir 'experiment' calistirmasini (plan + sirali asama dispatch)
     yurutur.
@@ -323,6 +382,9 @@ def run_experiment_plan(
             result = dispatch_stage(
                 stage, experiment_id, dry_run=dry_run, force=force,
                 predictor_mode=predictor_mode, export_labels=export_labels,
+                seam_products=seam_products, seam_scales=seam_scales,
+                provenance_mode=provenance_mode,
+                manual_boundaries=manual_boundaries,
             )
         except Exception as exc:  # noqa: BLE001 -- kasitli: logla + fail-fast propagate et
             log.error("ASAMA BASARISIZ: '%s' [experiment=%s]", stage, experiment_id)

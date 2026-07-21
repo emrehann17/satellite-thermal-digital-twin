@@ -8,7 +8,7 @@ Bu script İNCE (thin) tutulur -- hiçbir Step'in bilimsel/istatistiksel
 mantığını yeniden uygulamaz. Tüm gerçek iş, mevcut callable API'lere sahip
 runner'lara devredilir (bkz. core/pipeline_orchestrator.py):
 
-    experiment   -> gate / predictors / step7 / step8 asama zinciri
+    experiment   -> gate / predictors / step7 / seam-audit / step8 asama zinciri
                     (core/pipeline_orchestrator.py -> scripts/run_label_gate_only.py,
                     scripts/run_predictors_only.py,
                     scripts/run_step7_downscaling_only.py,
@@ -148,6 +148,10 @@ def cmd_experiment(args: argparse.Namespace) -> int:
             export_labels=args.export_labels,
             dry_run=args.dry_run,
             force=args.force,
+            seam_products=args.seam_products,
+            seam_scales=args.seam_scales,
+            provenance_mode=args.provenance_mode,
+            manual_boundaries=args.manual_boundaries,
         )
     except SystemExit as exc:
         return _fail("experiment", exc)
@@ -355,9 +359,9 @@ def build_parser() -> argparse.ArgumentParser:
     # --- experiment ---
     p_exp = subparsers.add_parser(
         "experiment",
-        help="Deney-farkında asama zinciri (gate -> predictors -> step7 -> step8).",
+        help="Deney-farkında provenance ve seam-localization içeren aşama zinciri.",
         description=(
-            "Bir deney (experiment_id) için gate/predictors/step7/step8 "
+            "Bir deney (experiment_id) için gate/predictors/step7/seam-audit/step8 "
             "asamalarını (--from-stage/--to-stage araligi) sırayla çalıştırır. "
             "Her asama, mevcut namespaced runner'lara dispatch edilir; hiçbir "
             "bilimsel mantık burada yeniden uygulanmaz."
@@ -371,6 +375,8 @@ def build_parser() -> argparse.ArgumentParser:
             "--from-stage predictors --to-stage step8 --predictor-mode export --force\n"
             "  python scripts/main.py experiment --experiment manavgat_2021 "
             "--from-stage gate --to-stage step8 --predictor-mode local-only --dry-run\n"
+            "  python scripts/main.py experiment --experiment mugla_2021 "
+            "--from-stage seam-audit --to-stage seam-audit --predictor-mode local-only --dry-run\n"
         ),
     )
     p_exp.add_argument("--experiment", required=True, help="core/regions.py EXPERIMENTS kaydındaki experiment_id (örn. manavgat_2021, bejis_2022, kozan_2023).")
@@ -380,8 +386,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_exp.add_argument("--export-labels", action="store_true", help="Yalnızca 'gate' asamasını etkiler: gate'ten önce raw MCD64A1 BurnDate export'unu çalıştırır.")
     p_exp.add_argument("--force", action="store_true", help="Her asamanın çıktıları zaten varsa üzerine yaz.")
     p_exp.add_argument("--dry-run", action="store_true", help="Hiçbir GEE/eğitim çalıştırma; deney planını + her asamanın kendi planlanan yollarını bas.")
+    p_exp.add_argument("--seam-products", help="Yalnız seam-audit için virgülle ayrılmış product_key alt kümesi.")
+    p_exp.add_argument("--seam-scales", help="Yalnız seam-audit için virgülle ayrılmış ölçekler: native,modeling_500m.")
     p_exp.set_defaults(func=cmd_experiment)
 
+    p_exp.add_argument("--provenance-mode", choices=["metadata_only", "pixel_provenance"], default="metadata_only", help="pixel_provenance yalnız export planı üretir; GEE işi başlatmaz.")
+    p_exp.add_argument("--manual-boundaries", action="append", default=[], help="Seam localization için ek tanısal GeoJSON; tekrarlanabilir.")
     # --- transfer ---
     p_transfer = subparsers.add_parser(
         "transfer",

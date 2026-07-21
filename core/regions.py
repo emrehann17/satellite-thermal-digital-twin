@@ -16,7 +16,6 @@ yeni fonksiyonlar SADECE ek/opsiyonel bir katmandir, mevcut davranisi
 DEGISTIRMEZ.
 
 ONEMLI (Step0 kapsami):
-    - Bu asamada Manavgat/Valencia/Zamora pipeline'i CALISTIRILMAZ.
     - Bilimsel hesaplamalar (Step1-Step8) bu dosyadaki degisiklikten
       ETKILENMEZ.
     - Kozan 2023 varsayilan deney olarak kalir (geriye donuk uyumluluk).
@@ -70,7 +69,7 @@ def build_regions() -> dict:
 
     Mevcut anahtarlar (`dogu_akdeniz`, `kozan_aoi`) DEGISTIRILMEDI.
     Yeni eklenenler (`manavgat_aoi`, `manavgat_aoi_refined_bbox`,
-    `manavgat_aoi_wide_buffer`, `valencia_2022_aoi`, `zamora_2022_aoi`,
+    `manavgat_aoi_wide_buffer`, `valencia_2022_aoi`,
     `bejis_aoi`) yalnizca Step0 deney kayit defteri tarafindan referans
     verildiginde kullanilir; varsayilan pipeline (REGION_NAME="kozan_aoi")
     bunlardan ETKILENMEZ.
@@ -138,16 +137,13 @@ def build_regions() -> dict:
     # bu anahtari kullanir. Su anki varsayilan = refined bbox (yukarida).
     manavgat_aoi = manavgat_aoi_refined_bbox
 
-    # --- Disabled placeholder'lar (Valencia / Zamora) ---
-    # Bu iki AOI su an EXPERIMENTS kaydinda enabled=False'dur; pipeline
+    # --- Disabled placeholder (Valencia) ---
+    # Bu AOI su an EXPERIMENTS kaydinda enabled=False'dur; pipeline
     # tarafindan KULLANILMAZ. Yalnizca ileride external validation /
     # hard transfer test asamasi icin yer tutucu olarak eklenmistir.
     # TODO(step0): Gercek kullanim oncesi kesin AOI sinirlari tanimlanmali.
     valencia_merkez = ee.Geometry.Point([-0.38, 39.47])
     valencia_2022_aoi = valencia_merkez.buffer(50000).bounds()
-
-    zamora_merkez = ee.Geometry.Point([-6.35, 41.85])
-    zamora_2022_aoi = zamora_merkez.buffer(50000).bounds()
 
     # --- Bejis / Castellon 2022 (Akdeniz transfer wildfire AOI, Ispanya) ---
     # Bejis yangini (Castellon, Valencian Community, Ispanya), 2022-08-15'te
@@ -183,7 +179,6 @@ def build_regions() -> dict:
         "manavgat_aoi_refined_bbox": manavgat_aoi_refined_bbox,
         "manavgat_aoi_wide_buffer": manavgat_aoi_wide_buffer,
         "valencia_2022_aoi": valencia_2022_aoi,
-        "zamora_2022_aoi": zamora_2022_aoi,
         "bejis_aoi": bejis_aoi,
         "mugla_aoi": mugla_aoi,
         "mugla_aoi_candidate_bbox": mugla_aoi_candidate_bbox,
@@ -207,7 +202,7 @@ def build_regions() -> dict:
 # asamasinda YALNIZCA kayit defterine + ilk aday AOI'ye eklenir; gate/
 # predictor/Step7/Step8/transfer modelleme HENUZ calistirilmaz.
 #
-# valencia_2022 / zamora_2022: ileriki asamalar icin disabled placeholder.
+# valencia_2022: ileriki asamalar icin disabled placeholder.
 
 EXPERIMENTS = {
     "kozan_2023": {
@@ -304,21 +299,6 @@ EXPERIMENTS = {
             "does NOT authorize downstream predictor/Step7/Step8/Step9/Step10 "
             "execution (downstream_authorized=false)."
         ),
-    },
-
-    "zamora_2022": {
-        "enabled": False,
-        "region_key": "zamora_2022_aoi",
-        "display_name": "Sierra de la Culebra / Zamora 2022",
-        "role": "hard_transfer_test",
-        "country": "Spain",
-        "predictor_start_date": None,
-        "predictor_end_date": None,
-        "label_start_date": None,
-        "label_end_date": None,
-        "baseline_years": [],
-        "output_namespace": "zamora_2022",
-        "notes": "Placeholder for later harder transfer test.",
     },
 }
 

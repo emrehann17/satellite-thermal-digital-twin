@@ -215,6 +215,13 @@ class Step8AError(SystemExit):
     """Fail-fast error for Step8A (extends SystemExit like other steps)."""
 
 
+# Canonical filename for the Step6B gate's cell-level pre-label exclusion
+# manifest (see src/step6b_burned_landcover_gate.py
+# write_pre_label_exclusion_manifest()). Always lives alongside
+# burned_landcover_gate.json in the same validation/labels output dir.
+PRE_LABEL_EXCLUSION_MANIFEST_FILENAME = "pre_label_excluded_cells.parquet"
+
+
 # =============================================================================
 # Path resolution
 # =============================================================================
@@ -906,6 +913,25 @@ def compute_block_size_pixels() -> int:
     return max(block, 1)
 
 
+def compute_cell_identity(row_off: int, col_off: int, block_size: int) -> tuple[str, int, int]:
+    """
+    Canonical ~500 m reconstructed-cell identity from a tile's pixel-space
+    origin (row_off, col_off) and the native block size (pixels).
+
+    THE single source of truth for cell_id/row_500m/col_500m across the
+    project: build_dataset() below AND Step6B's pre-label exclusion gate
+    (src/step6b_burned_landcover_gate.py) both derive cell identity through
+    this exact function -- never reimplemented independently -- so a given
+    cell_id always refers to the identical physical 500 m block in both
+    places (required for the Step6B exclusion manifest to join correctly
+    onto Step8A's dataset).
+    """
+    row_500m = row_off // block_size
+    col_500m = col_off // block_size
+    cell_id = f"r{row_500m}_c{col_500m}"
+    return cell_id, int(row_500m), int(col_500m)
+
+
 def mode_and_agreement(values: np.ndarray) -> tuple[float, int, int]:
     """
     Returns (mode_value, mode_count, valid_count) for a 1-D array of finite
@@ -933,6 +959,51 @@ def continuous_stats(values: np.ndarray, total_pixels: int) -> dict:
     }
 
 
+def read_pre_label_exclusion_manifest(manifest_path: Path) -> frozenset[str]:
+    """
+    Reads the canonical Step6B gate pre-label exclusion manifest (parquet;
+    see src/step6b_burned_landcover_gate.py write_pre_label_exclusion_manifest())
+    and returns the set of excluded cell_id values.
+
+    FAILS FAST (Step8AError) if the manifest is missing or internally
+    inconsistent (no cell_id column, null cell_id, duplicate cell_id) --
+    Step8A must never silently proceed with an empty/partial exclusion set
+    when exclude_pre_label_burns=True is configured for the experiment.
+    """
+    if not manifest_path.exists():
+        raise Step8AError(
+            "Pre-label exclusion is enabled but the canonical gate exclusion "
+            "manifest is missing.\n"
+            "Re-run the label gate before Step8A.\n"
+            f"Expected manifest path: {manifest_path}"
+        )
+    try:
+        manifest_df = pd.read_parquet(manifest_path)
+    except Exception as exc:  # noqa: BLE001
+        raise Step8AError(
+            f"Pre-label exclusion manifest ({manifest_path}) okunamadi: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    if "cell_id" not in manifest_df.columns:
+        raise Step8AError(
+            f"Pre-label exclusion manifest ({manifest_path}) icinde 'cell_id' "
+            "kolonu yok."
+        )
+    if manifest_df["cell_id"].isna().any():
+        raise Step8AError(
+            f"Pre-label exclusion manifest ({manifest_path}) null cell_id "
+            "degeri iceriyor."
+        )
+    if not manifest_df["cell_id"].is_unique:
+        dupes = manifest_df.loc[manifest_df["cell_id"].duplicated(), "cell_id"].tolist()
+        raise Step8AError(
+            f"Pre-label exclusion manifest ({manifest_path}) tekrarlanan "
+            f"cell_id degerleri iceriyor: {dupes}."
+        )
+    return frozenset(manifest_df["cell_id"].astype(str))
+
+
 def build_dataset(
     reference_path: Path,
     label_path: Path,
@@ -945,6 +1016,7 @@ def build_dataset(
     burnable_threshold: float,
     label_start: str = LABEL_START_DATE,
     label_end: str = LABEL_END_DATE,
+    pre_label_excluded_cell_ids: frozenset[str] | None = None,
 ) -> dict:
     block_size = compute_block_size_pixels()
     log.info(
@@ -1008,9 +1080,7 @@ def build_dataset(
         col_off, row_off, w, h = tile["write_window"]
         window = Window(col_off, row_off, w, h)
         total_pixels = w * h
-        row_500m = row_off // block_size
-        col_500m = col_off // block_size
-        cell_id = f"r{row_500m}_c{col_500m}"
+        cell_id, row_500m, col_500m = compute_cell_identity(row_off, col_off, block_size)
 
         # --- Label ---
         label_arr = label_src.read(1, window=window, masked=True).astype("float32").filled(np.nan)
@@ -1026,6 +1096,19 @@ def build_dataset(
         )
         record["lon"] = float(cx)
         record["lat"] = float(cy)
+
+        # --- Pre-label exclusion eligibility (Step6B gate manifest join) ---
+        # A cell the gate excluded (burned BEFORE label_start; see
+        # read_pre_label_exclusion_manifest()) is never eligible for the
+        # analysis universe, regardless of predictor validity. This does NOT
+        # touch record["burned"] below -- the raw label is preserved for
+        # audit; only eligibility/valid_for_modeling are affected.
+        pre_label_burn_excluded = bool(
+            pre_label_excluded_cell_ids is not None and cell_id in pre_label_excluded_cell_ids
+        )
+        analysis_eligible = not pre_label_burn_excluded
+        record["pre_label_burn_excluded"] = pre_label_burn_excluded
+        record["analysis_eligible"] = analysis_eligible
 
         invalid_reasons: list[str] = []
 
@@ -1264,8 +1347,17 @@ def build_dataset(
         if not slope_ok:
             invalid_reasons.append("slope_mean_not_finite")
 
-        valid_for_modeling = predictors_ok and ndvi_ok and elev_ok and slope_ok and lc_ok
-        record["valid_for_modeling"] = bool(valid_for_modeling)
+        predictor_valid = bool(predictors_ok and ndvi_ok and elev_ok and slope_ok and lc_ok)
+
+        # valid_for_modeling = analysis_eligible AND predictor_valid. A
+        # pre-label-excluded cell is NEVER valid_for_modeling, regardless of
+        # predictor validity -- but its predictor QA reasons (above) are
+        # still preserved in invalid_reason; pre_label_burn_excluded is only
+        # PREPENDED as the primary reason, never replacing them.
+        valid_for_modeling = bool(analysis_eligible and predictor_valid)
+        record["valid_for_modeling"] = valid_for_modeling
+        if pre_label_burn_excluded:
+            invalid_reasons = ["pre_label_burn_excluded"] + invalid_reasons
         record["invalid_reason"] = ";".join(invalid_reasons) if invalid_reasons else None
 
         if valid_for_modeling:
@@ -1284,6 +1376,28 @@ def build_dataset(
         source_mask_src.close()
 
     df = pd.DataFrame(rows)
+
+    # --- Pre-label eligibility breakdown (raw / eligible / final modeling) ---
+    # pre_label_burn_excluded/analysis_eligible/valid_for_modeling are always
+    # stamped per-row above, so these columns exist whenever df is non-empty.
+    # raw_* reuses the loop-tallied burned_count/unburned_count directly (by
+    # construction identical to a df-level count -- these are NEVER affected
+    # by eligibility/pre-label exclusion, see "burned" column note above).
+    if len(df):
+        eligible_mask = df["analysis_eligible"] == True  # noqa: E712
+        final_mask = df["valid_for_modeling"] == True  # noqa: E712
+        eligible_burned_count = int((df.loc[eligible_mask, "burned"] == 1).sum())
+        eligible_unburned_count = int((df.loc[eligible_mask, "burned"] == 0).sum())
+        final_burned_count = int((df.loc[final_mask, "burned"] == 1).sum())
+        final_unburned_count = int((df.loc[final_mask, "burned"] == 0).sum())
+        pre_label_burn_excluded_count = int((df["pre_label_burn_excluded"] == True).sum())  # noqa: E712
+        analysis_eligible_count = int(eligible_mask.sum())
+        predictor_invalid_count_among_eligible = int(eligible_mask.sum() - final_mask.sum())
+    else:
+        eligible_burned_count = eligible_unburned_count = 0
+        final_burned_count = final_unburned_count = 0
+        pre_label_burn_excluded_count = analysis_eligible_count = 0
+        predictor_invalid_count_among_eligible = 0
 
     # 500 m diagnostic transform (reference transform scaled by block_size).
     grid_500m_transform = ref_transform * rasterio.Affine.scale(block_size)
@@ -1322,6 +1436,20 @@ def build_dataset(
             "valid_30m_fraction_summary": _series_summary(valid_30m_fraction_values),
             "observed_fraction_summary": _series_summary(observed_fraction_values),
             "gapfilled_fraction_summary": _series_summary(gapfilled_fraction_values),
+            # --- Pre-label exclusion eligibility (always present; all-zero /
+            # eligible==total when exclude_pre_label_burns is not used) ---
+            "pre_label_burn_excluded_count": pre_label_burn_excluded_count,
+            "analysis_eligible_count": analysis_eligible_count,
+            "predictor_invalid_count_among_eligible": predictor_invalid_count_among_eligible,
+            "raw_label_counts_before_eligibility": {
+                "burned": burned_count, "unburned": unburned_count,
+            },
+            "eligible_label_counts_after_pre_label_exclusion": {
+                "burned": eligible_burned_count, "unburned": eligible_unburned_count,
+            },
+            "final_modeling_counts_after_predictor_validity": {
+                "burned": final_burned_count, "unburned": final_unburned_count,
+            },
         },
         "warnings": warnings_list,
     }
@@ -1552,6 +1680,8 @@ def write_stats(
     min_valid_fraction: float,
     burnable_threshold: float,
     warnings_list: list[str],
+    exclude_pre_label_burns: bool = False,
+    pre_label_exclusion_manifest_path: str | None = None,
 ) -> Path:
     burnable_diag = result.get("burnable_landcover_diagnostics", {}) or {}
     with rasterio.open(reference_path) as ref:
@@ -1630,6 +1760,25 @@ def write_stats(
         "no_firms_label_used": True,
         "primary_label": "MCD64A1",
         "cropland_excluded_from_primary_burnable_mask": True,
+        # --- Pre-label exclusion eligibility (leakage-safe; opt-in per
+        # experiment, currently only mugla_2021). Always present with a
+        # uniform schema; all-zero/eligible==total when not used. ---
+        "exclude_pre_label_burns": bool(exclude_pre_label_burns),
+        "pre_label_exclusion": {
+            "pre_label_burn_excluded_count": counters.get("pre_label_burn_excluded_count", 0),
+            "analysis_eligible_count": counters.get("analysis_eligible_count", counters["total_500m_cells"]),
+            "predictor_invalid_count_among_eligible": counters.get(
+                "predictor_invalid_count_among_eligible", counters["invalid_cells"]
+            ),
+            "raw_label_counts_before_eligibility": counters.get("raw_label_counts_before_eligibility"),
+            "eligible_label_counts_after_pre_label_exclusion": counters.get(
+                "eligible_label_counts_after_pre_label_exclusion"
+            ),
+            "final_modeling_counts_after_predictor_validity": counters.get(
+                "final_modeling_counts_after_predictor_validity"
+            ),
+            "manifest_path": pre_label_exclusion_manifest_path,
+        },
     }
     path = output_dir / "step8a_dataset_stats.json"
     path.write_text(json.dumps(stats, indent=2, default=str), encoding="utf-8")
@@ -2354,6 +2503,25 @@ def main(
     log.info("Landcover rasteri (hizali): %s", landcover_path)
     log.info("Cozulmus predictor sayisi: %d (eksik/opsiyonel: %s)", len(predictor_paths), missing_optional)
 
+    # --- Leakage-safe pre-label exclusion (opt-in per experiment; currently
+    # only mugla_2021). Config-driven via ctx["exclude_pre_label_burns"] --
+    # never hard-coded to a specific experiment_id. If enabled, the Step6B
+    # gate's canonical cell-level manifest is REQUIRED; missing it is a
+    # fail-fast error (never a silent warning), since proceeding without it
+    # would silently let already-burned cells leak back into the dataset. ---
+    exclude_pre_label_burns = bool(ctx is not None and ctx.get("exclude_pre_label_burns", False))
+    pre_label_excluded_cell_ids = None
+    pre_label_exclusion_manifest_path: str | None = None
+    if exclude_pre_label_burns:
+        manifest_path = ctx["gate_labels_dir"] / PRE_LABEL_EXCLUSION_MANIFEST_FILENAME
+        pre_label_exclusion_manifest_path = str(manifest_path)
+        pre_label_excluded_cell_ids = read_pre_label_exclusion_manifest(manifest_path)
+        log.info(
+            "Pre-label exclusion AKTIF [%s]: %d hucre (manifest: %s) analiz "
+            "evreninden dislanacak.", ctx["experiment_id"],
+            len(pre_label_excluded_cell_ids), manifest_path,
+        )
+
     result = build_dataset(
         reference_path=reference_path,
         label_path=label_path,
@@ -2366,6 +2534,7 @@ def main(
         burnable_threshold=burnable_threshold,
         label_start=effective_label_start,
         label_end=effective_label_end,
+        pre_label_excluded_cell_ids=pre_label_excluded_cell_ids,
     )
     result["label_source_description"] = label_source_description
     result["label_raster_diagnostics"] = label_diag
@@ -2413,6 +2582,8 @@ def main(
         out_dir, result, reference_path, label_path, predictor_paths,
         landcover_path, landcover_info, source_mask_path,
         min_valid_fraction, burnable_threshold, result["warnings"],
+        exclude_pre_label_burns=exclude_pre_label_burns,
+        pre_label_exclusion_manifest_path=pre_label_exclusion_manifest_path,
     )
     # parquet_written flag is added post-hoc so write_stats stays pure.
     stats_data = json.loads(stats_path.read_text(encoding="utf-8"))
