@@ -34,7 +34,9 @@ from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_s
 
 from core.io_utils import setup_logger
 from core.paths import PROJECT_ROOT
-from src.step9a_audit_cross_region_inputs import cross_region_output_root
+from src.step9a_audit_cross_region_inputs import (
+    cross_region_output_root, resolve_git_commit, sha256_file,
+)
 
 BASE_DIR = PROJECT_ROOT
 log, log_file = setup_logger("step9c_cross_region_block_bootstrap")
@@ -98,6 +100,7 @@ def bootstrap_one_group(df_group: pd.DataFrame, rng: np.random.Generator) -> pd.
             "delta_pr_auc": m_therm["pr_auc"] - m_base["pr_auc"],
             "baseline_brier": m_base["brier_score"], "thermal_brier": m_therm["brier_score"],
             "delta_brier": m_therm["brier_score"] - m_base["brier_score"],
+            "brier_improvement": m_base["brier_score"] - m_therm["brier_score"],
         })
 
     if len(records) < N_BOOTSTRAP_REPLICATES:
@@ -183,6 +186,7 @@ def run_bootstrap(source_id: str, target_id: str, force: bool = False) -> dict:
             ("delta_roc_auc", _interpret_improvement),
             ("delta_pr_auc", _interpret_improvement),
             ("delta_brier", _interpret_brier_improvement),
+            ("brier_improvement", _interpret_improvement),
         ):
             lo, hi, mean = _percentile_ci(samples[metric_key])
             ci[metric_key] = {"ci_2_5": lo, "ci_97_5": hi, "mean": mean, "interpretation": interp_fn(lo, hi)}
@@ -222,6 +226,14 @@ def run_bootstrap(source_id: str, target_id: str, force: bool = False) -> dict:
         "target_experiment_id": target_id,
         "n_bootstrap_replicates_requested": N_BOOTSTRAP_REPLICATES,
         "random_seed": BOOTSTRAP_RANDOM_SEED,
+        "git_commit": resolve_git_commit(),
+        "predictions_path": str(predictions_path),
+        "predictions_sha256": sha256_file(predictions_path),
+        "spatial_block_column": "target_spatial_block_id",
+        "resampling_unit": "unique target-region spatial blocks",
+        "resampling_scheme": "sample target blocks with replacement; retain every row in each sampled block",
+        "percentile_interval": [2.5, 97.5],
+        "max_attempts_multiplier": MAX_ATTEMPTS_MULTIPLIER,
         "method_note": (
             "Percentile 95% confidence intervals from TARGET-REGION spatial-block "
             "bootstrap (blocks resampled with replacement; all rows in a sampled "
@@ -252,20 +264,22 @@ def write_bootstrap_summary(payload: dict, output_dir: Path) -> Path:
         "",
         "## Results",
         "",
-        "| direction | population | n_replicates | delta_auc CI | interp | delta_pr_auc CI | interp | delta_brier CI | interp |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| direction | population | n_replicates | delta_auc CI | interp | delta_pr_auc CI | interp | delta_brier CI | interp | brier_improvement CI |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for g in payload["groups"]:
         if g.get("n_successful_replicates", 0) == 0:
-            lines.append(f"| {g['transfer_direction']} | {g['population']} | 0 | - | - | - | - | - | - |")
+            lines.append(f"| {g['transfer_direction']} | {g['population']} | 0 | - | - | - | - | - | - | - |")
             continue
         ci = g["confidence_intervals"]
         a, p, b = ci["delta_roc_auc"], ci["delta_pr_auc"], ci["delta_brier"]
+        bi = ci["brier_improvement"]
         lines.append(
             f"| {g['transfer_direction']} | {g['population']} | {g['n_successful_replicates']} | "
             f"[{a['ci_2_5']:.4f}, {a['ci_97_5']:.4f}] | {a['interpretation']} | "
             f"[{p['ci_2_5']:.4f}, {p['ci_97_5']:.4f}] | {p['interpretation']} | "
-            f"[{b['ci_2_5']:.4f}, {b['ci_97_5']:.4f}] | {b['interpretation']} |"
+            f"[{b['ci_2_5']:.4f}, {b['ci_97_5']:.4f}] | {b['interpretation']} | "
+            f"[{bi['ci_2_5']:.4f}, {bi['ci_97_5']:.4f}] |"
         )
     lines.extend([
         "", "## Wording policy", "",

@@ -29,6 +29,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from datetime import datetime, timezone
@@ -76,6 +77,23 @@ SHARED_THERMAL_FEATURES = [
 ]
 SHARED_THERMAL_MODEL_FEATURES = SHARED_BASELINE_FEATURES + SHARED_THERMAL_FEATURES
 
+# Step8A manifest keys and scientific identities for the frozen Step9 feature
+# contract.  Source products themselves are resolved from each experiment's
+# step8a_dataset_stats.json rather than inferred from the experiment id.
+FEATURE_SEMANTICS = {
+    "ndvi_mean": ("ndvi", "mean_current_period_ndvi"),
+    "elevation_mean": ("elevation", "mean_elevation"),
+    "slope_mean": ("slope", "mean_slope"),
+    "landcover_dominant": ("landcover", "dominant_esa_worldcover_class"),
+    # Legacy public column name; the manifest must prove anomaly_zscore input.
+    "lst_anomaly_mean": ("lst_anomaly", "mean_standardized_lst_anomaly"),
+    "current_lst_mean": ("current_lst", "mean_current_period_lst_celsius"),
+    "current_tvdi_mean": ("current_tvdi", "mean_current_period_tvdi"),
+    "tvdi_difference_mean": ("tvdi_difference", "mean_tvdi_difference"),
+    "downscaled_lst_mean": ("downscaled_lst", "mean_downscaled_lst_celsius"),
+    "fused_lst_mean": ("fused_lst", "mean_fused_lst_celsius"),
+}
+
 # Prompt'ta ("Forbidden model inputs") birebir listelenen kolonlar. Bu
 # kolonlar model FEATURE SETLERINE asla giremez (dataset'te metadata/label
 # olarak bulunmalari NORMALDIR -- yasak olan onlari X'e dahil etmektir).
@@ -120,7 +138,21 @@ def cross_region_output_root(source_id: str, target_id: str) -> Path:
 
 
 def resolve_step8a_dataset_path(experiment_id: str) -> Path:
-    return get_experiment_output_root(experiment_id) / "step8a" / "step8a_500m_modeling_dataset.parquet"
+    manifest_path = resolve_step8a_stats_path(experiment_id)
+    manifest = _load_json(manifest_path)
+    if manifest is not None:
+        if manifest.get("experiment_id") not in (None, experiment_id):
+            raise Step9AError(
+                f"Step8A manifest experiment_id uyusmuyor: expected={experiment_id}, "
+                f"found={manifest.get('experiment_id')} ({manifest_path})."
+            )
+        if manifest.get("step") != "step8a_prepare_500m_modeling_dataset":
+            raise Step9AError(
+                f"Gecersiz Step8A manifest step degeri: {manifest.get('step')} ({manifest_path})."
+            )
+    # The frozen Step8A manifest and dataset are sibling artifacts.  The
+    # manifest's own location is authoritative for resolving the dataset.
+    return manifest_path.parent / "step8a_500m_modeling_dataset.parquet"
 
 
 def resolve_step8a_stats_path(experiment_id: str) -> Path:
@@ -138,6 +170,80 @@ def _load_json(path: Path) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def resolve_git_commit() -> str | None:
+    """Resolve HEAD without invoking git, including packed-ref repositories."""
+    git_dir = PROJECT_ROOT / ".git"
+    if git_dir.is_file():
+        marker = git_dir.read_text(encoding="utf-8").strip()
+        if marker.startswith("gitdir:"):
+            git_dir = (PROJECT_ROOT / marker.split(":", 1)[1].strip()).resolve()
+    head_path = git_dir / "HEAD"
+    if not head_path.exists():
+        return None
+    head = head_path.read_text(encoding="utf-8").strip()
+    if not head.startswith("ref:"):
+        return head or None
+    ref_name = head.split(":", 1)[1].strip()
+    loose_ref = git_dir / ref_name
+    if loose_ref.exists():
+        return loose_ref.read_text(encoding="utf-8").strip() or None
+    packed_refs = git_dir / "packed-refs"
+    if packed_refs.exists():
+        for line in packed_refs.read_text(encoding="utf-8").splitlines():
+            if line and not line.startswith(("#", "^")):
+                commit, name = line.split(" ", 1)
+                if name == ref_name:
+                    return commit
+    return None
+
+
+def resolve_feature_contract(experiment_id: str) -> tuple[dict, list[str]]:
+    """Resolve the frozen Step9 feature semantics from the Step8A manifest."""
+    manifest_path = resolve_step8a_stats_path(experiment_id)
+    manifest = _load_json(manifest_path)
+    if manifest is None:
+        return {}, [f"'{experiment_id}': Step8A manifest okunamadi ({manifest_path})."]
+
+    predictor_paths = manifest.get("predictor_paths", {})
+    contract: dict[str, dict] = {}
+    errors: list[str] = []
+    for column_name in SHARED_THERMAL_MODEL_FEATURES:
+        manifest_key, semantic_identity = FEATURE_SEMANTICS[column_name]
+        source_path = (
+            manifest.get("landcover_path") if manifest_key == "landcover"
+            else predictor_paths.get(manifest_key)
+        )
+        source_product = Path(source_path).stem if source_path else None
+        contract[column_name] = {
+            "column_name": column_name,
+            "semantic_identity": semantic_identity,
+            "source_manifest_key": manifest_key,
+            "source_product": source_product,
+        }
+        if not source_path:
+            errors.append(
+                f"'{experiment_id}': feature '{column_name}' icin Step8A manifest "
+                f"source path eksik (key={manifest_key})."
+            )
+
+    anomaly = contract.get("lst_anomaly_mean", {})
+    if anomaly.get("source_product") != "anomaly_zscore":
+        errors.append(
+            f"'{experiment_id}': legacy 'lst_anomaly_mean' mutlaka "
+            "'mean_standardized_lst_anomaly' semantigiyle anomaly_zscore "
+            f"urununden gelmelidir (bulunan: {anomaly.get('source_product')})."
+        )
+    return contract, errors
 
 
 def audit_single_experiment(experiment_id: str) -> dict:
@@ -189,6 +295,7 @@ def audit_single_experiment(experiment_id: str) -> dict:
     stats_path = resolve_step8a_stats_path(experiment_id)
     stats = _load_json(stats_path)
     info["step8a_stats_path"] = str(stats_path)
+    info["step8a_stats_sha256"] = sha256_file(stats_path) if stats_path.exists() else None
     checks["step8a_stats_exists"] = stats is not None
     if stats is not None:
         checks["cell_level_correct"] = stats.get("cell_level") == CELL_LEVEL_REQUIRED
@@ -207,6 +314,11 @@ def audit_single_experiment(experiment_id: str) -> dict:
         checks["no_30m_label_claim_true"] = False
         errors.append(f"'{experiment_id}': Step8A stats dosyasi bulunamadi ({stats_path}).")
 
+    feature_contract, contract_errors = resolve_feature_contract(experiment_id)
+    info["feature_contract"] = feature_contract
+    checks["feature_semantics_resolved_from_manifest"] = not contract_errors
+    errors.extend(contract_errors)
+
     # --- Step8A dataset: var mi, gerekli kolonlar, MCD64A1 primary label ---
     dataset_path = resolve_step8a_dataset_path(experiment_id)
     info["dataset_path"] = str(dataset_path)
@@ -217,6 +329,8 @@ def audit_single_experiment(experiment_id: str) -> dict:
         info["positive_count"] = None
         info["negative_count"] = None
         return {"checks": checks, "errors": errors, "info": info}
+
+    info["dataset_sha256"] = sha256_file(dataset_path)
 
     df = pd.read_parquet(dataset_path)
     info["row_count"] = int(len(df))
@@ -320,6 +434,19 @@ def audit_pair(source_id: str, target_id: str) -> dict:
             f"target eksik: {target_result['info'].get('missing_columns')})."
         )
 
+    source_contract = source_result["info"].get("feature_contract", {})
+    target_contract = target_result["info"].get("feature_contract", {})
+    contracts_match = bool(source_contract) and source_contract == target_contract
+    if not contracts_match:
+        differing = sorted(
+            key for key in set(source_contract) | set(target_contract)
+            if source_contract.get(key) != target_contract.get(key)
+        )
+        all_errors.append(
+            "Source ve target feature contract'lari uyusmuyor; transfer "
+            f"durduruldu. Farkli feature'lar: {differing}."
+        )
+
     passed = len(all_errors) == 0
 
     result = {
@@ -336,6 +463,8 @@ def audit_pair(source_id: str, target_id: str) -> dict:
         "source": source_result,
         "target": target_result,
         "shared_features_present_in_both": shared_ok,
+        "feature_contracts_match": contracts_match,
+        "git_commit": resolve_git_commit(),
         "errors": all_errors,
         "passed": passed,
         "created_at": datetime.now(timezone.utc).isoformat(),

@@ -111,10 +111,22 @@ def build_direction_summary(
     summary["target_burned_prevalence"] = primary_b["target_burned_prevalence"]
     summary["baseline_target_metrics"] = primary_b["baseline_metrics"]
     summary["thermal_target_metrics"] = primary_b["thermal_metrics"]
-    summary["delta_metrics"] = primary_b["delta_metrics"]
+    delta_metrics = dict(primary_b["delta_metrics"])
+    if "brier_improvement" not in delta_metrics and delta_metrics.get("delta_brier") is not None:
+        delta_metrics["brier_improvement"] = -delta_metrics["delta_brier"]
+    summary["delta_metrics"] = delta_metrics
 
     if primary_c and primary_c.get("n_successful_replicates", 0) > 0:
         ci = primary_c["confidence_intervals"]
+        if "brier_improvement" not in ci and "delta_brier" in ci:
+            legacy = ci["delta_brier"]
+            ci = dict(ci)
+            ci["brier_improvement"] = {
+                "ci_2_5": -legacy["ci_97_5"],
+                "ci_97_5": -legacy["ci_2_5"],
+                "mean": -legacy["mean"],
+                "interpretation": legacy["interpretation"],
+            }
         summary["bootstrap_confidence_intervals"] = ci
         summary["bootstrap_interpretation"] = {
             "delta_auc": ci["delta_roc_auc"]["interpretation"],
@@ -194,6 +206,30 @@ def build_report(source_id: str, target_id: str) -> dict:
         "overall_conclusion_text": conclusion_text,
         "cautious_statement_template": CAUTIOUS_STATEMENT,
         "caution_notes": CAUTION_NOTES,
+        "reproducibility": {
+            "git_commit": step9b_payload.get("git_commit"),
+            "resolved_inputs": step9b_payload.get("resolved_inputs"),
+            "model_name": step9b_payload.get("model_name"),
+            "model_parameters": step9b_payload.get("model_parameters"),
+            "preprocessing_parameters": step9b_payload.get("preprocessing_parameters"),
+            "random_seed": step9b_payload.get("random_seed"),
+            "spatial_cv_n_splits_requested": step9b_payload.get("spatial_cv_n_splits_requested"),
+            "minimum_positives_and_negatives_per_population": step9b_payload.get(
+                "minimum_positives_and_negatives_per_population"
+            ),
+            "baseline_features": step9b_payload.get("baseline_features"),
+            "thermal_model_features": step9b_payload.get("thermal_model_features"),
+            "population_definition": step9b_payload.get("population_definition"),
+            "spatial_block_size_cells": step9b_payload.get("spatial_block_size_cells"),
+            "spatial_block_definition": step9b_payload.get("spatial_block_definition"),
+            "bootstrap_settings": {
+                key: step9c_payload.get(key) for key in (
+                    "n_bootstrap_replicates_requested", "random_seed",
+                    "spatial_block_column", "resampling_unit", "resampling_scheme",
+                    "percentile_interval", "max_attempts_multiplier",
+                )
+            },
+        },
         "scope": {
             "evaluates": "Step8 ~500m MCD64A1-cell burned-area association model, cross-region transfer",
             "not_a_30m_fire_prediction_model": True,
@@ -238,9 +274,14 @@ def write_report(report: dict, output_dir: Path) -> tuple[Path, Path]:
             f"- target burned prevalence: {d['target_burned_prevalence']:.4f}",
             f"- baseline target ROC-AUC: {d['baseline_target_metrics']['roc_auc']}",
             f"- thermal target ROC-AUC: {d['thermal_target_metrics']['roc_auc']}",
+            f"- baseline target PR-AUC: {d['baseline_target_metrics']['pr_auc']}",
+            f"- thermal target PR-AUC: {d['thermal_target_metrics']['pr_auc']}",
+            f"- baseline target Brier: {d['baseline_target_metrics']['brier_score']}",
+            f"- thermal target Brier: {d['thermal_target_metrics']['brier_score']}",
             f"- delta_auc: {d['delta_metrics']['delta_auc']}",
             f"- delta_pr_auc: {d['delta_metrics']['delta_pr_auc']}",
             f"- delta_brier: {d['delta_metrics']['delta_brier']}",
+            f"- brier_improvement (baseline - thermal): {d['delta_metrics']['brier_improvement']}",
             f"- bootstrap interpretation: {d['bootstrap_interpretation']}",
             "",
         ])

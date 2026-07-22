@@ -24,6 +24,7 @@ from scripts.main import (
     build_parser, cmd_experiment, cmd_legacy, cmd_self_cal_transfer, cmd_shift_audit,
     cmd_step8_robustness, cmd_transfer, cmd_transfer_explore,
     cmd_step10, cmd_large_block_robustness, cmd_concept_shift,
+    cmd_step8_big_block_robustness,
 )
 
 
@@ -225,7 +226,7 @@ class TestParserStructure(unittest.TestCase):
             a for a in self.parser._actions if isinstance(a, __import__("argparse")._SubParsersAction)
         )
         choices = set(subparsers_action.choices.keys())
-        for command in ("step10", "large-block-robustness", "concept-shift"):
+        for command in ("step10", "large-block-robustness", "step8-big-block-robustness", "concept-shift"):
             self.assertIn(command, choices)
         # backward compatibility: existing commands remain
         for command in ("experiment", "transfer", "shift-audit", "transfer-explore",
@@ -282,6 +283,47 @@ class TestParserStructure(unittest.TestCase):
             self.assertEqual(cmd_large_block_robustness(args_fit), 0)
         mocked.assert_called_once_with(
             dry_run=False, force=True, run_large_block_fit=True,
+        )
+
+    def test_step8_big_block_robustness_subcommand_parses(self):
+        args = self.parser.parse_args([
+            "step8-big-block-robustness",
+            "--experiment", "mugla_2021",
+            "--block-sizes", "10", "20",
+            "--dry-run",
+        ])
+        self.assertEqual(args.command, "step8-big-block-robustness")
+        self.assertEqual(args.experiment, "mugla_2021")
+        self.assertEqual(args.block_sizes, [10, 20])
+        self.assertTrue(args.dry_run)
+        self.assertFalse(args.force)
+        self.assertIs(args.func, cmd_step8_big_block_robustness)
+
+    def test_step8_big_block_robustness_accepts_arbitrary_experiment(self):
+        # no AOI is hard-coded into the CLI -- any experiment_id parses.
+        args = self.parser.parse_args([
+            "step8-big-block-robustness",
+            "--experiment", "some_future_experiment",
+            "--dry-run",
+        ])
+        self.assertEqual(args.experiment, "some_future_experiment")
+        self.assertEqual(args.block_sizes, [10, 20])  # default
+
+    def test_step8_big_block_robustness_cli_dispatches_through_orchestrator(self):
+        args = self.parser.parse_args([
+            "step8-big-block-robustness",
+            "--experiment", "mugla_2021",
+            "--block-sizes", "10", "20",
+            "--dry-run",
+        ])
+        with patch.object(
+            sys.modules["scripts.main"].orch,
+            "run_step8_big_block_robustness_stage",
+            return_value={"ran": False},
+        ) as mocked:
+            self.assertEqual(cmd_step8_big_block_robustness(args), 0)
+        mocked.assert_called_once_with(
+            experiment="mugla_2021", block_sizes=[10, 20], dry_run=True, force=False,
         )
 
     def test_concept_shift_subcommand_parses(self):

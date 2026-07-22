@@ -509,7 +509,30 @@ def run_large_block_robustness_stage(
     )
 
 
-def run_concept_shift_stage(dry_run: bool, force: bool) -> dict:
+def run_step8_big_block_robustness_stage(
+    experiment: str, block_sizes: list[int], dry_run: bool, force: bool,
+    regenerate_reports_only: bool = False,
+) -> dict:
+    """Dispatch the single-experiment Step8 big-spatial-block robustness
+    runner unchanged. Unlike run_step8_robustness_stage/
+    run_large_block_robustness_stage (both frozen to the manavgat_2021/
+    bejis_2022 pair), this stage accepts any experiment_id at runtime -- no
+    AOI is hard-coded in the orchestrator or the underlying runner.
+    regenerate_reports_only=True reads ONLY the frozen artifacts from a
+    prior full run and regenerates JSON/Markdown/CSV/manifest reports --
+    it never fits models, builds folds, generates predictions, or samples
+    bootstrap replicates."""
+    from scripts.run_step8_big_block_robustness import main as run_step8_big_block_robustness
+
+    return run_step8_big_block_robustness(
+        experiment=experiment, block_sizes=block_sizes, dry_run=dry_run, force=force,
+        regenerate_reports_only=regenerate_reports_only,
+    )
+
+
+def run_concept_shift_stage(
+    source_id: str, target_id: str, dry_run: bool, force: bool,
+) -> dict:
     """Dispatch the completed Step9G univariate feature-AUC direction-reversal
     analysis (population burnable_tree_shrub_grass; raw feature-value ROC-AUC;
     no inversion/normalization/imputation; 10-cell spatial-block bootstrap).
@@ -517,10 +540,15 @@ def run_concept_shift_stage(dry_run: bool, force: bool) -> dict:
     Delegates to the Step9G module's callable."""
     from src.step9g_univariate_feature_auc_direction_reversal import run_analysis as run_step9g
 
-    return run_step9g(dry=dry_run, force=force)
+    return run_step9g(
+        source_id=source_id, target_id=target_id,
+        dry=dry_run, force=force,
+    )
 
 
-def run_concept_shift_integration_stage(dry_run: bool, force: bool) -> dict:
+def run_concept_shift_integration_stage(
+    source_id: str, target_id: str, dry_run: bool, force: bool,
+) -> dict:
     """Dispatch the CANONICAL Step9G integration-v2 report layer. This is
     REPORT-ONLY: it reuses the frozen Step9G numeric outputs verbatim (no AUC/
     bootstrap/CI/reversal recomputation) and only corrects how Step9E/9F/10 are
@@ -528,7 +556,93 @@ def run_concept_shift_integration_stage(dry_run: bool, force: bool) -> dict:
     Step9G outputs are immutable. Delegates to the v2 module's callable."""
     from src.step9g_integration_correction_v2 import run_correction as run_step9g_integration_v2
 
-    return run_step9g_integration_v2(dry=dry_run, force=force)
+    return run_step9g_integration_v2(
+        source_id=source_id, target_id=target_id,
+        dry=dry_run, force=force,
+    )
+
+
+def run_multi_aoi_transfer_synthesis_stage(
+    aois: list[str], dry_run: bool, force: bool, output_root: Optional[str] = None,
+) -> dict:
+    """Dispatch the generic, REPORT-ONLY multi-AOI transfer synthesis for a
+    caller-supplied set of 2-5 AOI experiment IDs. Reads only already-frozen
+    Step8/Step9B-G/Step10 outputs (via src/multi_aoi_transfer_synthesis) and
+    NEVER runs modeling, adaptation, prediction, or bootstrap code. No AOI
+    name, path, or pair is hard-coded anywhere in this dispatch or in the
+    underlying package; everything is derived generically from `aois`."""
+    from src.multi_aoi_transfer_synthesis.aoi_set import AoiSetError, validate_aoi_set
+    from src.multi_aoi_transfer_synthesis.build import SynthesisBuildError, build_synthesis
+    from src.multi_aoi_transfer_synthesis import manifest as multi_aoi_manifest
+    from src.multi_aoi_transfer_synthesis import render as multi_aoi_render
+
+    try:
+        aoi_set = validate_aoi_set(aois)
+    except AoiSetError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if output_root:
+        out_dir = Path(output_root) / aoi_set.canonical_set_id
+    else:
+        out_dir = (
+            PROJECT_ROOT / "outputs" / "diagnostics"
+            / "multi_aoi_transfer_synthesis" / aoi_set.canonical_set_id
+        )
+
+    if dry_run:
+        synthesis = build_synthesis(list(aois), dry_run=True, output_root=str(out_dir))
+        planned_output_paths = {
+            name: str(out_dir / name)
+            for name in (
+                "multi_aoi_transfer_synthesis.json",
+                "multi_aoi_transfer_synthesis.md",
+                "multi_aoi_transfer_matrix.csv",
+                "multi_aoi_feature_stability.csv",
+                "multi_aoi_within_region.csv",
+                "multi_aoi_manifest.json",
+            )
+        }
+        return {
+            "ran": False,
+            "dry_run": True,
+            "canonical_set_id": synthesis["canonical_set_id"],
+            "aois_display_order": synthesis["aois_display_order"],
+            "aois_canonical_order": synthesis["aois_canonical_order"],
+            "ordered_directions": synthesis["ordered_directions"],
+            "unordered_pairs": synthesis["unordered_pairs"],
+            "resolved_inputs": synthesis["resolved_inputs"],
+            "resolution_errors": synthesis["resolution_errors"],
+            "output_root": str(out_dir),
+            "planned_output_paths": planned_output_paths,
+        }
+
+    if out_dir.exists() and any(out_dir.iterdir()) and not force:
+        raise SystemExit(
+            f"Output directory already exists and is non-empty: {out_dir}. "
+            "Use --force to overwrite (original frozen Step8/Step9/Step10 "
+            "inputs are never modified regardless)."
+        )
+
+    try:
+        synthesis = build_synthesis(list(aois), dry_run=False, output_root=str(out_dir))
+    except SynthesisBuildError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    output_paths = multi_aoi_render.render_all(synthesis, out_dir)
+    manifest = multi_aoi_manifest.render_manifest(
+        synthesis, output_paths, out_dir / "multi_aoi_manifest.json"
+    )
+    return {
+        "ran": True,
+        "dry_run": False,
+        "canonical_set_id": synthesis["canonical_set_id"],
+        "aois_display_order": synthesis["aois_display_order"],
+        "aois_canonical_order": synthesis["aois_canonical_order"],
+        "output_root": str(out_dir),
+        "output_paths": {name: str(path) for name, path in output_paths.items()},
+        "manifest_path": str(out_dir / "multi_aoi_manifest.json"),
+        "input_families_resolved": manifest["input_families_resolved"],
+    }
 
 
 # =============================================================================

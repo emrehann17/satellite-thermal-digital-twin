@@ -184,5 +184,32 @@ class TestStep8RobustnessDispatch(unittest.TestCase):
         )
 
 
+class TestStep8BigBlockRobustnessDispatch(unittest.TestCase):
+    def test_orchestrator_reuses_thin_runner(self):
+        with patch(
+            "scripts.run_step8_big_block_robustness.main",
+            return_value={"ran": False, "dry_run": True},
+        ) as mocked:
+            result = orch.run_step8_big_block_robustness_stage(
+                "mugla_2021", [10, 20], dry_run=True, force=False
+            )
+        self.assertFalse(result["ran"])
+        mocked.assert_called_once_with(
+            experiment="mugla_2021", block_sizes=[10, 20], dry_run=True, force=False,
+        )
+
+    def test_orchestrator_accepts_arbitrary_experiment_id(self):
+        with patch(
+            "scripts.run_step8_big_block_robustness.main",
+            return_value={"ran": False, "dry_run": True},
+        ) as mocked:
+            orch.run_step8_big_block_robustness_stage(
+                "some_future_experiment", [10, 20], dry_run=True, force=False
+            )
+        mocked.assert_called_once_with(
+            experiment="some_future_experiment", block_sizes=[10, 20], dry_run=True, force=False,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

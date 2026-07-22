@@ -59,6 +59,10 @@ log, log_file = setup_logger("step10c_paired_evaluation_bootstrap")
 RAW_REPRODUCTION_TOLERANCE = 1e-6
 WITHIN_REGION_REPRODUCTION_TOLERANCE = 1e-6
 
+STEP9_SCHEMA_STEP9B_RESULTS = "step9b_results_v1"
+STEP9_SCHEMA_STEP9D_DIRECTION_SUMMARIES = "step9d_direction_summaries_population_results_v1"
+REQUIRED_STEP9_RAW_METRICS = ("roc_auc", "pr_auc", "brier_score")
+
 # Sabit seri adlari (within-region + 3 adaptasyon yontemi) x model_family
 SERIES_METHOD_NAMES = ("within",) + ADAPTATION_METHODS
 
@@ -194,31 +198,163 @@ def verify_within_region_reproduction(merged: pd.DataFrame, point_metrics: dict,
     return {"checked": True, "all_within_tolerance": all_ok, "detail": checks}
 
 
-def verify_raw_reproduction(point_metrics: dict, original_source_id: str, original_target_id: str, direction: str) -> dict:
+def _validated_step9_transfer_metrics(
+    transfer: dict, *, direction: str, path: Path, schema: str,
+) -> dict:
+    """Extract the frozen Step9 baseline/thermal metrics without recomputing
+    or filling any value. All six required values must be finite numbers."""
+    extracted: dict = {}
+    for model_family, metric_key in (
+        ("baseline", "baseline_metrics"), ("thermal", "thermal_metrics"),
+    ):
+        metric_block = transfer.get(metric_key)
+        if not isinstance(metric_block, dict):
+            raise Step10Error(
+                f"[{direction}] {schema} icinde '{metric_key}' eksik/gecersiz: {path}."
+            )
+        extracted[model_family] = {}
+        for metric in REQUIRED_STEP9_RAW_METRICS:
+            value = metric_block.get(metric)
+            if isinstance(value, bool) or not isinstance(value, (int, float, np.number)):
+                raise Step10Error(
+                    f"[{direction}] {schema} gerekli metrik eksik/sayisal degil: "
+                    f"{metric_key}.{metric}={value!r} ({path})."
+                )
+            value = float(value)
+            if not np.isfinite(value):
+                raise Step10Error(
+                    f"[{direction}] {schema} gerekli metrik sonlu degil: "
+                    f"{metric_key}.{metric}={value!r} ({path})."
+                )
+            extracted[model_family][metric] = value
+    return extracted
+
+
+def _step9b_reference(payload: dict, direction: str, path: Path) -> dict | None:
+    """Legacy/current Step9B schema: top-level results[]."""
+    results = payload.get("results")
+    if not isinstance(results, list):
+        return None
+    matches = [
+        row for row in results
+        if isinstance(row, dict)
+        and row.get("transfer_direction") == direction
+        and row.get("population") == PRIMARY_POPULATION
+        and not row.get("skipped")
+    ]
+    if len(matches) > 1:
+        raise Step10Error(
+            f"[{direction}] Step9B '{PRIMARY_POPULATION}' icin birden fazla "
+            f"sonuc iceriyor ({len(matches)}): {path}."
+        )
+    if not matches:
+        return None
+    return _validated_step9_transfer_metrics(
+        matches[0], direction=direction, path=path,
+        schema=STEP9_SCHEMA_STEP9B_RESULTS,
+    )
+
+
+def _step9d_reference(payload: dict, direction: str, path: Path) -> dict | None:
+    """Canonical Step9D schema described by direction_summaries[]."""
+    summaries = payload.get("direction_summaries")
+    if not isinstance(summaries, list):
+        return None
+    matches = [
+        row for row in summaries
+        if isinstance(row, dict) and row.get("transfer_direction") == direction
+    ]
+    if len(matches) > 1:
+        raise Step10Error(
+            f"[{direction}] Step9D direction_summaries birden fazla tam eslesme "
+            f"iceriyor ({len(matches)}): {path}."
+        )
+    if not matches:
+        return None
+    population_results = matches[0].get("population_results")
+    if not isinstance(population_results, dict) or PRIMARY_POPULATION not in population_results:
+        raise Step10Error(
+            f"[{direction}] Step9D primary population eksik: "
+            f"population_results.{PRIMARY_POPULATION} ({path})."
+        )
+    population_entry = population_results[PRIMARY_POPULATION]
+    transfer = population_entry.get("transfer") if isinstance(population_entry, dict) else None
+    if not isinstance(transfer, dict):
+        raise Step10Error(
+            f"[{direction}] Step9D transfer nesnesi eksik/gecersiz: "
+            f"population_results.{PRIMARY_POPULATION}.transfer ({path})."
+        )
+    return _validated_step9_transfer_metrics(
+        transfer, direction=direction, path=path,
+        schema=STEP9_SCHEMA_STEP9D_DIRECTION_SUMMARIES,
+    )
+
+
+def resolve_step9_raw_reference(
+    source_id: str, target_id: str, direction: str,
+) -> dict:
+    """Resolve frozen Step9 metrics for one requested logical direction.
+
+    The requested <source>__<target> root is authoritative. The reversed root
+    is checked only for compatibility with legacy Manavgat/Bejis-style shared
+    pair outputs that stored both logical directions under one orientation.
+    Within each root Step9B is preferred; Step9D is the canonical fallback.
+    """
+    roots = [(source_id, target_id), (target_id, source_id)]
+    attempted: list[str] = []
+    saw_supported_schema = False
+    for root_source, root_target in roots:
+        step9b_path = resolve_step9b_metrics_path(root_source, root_target)
+        step9d_path = (
+            step9b_path.parent.parent / "step9d" / "final_cross_region_report.json"
+        )
+        for path, schema, extractor in (
+            (step9b_path, STEP9_SCHEMA_STEP9B_RESULTS, _step9b_reference),
+            (step9d_path, STEP9_SCHEMA_STEP9D_DIRECTION_SUMMARIES, _step9d_reference),
+        ):
+            attempted.append(str(path))
+            if not path.is_file():
+                continue
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            schema_field = "results" if schema == STEP9_SCHEMA_STEP9B_RESULTS else "direction_summaries"
+            if not isinstance(payload, dict) or not isinstance(payload.get(schema_field), list):
+                continue
+            saw_supported_schema = True
+            metrics = extractor(payload, direction, path)
+            if metrics is not None:
+                return {
+                    "resolved_path": str(path),
+                    "schema": schema,
+                    "root_source_experiment_id": root_source,
+                    "root_target_experiment_id": root_target,
+                    "metrics": metrics,
+                }
+
+    reason = (
+        f"hicbir desteklenen Step9 semasinda direction='{direction}' ve "
+        f"population='{PRIMARY_POPULATION}' eslesmesi yok"
+        if saw_supported_schema else "desteklenen Step9B/Step9D semasi bulunamadi"
+    )
+    raise Step10Error(
+        f"[{direction}] Step9 raw metrikleri cozumlenemedi: {reason}. "
+        f"Denenen dosyalar: {attempted}."
+    )
+
+
+def verify_raw_reproduction(point_metrics: dict, source_id: str, target_id: str, direction: str) -> dict:
     """FAIL-FAST: step10 raw_source_only metrikleri Step9B'yi 1e-6 tolerans
     ile YENIDEN URETMELIDIR. Basarisiz olursa Step10Error firlatilir --
     adapte edilmis (zscore/CORAL) rapora GECILMEZ.
 
-    NOT: Step9B'nin cikti dizini, `run_transfer()`'a verilen ORIJINAL
-    (source_id, target_id) ciftine gore SABITTIR (iki yon de AYNI dizin
-    altinda, 'transfer_direction' alaniyla ayirt edilir) -- yon-bazli
-    kaynak/hedef ID'leri BURADA path cozumlemesi icin KULLANILMAZ."""
-    step9b_metrics_path = resolve_step9b_metrics_path(original_source_id, original_target_id)
-    if not step9b_metrics_path.exists():
-        raise Step10Error(f"[{direction}] Step9B metrics.json bulunamadi: {step9b_metrics_path}. Raw reprodüksiyon kontrolu YAPILAMAZ.")
-    step9b_metrics = json.loads(step9b_metrics_path.read_text(encoding="utf-8"))
-
-    ref = None
-    for res in step9b_metrics.get("results", []):
-        if res.get("transfer_direction") == direction and res.get("population") == PRIMARY_POPULATION and not res.get("skipped"):
-            ref = res
-            break
-    if ref is None:
-        raise Step10Error(f"[{direction}] Step9B metriklerinde '{PRIMARY_POPULATION}' icin sonuc bulunamadi.")
+    Step9B'nin legacy/current results[] semasi tercih edilir; uygun sonuc
+    yoksa ayni pair namespace'indeki canonical Step9D direction_summaries
+    semasina dusulur. Hicbir Step9 degeri yeniden hesaplanmaz."""
+    reference = resolve_step9_raw_reference(source_id, target_id, direction)
+    ref = reference["metrics"]
 
     checks, all_ok = {}, True
-    for model_family, step9b_key in (("baseline", "baseline_metrics"), ("thermal", "thermal_metrics")):
-        theirs = ref.get(step9b_key, {})
+    for model_family in ("baseline", "thermal"):
+        theirs = ref[model_family]
         mine = point_metrics["raw_source_only"][model_family]
         row = {}
         for metric in ("roc_auc", "pr_auc"):
@@ -243,7 +379,10 @@ def verify_raw_reproduction(point_metrics: dict, original_source_id: str, origin
     # --- Opsiyonel: olasilik-seviyesinde karsilastirma (mumkunse) ---
     probability_check = {"attempted": False}
     try:
-        step9b_pred_path = resolve_step9b_predictions_path(original_source_id, original_target_id)
+        step9b_pred_path = resolve_step9b_predictions_path(
+            reference["root_source_experiment_id"],
+            reference["root_target_experiment_id"],
+        )
         if step9b_pred_path.exists():
             probability_check["attempted"] = True
             # (Bu kontrol best-effort'tur; join basarisiz olursa metrik-seviyesi
@@ -251,7 +390,20 @@ def verify_raw_reproduction(point_metrics: dict, original_source_id: str, origin
     except Exception as exc:  # noqa: BLE001
         log.warning("[%s] Olasilik-seviyesi reprodüksiyon kontrolu denenemedi: %s", direction, exc)
 
-    return {"all_within_tolerance": True, "detail": checks, "probability_level_check": probability_check}
+    return {
+        "all_within_tolerance": True,
+        "detail": checks,
+        "probability_level_check": probability_check,
+        "step9_reference": {
+            "resolved_path": reference["resolved_path"],
+            "schema": reference["schema"],
+            "root_source_experiment_id": reference["root_source_experiment_id"],
+            "root_target_experiment_id": reference["root_target_experiment_id"],
+            "required_metrics": list(REQUIRED_STEP9_RAW_METRICS),
+            "baseline_metrics": ref["baseline"],
+            "thermal_metrics": ref["thermal"],
+        },
+    }
 
 
 # =============================================================================
@@ -348,7 +500,9 @@ def run_step10c(
         all_point_metrics[direction] = point_metrics
 
         within_reproduction_results[direction] = verify_within_region_reproduction(merged, point_metrics, tgt_id, direction)
-        raw_reproduction_results[direction] = verify_raw_reproduction(point_metrics, source_id, target_id, direction)  # FAIL-FAST
+        raw_reproduction_results[direction] = verify_raw_reproduction(
+            point_metrics, src_id, tgt_id, direction,
+        )  # FAIL-FAST
 
         all_decomposition_rows.extend(compute_decomposition(point_metrics, direction))
 
@@ -376,6 +530,10 @@ def run_step10c(
         "analysis_id": analysis_id, "point_metrics": all_point_metrics,
         "within_region_reproduction": within_reproduction_results,
         "raw_reproduction": raw_reproduction_results,
+        "step9_raw_metric_provenance": {
+            direction: result["step9_reference"]
+            for direction, result in raw_reproduction_results.items()
+        },
     }
     metrics_json_path.write_text(json.dumps(metrics_payload, indent=2, default=str), encoding="utf-8")
 

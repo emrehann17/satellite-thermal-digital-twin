@@ -27,6 +27,8 @@ CIKTI KOKU:
 CLI:
     python scripts/run_cross_region_transfer.py --source manavgat_2021 --target bejis_2022 --reverse --dry-run
     python scripts/run_cross_region_transfer.py --source manavgat_2021 --target bejis_2022 --reverse --force
+    python scripts/run_cross_region_transfer.py --source manavgat_2021 --target mugla_2021 --single-direction --dry-run
+    python scripts/run_cross_region_transfer.py --source mugla_2021 --target manavgat_2021 --single-direction
 """
 
 from __future__ import annotations
@@ -51,7 +53,9 @@ class CrossRegionRunnerError(SystemExit):
     """Fail-fast error for this orchestrator (diğer step'lerle aynı konvansiyon)."""
 
 
-def _log_dry_run(source_id: str, target_id: str, reverse: bool) -> None:
+def _log_dry_run(
+    source_id: str, target_id: str, reverse: bool, single_direction: bool,
+) -> None:
     from src.step9a_audit_cross_region_inputs import (
         ALL_POPULATIONS,
         FORBIDDEN_MODEL_COLUMNS,
@@ -67,12 +71,15 @@ def _log_dry_run(source_id: str, target_id: str, reverse: bool) -> None:
 
     root = cross_region_output_root(source_id, target_id)
     directions = [f"{source_id}_to_{target_id}"]
-    if reverse:
+    if not single_direction:
         directions.append(f"{target_id}_to_{source_id}")
 
-    log.info("[dry-run] source=%s, target=%s, reverse=%s", source_id, target_id, reverse)
+    log.info(
+        "[dry-run] source=%s, target=%s, reverse=%s, single_direction=%s",
+        source_id, target_id, reverse, single_direction,
+    )
     log.info("[dry-run] transfer directions to be evaluated: %s", directions)
-    if not reverse:
+    if not reverse and not single_direction:
         log.info(
             "[dry-run] NOT: --reverse verilmedi. Step9B kendi ic tasarimi geregi "
             "YINE DE HER IKI yonu de hesaplar (bkz. modul docstring); --reverse "
@@ -117,15 +124,16 @@ def _log_dry_run(source_id: str, target_id: str, reverse: bool) -> None:
 def main(
     source_id: str, target_id: str, reverse: bool = False,
     dry_run: bool = False, force: bool = False,
+    single_direction: bool = False,
 ) -> dict:
     if source_id == target_id:
         raise CrossRegionRunnerError("--source ve --target ayni deney OLAMAZ.")
 
     if dry_run:
-        _log_dry_run(source_id, target_id, reverse)
+        _log_dry_run(source_id, target_id, reverse, single_direction)
         return {"ran": False, "reason": "dry_run"}
 
-    if not reverse:
+    if not reverse and not single_direction:
         log.warning(
             "--reverse verilmedi. Step9B tasarimi geregi HER IKI transfer yonu "
             "da (source->target VE target->source) yine de hesaplanacak -- bkz. "
@@ -145,7 +153,10 @@ def main(
     log.info("=" * 70)
     log.info("STEP9B: iki yonlu cross-region transfer")
     log.info("=" * 70)
-    transfer_result = run_step9b(source_id=source_id, target_id=target_id, force=force)
+    transfer_result = run_step9b(
+        source_id=source_id, target_id=target_id, force=force,
+        bidirectional=not single_direction,
+    )
 
     log.info("=" * 70)
     log.info("STEP9C: hedef-bolge spatial-block bootstrap")
@@ -196,6 +207,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--force", action="store_true",
         help="Her Step9 alt-asamasinin ciktilari zaten varsa uzerine yaz.",
     )
+    parser.add_argument(
+        "--single-direction", action="store_true",
+        help="Yalnizca --source -> --target yonunu calistir. Bu secenek, her "
+        "yonu kendi <source>__<target> namespace'inde tutmak icindir; "
+        "verilmezse legacy iki-yonlu Step9 davranisi korunur.",
+    )
     return parser.parse_args(argv)
 
 
@@ -204,4 +221,5 @@ if __name__ == "__main__":
     main(
         source_id=args.source, target_id=args.target,
         reverse=args.reverse, dry_run=args.dry_run, force=args.force,
+        single_direction=args.single_direction,
     )

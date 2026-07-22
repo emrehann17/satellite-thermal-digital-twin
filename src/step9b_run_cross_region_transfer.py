@@ -61,7 +61,11 @@ from src.step9a_audit_cross_region_inputs import (
     SHARED_THERMAL_MODEL_FEATURES,
     TARGET_COLUMN,
     cross_region_output_root,
+    resolve_feature_contract,
+    resolve_git_commit,
     resolve_step8a_dataset_path,
+    resolve_step8a_stats_path,
+    sha256_file,
 )
 from src.step8b_train_baseline_vs_thermal_model import (
     build_pipeline,
@@ -242,6 +246,7 @@ def run_one_direction_population(
         "delta_auc": (t["roc_auc"] - b["roc_auc"]) if (t["roc_auc"] is not None and b["roc_auc"] is not None) else None,
         "delta_pr_auc": (t["pr_auc"] - b["pr_auc"]) if (t["pr_auc"] is not None and b["pr_auc"] is not None) else None,
         "delta_brier": (t["brier_score"] - b["brier_score"]) if (t["brier_score"] is not None and b["brier_score"] is not None) else None,
+        "brier_improvement": (b["brier_score"] - t["brier_score"]) if (t["brier_score"] is not None and b["brier_score"] is not None) else None,
     }
 
     result["baseline_metrics"] = b
@@ -254,7 +259,26 @@ def run_one_direction_population(
 # =============================================================================
 # Orkestrasyon: iki yon x populasyonlar
 # =============================================================================
-def run_transfer(source_id: str, target_id: str, force: bool = False) -> dict:
+def _dataset_provenance(experiment_id: str) -> dict:
+    dataset_path = resolve_step8a_dataset_path(experiment_id)
+    manifest_path = resolve_step8a_stats_path(experiment_id)
+    contract, contract_errors = resolve_feature_contract(experiment_id)
+    if contract_errors:
+        raise Step9BError("; ".join(contract_errors))
+    return {
+        "experiment_id": experiment_id,
+        "dataset_path": str(dataset_path),
+        "dataset_sha256": sha256_file(dataset_path),
+        "step8a_manifest_path": str(manifest_path),
+        "step8a_manifest_sha256": sha256_file(manifest_path),
+        "feature_contract": contract,
+    }
+
+
+def run_transfer(
+    source_id: str, target_id: str, force: bool = False,
+    bidirectional: bool = True,
+) -> dict:
     output_dir = cross_region_output_root(source_id, target_id) / "step9b"
     metrics_path = output_dir / "cross_region_transfer_metrics.json"
     if metrics_path.exists() and not force:
@@ -265,7 +289,9 @@ def run_transfer(source_id: str, target_id: str, force: bool = False) -> dict:
     df_source = load_step8a_dataset(source_id)
     df_target = load_step8a_dataset(target_id)
 
-    directions = [(source_id, target_id), (target_id, source_id)]
+    directions = [(source_id, target_id)]
+    if bidirectional:
+        directions.append((target_id, source_id))
     dataset_by_id = {source_id: df_source, target_id: df_target}
 
     all_results = []
@@ -306,8 +332,39 @@ def run_transfer(source_id: str, target_id: str, force: bool = False) -> dict:
         "source_experiment_id": source_id,
         "target_experiment_id": target_id,
         "model_name": MODEL_NAME,
+        "model_parameters": build_pipeline(
+            SHARED_BASELINE_FEATURES, MODEL_NAME, STEP8B_RANDOM_SEED,
+        ).named_steps["clf"].get_params(deep=False),
+        "preprocessing_parameters": {
+            "numeric_imputation": "median",
+            "categorical_imputation": "most_frequent",
+            "categorical_encoding": "one_hot_handle_unknown_ignore",
+            "fit_region": "source_only",
+        },
         "random_seed": STEP8B_RANDOM_SEED,
+        "spatial_cv_n_splits_requested": STEP8B_N_SPLITS,
+        "minimum_positives_and_negatives_per_population": STEP8B_MIN_POSITIVES_PER_POPULATION,
+        "git_commit": resolve_git_commit(),
+        "resolved_inputs": {
+            source_id: _dataset_provenance(source_id),
+            target_id: _dataset_provenance(target_id),
+        },
+        "baseline_features": list(SHARED_BASELINE_FEATURES),
+        "thermal_model_features": list(SHARED_THERMAL_MODEL_FEATURES),
+        "population_definition": {
+            "valid_universe": "valid_for_modeling == True",
+            "primary": list(PRIMARY_POPULATIONS),
+            "secondary": list(SECONDARY_POPULATIONS),
+            "named_population_membership": "valid universe AND the named Step8A boolean population column",
+        },
         "spatial_block_size_cells": STEP8B_SPATIAL_BLOCK_SIZE_CELLS,
+        "spatial_block_definition": (
+            "block_row=floor(row_500m/spatial_block_size_cells); "
+            "block_col=floor(col_500m/spatial_block_size_cells); "
+            "spatial_block_id='<block_row>_<block_col>'; fixed origin (0,0)"
+        ),
+        "source_only": True,
+        "bidirectional": bidirectional,
         "primary_populations": PRIMARY_POPULATIONS,
         "secondary_populations": SECONDARY_POPULATIONS,
         "preprocessing_rule": (
@@ -416,18 +473,19 @@ def write_summary_md(metrics_payload: dict, output_dir: Path) -> Path:
         "",
         "## Results",
         "",
-        "| direction | population | skipped | target_prevalence | baseline_auc | thermal_auc | delta_auc | delta_pr_auc | delta_brier |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| direction | population | skipped | target_prevalence | baseline_auc | thermal_auc | delta_auc | delta_pr_auc | delta_brier | brier_improvement |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in metrics_payload["results"]:
         if r.get("skipped"):
-            lines.append(f"| {r['transfer_direction']} | {r['population']} | yes ({r.get('reason','')}) | - | - | - | - | - | - |")
+            lines.append(f"| {r['transfer_direction']} | {r['population']} | yes ({r.get('reason','')}) | - | - | - | - | - | - | - |")
             continue
         b, t, d = r["baseline_metrics"], r["thermal_metrics"], r["delta_metrics"]
         lines.append(
             f"| {r['transfer_direction']} | {r['population']} | no | "
             f"{r['target_burned_prevalence']:.4f} | {b['roc_auc']:.4f} | {t['roc_auc']:.4f} | "
-            f"{d['delta_auc']:.4f} | {d['delta_pr_auc']:.4f} | {d['delta_brier']:.4f} |"
+            f"{d['delta_auc']:.4f} | {d['delta_pr_auc']:.4f} | {d['delta_brier']:.4f} | "
+            f"{d['brier_improvement']:.4f} |"
         )
     lines.extend([
         "", "## Scope note", "",

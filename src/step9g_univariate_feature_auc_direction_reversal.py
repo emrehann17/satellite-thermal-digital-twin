@@ -2,7 +2,8 @@
 step9g_univariate_feature_auc_direction_reversal.py
 
 Step9G: preregistered UNIVARIATE feature-AUC direction-reversal diagnostic for
-the Manavgat 2021 <-> Bejis 2022 cross-region transfer study.
+an arbitrary source/target experiment pair. The original Manavgat 2021 <->
+Bejis 2022 namespace and frozen results remain compatible.
 
 SCIENTIFIC PURPOSE
 ------------------
@@ -64,6 +65,10 @@ from src.step8_large_block_robustness import (
     _package_versions,
 )
 from src.step8b_train_baseline_vs_thermal_model import add_spatial_block_id
+from src.step9a_audit_cross_region_inputs import (
+    resolve_feature_contract,
+    resolve_step8a_dataset_path,
+)
 
 log, log_file = setup_logger("step9g_univariate_feature_auc_direction_reversal")
 
@@ -117,6 +122,39 @@ OUTPUT_ROOT = (
 )
 
 
+def output_root_for(source_id: str, target_id: str) -> Path:
+    return (
+        PROJECT_ROOT / "outputs" / "diagnostics"
+        / "step9g_univariate_feature_auc_direction_reversal"
+        / f"{source_id}__{target_id}"
+    )
+
+
+def _pair_ids(source_id: str, target_id: str) -> tuple[str, str]:
+    if source_id == target_id:
+        raise Step9GError("--source and --target must be different experiment IDs.")
+    return source_id, target_id
+
+
+def validate_feature_contracts(source_id: str, target_id: str) -> dict[str, Any]:
+    source_contract, source_errors = resolve_feature_contract(source_id)
+    target_contract, target_errors = resolve_feature_contract(target_id)
+    errors = source_errors + target_errors
+    if source_contract != target_contract:
+        differing = sorted(
+            key for key in set(source_contract) | set(target_contract)
+            if source_contract.get(key) != target_contract.get(key)
+        )
+        errors.append(f"Source/target feature contracts differ: {differing}.")
+    if errors:
+        raise Step9GError(" ".join(errors))
+    required = set(NUMERIC_FEATURES) | {LANDCOVER_COLUMN}
+    missing = sorted(required - set(source_contract))
+    if missing:
+        raise Step9GError(f"Step9G feature contract is missing required features: {missing}.")
+    return source_contract
+
+
 class Step9GError(SystemExit):
     """Fail-fast error for Step9G (same convention as other steps)."""
 
@@ -126,12 +164,6 @@ class Step9GError(SystemExit):
 # =============================================================================
 def _cross_region_root(source_id: str, target_id: str) -> Path:
     return PROJECT_ROOT / "outputs" / "cross_region" / f"{source_id}__{target_id}"
-
-
-def resolve_step8a_dataset_path(experiment_id: str) -> Path:
-    from core.regions import get_experiment
-    namespace = get_experiment(experiment_id)["output_namespace"]
-    return PROJECT_ROOT / "outputs" / "experiments" / namespace / "step8a" / "step8a_500m_modeling_dataset.parquet"
 
 
 def step9e_dir(source_id: str, target_id: str) -> Path:
@@ -146,15 +178,15 @@ def step10_dir(source_id: str, target_id: str) -> Path:
     return _cross_region_root(source_id, target_id) / "step10"
 
 
-def _assert_output_namespace_isolated(path: Path) -> None:
+def _assert_output_namespace_isolated(path: Path, output_root: Path = OUTPUT_ROOT) -> None:
     """Every write MUST live under the Step9G diagnostics namespace, never in
     an existing Step9/Step10/experiment directory."""
     resolved = path.resolve()
-    allowed_root = OUTPUT_ROOT.resolve()
+    allowed_root = output_root.resolve()
     if allowed_root not in resolved.parents and resolved != allowed_root:
         raise Step9GError(
             f"Namespace isolation FAILED: '{path}' is outside the Step9G "
-            f"diagnostics namespace '{OUTPUT_ROOT}'."
+            f"diagnostics namespace '{output_root}'."
         )
     forbidden = ("cross_region", "step9e", "step9f", "step10", "step8b", "step8c")
     parts = set(resolved.parts)
@@ -176,19 +208,22 @@ def _hash_tree(root: Path) -> dict[str, str]:
     }
 
 
-def protected_paths() -> dict[str, Any]:
+def protected_paths(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> dict[str, Any]:
     """SHA-256 of every frozen file this analysis must never modify."""
     protected: dict[str, Any] = {"step8a_inputs": {}, "step9e_trees": {}, "step9f_trees": {}, "step10_trees": {}}
-    for experiment in EXPERIMENT_IDS:
+    experiment_ids = (source_id, target_id)
+    for experiment in experiment_ids:
         path = resolve_step8a_dataset_path(experiment)
         if not path.is_file():
             raise Step9GError(f"Frozen Step8A input not found for '{experiment}': {path}")
         protected["step8a_inputs"][experiment] = sha256_file(path)
-    for source_id, target_id in ((SOURCE_ID, TARGET_ID), (TARGET_ID, SOURCE_ID)):
-        key = f"{source_id}__{target_id}"
-        protected["step9e_trees"][key] = _hash_tree(step9e_dir(source_id, target_id))
-        protected["step9f_trees"][key] = _hash_tree(step9f_dir(source_id, target_id))
-        protected["step10_trees"][key] = _hash_tree(step10_dir(source_id, target_id))
+    for src_id, tgt_id in ((source_id, target_id), (target_id, source_id)):
+        key = f"{src_id}__{tgt_id}"
+        protected["step9e_trees"][key] = _hash_tree(step9e_dir(src_id, tgt_id))
+        protected["step9f_trees"][key] = _hash_tree(step9f_dir(src_id, tgt_id))
+        protected["step10_trees"][key] = _hash_tree(step10_dir(src_id, tgt_id))
     return protected
 
 
@@ -412,7 +447,7 @@ def _reversal_status(m: dict[str, Any], b: dict[str, Any]) -> str:
 
 
 def _contrast_ci(m_arr: np.ndarray, b_arr: np.ndarray) -> tuple[float | None, float | None, float | None]:
-    """Secondary contrast bejis - manavgat. The two regions were bootstrapped
+    """Secondary contrast target - source. The two regions were bootstrapped
     INDEPENDENTLY; replicate indices are paired only AFTER the independent
     draws exist (element-wise over the common valid count)."""
     if m_arr.size == 0 or b_arr.size == 0:
@@ -469,18 +504,20 @@ def _read_csv_if_exists(path: Path) -> pd.DataFrame | None:
         return None
 
 
-def step9e_feature_integration() -> pd.DataFrame:
+def step9e_feature_integration(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> pd.DataFrame:
     """Join available Step9E per-feature relationship-direction flags for the
     primary population, for BOTH transfer directions. Only fields that exist
     in the frozen CSV are surfaced; absent fields become None (never invented).
     """
     rows = []
-    for source_id, target_id in ((SOURCE_ID, TARGET_ID), (TARGET_ID, SOURCE_ID)):
-        flips = _read_csv_if_exists(step9e_dir(source_id, target_id) / "relationship_direction_flips.csv")
+    for src_id, tgt_id in ((source_id, target_id), (target_id, source_id)):
+        flips = _read_csv_if_exists(step9e_dir(src_id, tgt_id) / "relationship_direction_flips.csv")
         for feature in NUMERIC_FEATURES:
             record: dict[str, Any] = {
                 "feature": feature,
-                "step9e_direction": f"{source_id}__{target_id}",
+                "step9e_direction": f"{src_id}__{tgt_id}",
                 "step9e_available": flips is not None,
             }
             if flips is not None and "population" in flips.columns:
@@ -497,7 +534,9 @@ def step9e_feature_integration() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def step9f_model_level_integration() -> dict[str, Any]:
+def step9f_model_level_integration(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> dict[str, Any]:
     """Step9F is a MODEL/representation-level ranking-reversal experiment, not
     a per-feature diagnostic. Surface its manifest/screening at the model
     level in a SEPARATE section; do not fabricate a per-feature join."""
@@ -509,10 +548,10 @@ def step9f_model_level_integration() -> dict[str, Any]:
         ),
         "directions": {},
     }
-    for source_id, target_id in ((SOURCE_ID, TARGET_ID), (TARGET_ID, SOURCE_ID)):
-        key = f"{source_id}__{target_id}"
-        manifest = _read_json_if_exists(step9f_dir(source_id, target_id) / "step9f_experiment_manifest.json")
-        screening = _read_csv_if_exists(step9f_dir(source_id, target_id) / "exploratory_candidate_screening.csv")
+    for src_id, tgt_id in ((source_id, target_id), (target_id, source_id)):
+        key = f"{src_id}__{tgt_id}"
+        manifest = _read_json_if_exists(step9f_dir(src_id, tgt_id) / "step9f_experiment_manifest.json")
+        screening = _read_csv_if_exists(step9f_dir(src_id, tgt_id) / "exploratory_candidate_screening.csv")
         payload["directions"][key] = {
             "step9f_available": manifest is not None or screening is not None,
             "manifest_analysis_id": (manifest or {}).get("analysis_id") if manifest else None,
@@ -521,14 +560,16 @@ def step9f_model_level_integration() -> dict[str, Any]:
     return payload
 
 
-def step10_transfer_summary() -> dict[str, Any]:
+def step10_transfer_summary(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> dict[str, Any]:
     """Read frozen Step10 final report(s) for the integrated interpretation
     (raw vs adapted transfer discrimination). Read-only; fields surfaced only
     if present."""
     summary: dict[str, Any] = {"directions": {}}
-    for source_id, target_id in ((SOURCE_ID, TARGET_ID), (TARGET_ID, SOURCE_ID)):
-        key = f"{source_id}__{target_id}"
-        report = _read_json_if_exists(step10_dir(source_id, target_id) / "step10_final_report.json")
+    for src_id, tgt_id in ((source_id, target_id), (target_id, source_id)):
+        key = f"{src_id}__{tgt_id}"
+        report = _read_json_if_exists(step10_dir(src_id, tgt_id) / "step10_final_report.json")
         summary["directions"][key] = {
             "step10_available": report is not None,
             "analysis_id": (report or {}).get("analysis_id") if report else None,
@@ -539,10 +580,19 @@ def step10_transfer_summary() -> dict[str, Any]:
 # =============================================================================
 # Preregistration / analysis_id
 # =============================================================================
-def scientific_configuration(protected: dict[str, Any]) -> dict[str, Any]:
+def scientific_configuration(
+    protected: dict[str, Any], source_id: str = SOURCE_ID,
+    target_id: str = TARGET_ID, output_root: Path = OUTPUT_ROOT,
+) -> dict[str, Any]:
+    legacy_pair = (source_id, target_id) == (SOURCE_ID, TARGET_ID)
+    secondary_contrast = (
+        "auc_difference_bejis_minus_manavgat with independent regional draws paired by replicate index post hoc; non-zero contrast alone is NOT a reversal"
+        if legacy_pair else
+        f"auc_difference_{target_id}_minus_{source_id} with independent regional draws paired by replicate index post hoc; non-zero contrast alone is NOT a reversal"
+    )
     return {
         "schema_version": SCHEMA_VERSION,
-        "experiment_ids": list(EXPERIMENT_IDS),
+        "experiment_ids": [source_id, target_id],
         "primary_population": PRIMARY_POPULATION,
         "target": TARGET_COLUMN,
         "numeric_features_in_order": list(NUMERIC_FEATURES),
@@ -576,9 +626,9 @@ def scientific_configuration(protected: dict[str, Any]) -> dict[str, Any]:
             "no_direction_reversal",
             "unavailable",
         ],
-        "secondary_contrast": "auc_difference_bejis_minus_manavgat with independent regional draws paired by replicate index post hoc; non-zero contrast alone is NOT a reversal",
+        "secondary_contrast": secondary_contrast,
         "step9e_step9f_integration_policy": "read-only; surface only existing fields; Step9F is model-level only; never fabricate per-feature joins",
-        "output_namespace": str(OUTPUT_ROOT),
+        "output_namespace": str(output_root),
         "frozen_input_hashes": protected["step8a_inputs"],
         "frozen_reference_file_counts": {
             "step9e": {k: len(v) for k, v in protected["step9e_trees"].items()},
@@ -595,8 +645,11 @@ def scientific_configuration(protected: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_manifest(protected: dict[str, Any]) -> dict[str, Any]:
-    config = scientific_configuration(protected)
+def build_manifest(
+    protected: dict[str, Any], source_id: str = SOURCE_ID,
+    target_id: str = TARGET_ID, output_root: Path = OUTPUT_ROOT,
+) -> dict[str, Any]:
+    config = scientific_configuration(protected, source_id, target_id, output_root)
     analysis_id = sha256_bytes(canonical_json(config).encode("utf-8"))
     return {
         "analysis_id": analysis_id,
@@ -612,7 +665,7 @@ def _preregistration_md(manifest: dict[str, Any]) -> str:
         "",
         f"- analysis_id: `{manifest['analysis_id']}`",
         f"- created_at: {manifest['created_at']}",
-        f"- experiments: {list(EXPERIMENT_IDS)}",
+        f"- experiments: {config['experiment_ids']}",
         f"- primary population: {PRIMARY_POPULATION}",
         f"- target: {TARGET_COLUMN}",
         f"- numeric features (fixed order): {list(NUMERIC_FEATURES)}",
@@ -627,10 +680,13 @@ def _preregistration_md(manifest: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def validate_or_write_preregistration(output_root: Path, protected: dict[str, Any], force: bool = False) -> dict[str, Any]:
+def validate_or_write_preregistration(
+    output_root: Path, protected: dict[str, Any], force: bool = False,
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> dict[str, Any]:
     json_path = output_root / "step9g_preregistration.json"
     md_path = output_root / "step9g_preregistration.md"
-    expected = scientific_configuration(protected)
+    expected = scientific_configuration(protected, source_id, target_id, output_root)
     expected_id = sha256_bytes(canonical_json(expected).encode("utf-8"))
     if json_path.exists():
         existing = json.loads(json_path.read_text(encoding="utf-8"))
@@ -642,8 +698,8 @@ def validate_or_write_preregistration(output_root: Path, protected: dict[str, An
     if md_path.exists():
         raise Step9GError("Step9G Markdown preregistration exists without its JSON manifest.")
     output_root.mkdir(parents=True, exist_ok=True)
-    _assert_output_namespace_isolated(json_path)
-    manifest = build_manifest(protected)
+    _assert_output_namespace_isolated(json_path, output_root)
+    manifest = build_manifest(protected, source_id, target_id, output_root)
     json_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
     md_path.write_text(_preregistration_md(manifest), encoding="utf-8")
     return manifest
@@ -652,7 +708,16 @@ def validate_or_write_preregistration(output_root: Path, protected: dict[str, An
 # =============================================================================
 # Plot
 # =============================================================================
-def make_direction_plot(reversal_rows: list[dict[str, Any]], output_root: Path) -> Path | None:
+def _region_output_key(experiment_id: str, source_id: str, target_id: str) -> str:
+    if (source_id, target_id) == (SOURCE_ID, TARGET_ID):
+        return "manavgat" if experiment_id == source_id else "bejis"
+    return experiment_id
+
+
+def make_direction_plot(
+    reversal_rows: list[dict[str, Any]], output_root: Path,
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> Path | None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -660,7 +725,12 @@ def make_direction_plot(reversal_rows: list[dict[str, Any]], output_root: Path) 
     features = [r["feature"] for r in reversal_rows]
     y_pos = np.arange(len(features))[::-1]  # frozen order top-to-bottom
     fig, ax = plt.subplots(figsize=(9, 6))
-    for offset, region, color in ((0.12, "manavgat", "#1f77b4"), (-0.12, "bejis", "#d62728")):
+    source_key = _region_output_key(source_id, source_id, target_id)
+    target_key = _region_output_key(target_id, source_id, target_id)
+    for offset, region, label, color in (
+        (0.12, source_key, source_id, "#1f77b4"),
+        (-0.12, target_key, target_id, "#d62728"),
+    ):
         aucs = [r[f"{region}_auc"] for r in reversal_rows]
         los = [r[f"{region}_ci_low"] for r in reversal_rows]
         his = [r[f"{region}_ci_high"] for r in reversal_rows]
@@ -669,7 +739,7 @@ def make_direction_plot(reversal_rows: list[dict[str, Any]], output_root: Path) 
                 continue
             if lo is not None and hi is not None:
                 ax.plot([lo, hi], [yp + offset, yp + offset], color=color, alpha=0.6, lw=2)
-            ax.plot(auc, yp + offset, "o", color=color, label=region if i == 0 else None)
+            ax.plot(auc, yp + offset, "o", color=color, label=label if i == 0 else None)
     for i, r in enumerate(reversal_rows):
         if r["point_direction_reversal"]:
             ax.annotate("reversal", (0.5, y_pos[i]), color="black", fontsize=8, ha="center", va="bottom")
@@ -681,7 +751,7 @@ def make_direction_plot(reversal_rows: list[dict[str, Any]], output_root: Path) 
     ax.legend(loc="lower right")
     fig.tight_layout()
     path = output_root / "step9g_auc_direction_plot.png"
-    _assert_output_namespace_isolated(path)
+    _assert_output_namespace_isolated(path, output_root)
     fig.savefig(path, dpi=140)
     plt.close(fig)
     return path
@@ -690,21 +760,29 @@ def make_direction_plot(reversal_rows: list[dict[str, Any]], output_root: Path) 
 # =============================================================================
 # Dry run
 # =============================================================================
-def dry_run() -> dict[str, Any]:
-    protected = protected_paths()
+def dry_run(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+    output_root: Path | None = None,
+) -> dict[str, Any]:
+    _pair_ids(source_id, target_id)
+    output_root = output_root_for(source_id, target_id) if output_root is None else output_root
+    feature_contract = validate_feature_contracts(source_id, target_id)
+    protected = protected_paths(source_id, target_id)
+    experiment_ids = (source_id, target_id)
     return {
         "mode": "dry_run",
         "computes_auc": False, "runs_bootstrap": False, "writes_files": False,
-        "experiment_ids": list(EXPERIMENT_IDS),
+        "experiment_ids": list(experiment_ids),
         "primary_population": PRIMARY_POPULATION,
         "numeric_features_in_order": list(NUMERIC_FEATURES),
         "block_size_cells": BLOCK_SIZE_CELLS,
         "bootstrap": {"replicates": BOOTSTRAP_REPLICATES, "seed": BOOTSTRAP_SEED},
-        "resolved_step8a_inputs": {e: str(resolve_step8a_dataset_path(e)) for e in EXPERIMENT_IDS},
-        "frozen_step9e_refs": {f"{s}__{t}": str(step9e_dir(s, t)) for s, t in ((SOURCE_ID, TARGET_ID), (TARGET_ID, SOURCE_ID))},
-        "frozen_step9f_refs": {f"{s}__{t}": str(step9f_dir(s, t)) for s, t in ((SOURCE_ID, TARGET_ID), (TARGET_ID, SOURCE_ID))},
-        "frozen_step10_refs": {f"{s}__{t}": str(step10_dir(s, t)) for s, t in ((SOURCE_ID, TARGET_ID), (TARGET_ID, SOURCE_ID))},
-        "output_namespace": str(OUTPUT_ROOT),
+        "resolved_step8a_inputs": {e: str(resolve_step8a_dataset_path(e)) for e in experiment_ids},
+        "feature_contract": feature_contract,
+        "frozen_step9e_refs": {f"{s}__{t}": str(step9e_dir(s, t)) for s, t in ((source_id, target_id), (target_id, source_id))},
+        "frozen_step9f_refs": {f"{s}__{t}": str(step9f_dir(s, t)) for s, t in ((source_id, target_id), (target_id, source_id))},
+        "frozen_step10_refs": {f"{s}__{t}": str(step10_dir(s, t)) for s, t in ((source_id, target_id), (target_id, source_id))},
+        "output_namespace": str(output_root),
         "protected_step8a_input_count": len(protected["step8a_inputs"]),
     }
 
@@ -724,19 +802,42 @@ CLAIM_BOUNDARY_TEXT = (
 # =============================================================================
 # Main orchestration
 # =============================================================================
-def run_analysis(dry: bool = False, force: bool = False, output_root: Path | None = None) -> dict[str, Any]:
-    output_root = OUTPUT_ROOT if output_root is None else output_root
+def run_analysis(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+    dry: bool = False, force: bool = False, output_root: Path | None = None,
+) -> dict[str, Any]:
+    _pair_ids(source_id, target_id)
+    output_root = output_root_for(source_id, target_id) if output_root is None else output_root
     if dry:
-        return dry_run()
+        return dry_run(source_id, target_id, output_root)
 
-    before = protected_paths()
-    manifest = validate_or_write_preregistration(output_root, before, force)
+    final_report_path = output_root / "step9g_final_report.json"
+    if final_report_path.is_file() and not force:
+        existing = json.loads(final_report_path.read_text(encoding="utf-8"))
+        return {
+            "ran": False,
+            "reason": "pair_outputs_already_exist_use_force",
+            "analysis_id": existing.get("analysis_id"),
+            "source_experiment_id": source_id,
+            "target_experiment_id": target_id,
+            "output_root": str(output_root),
+        }
+
+    feature_contract = validate_feature_contracts(source_id, target_id)
+    before = protected_paths(source_id, target_id)
+    manifest = validate_or_write_preregistration(
+        output_root, before, force, source_id, target_id,
+    )
     analysis_id = manifest["analysis_id"]
+    experiment_ids = (source_id, target_id)
 
     # --- load + population audit ---
     populations: dict[str, pd.DataFrame] = {}
-    input_audit: dict[str, Any] = {"analysis_id": analysis_id, "regions": {}}
-    for experiment in EXPERIMENT_IDS:
+    input_audit: dict[str, Any] = {
+        "analysis_id": analysis_id, "regions": {},
+        "feature_contract": feature_contract,
+    }
+    for experiment in experiment_ids:
         pop = assign_blocks_then_filter(load_step8a(experiment), experiment)
         populations[experiment] = pop
         input_audit["regions"][experiment] = validate_population(pop, experiment)
@@ -745,7 +846,7 @@ def run_analysis(dry: bool = False, force: bool = False, output_root: Path | Non
     auc_rows: list[dict[str, Any]] = []
     replicate_records: list[dict[str, Any]] = []
     boot_cache: dict[tuple[str, str], dict[str, Any]] = {}
-    for experiment in EXPERIMENT_IDS:
+    for experiment in experiment_ids:
         pop = populations[experiment]
         for feature in NUMERIC_FEATURES:
             stats = univariate_feature_stats(pop, feature)
@@ -768,43 +869,66 @@ def run_analysis(dry: bool = False, force: bool = False, output_root: Path | Non
 
     # --- direction reversal table (per feature, across regions) ---
     reversal_rows: list[dict[str, Any]] = []
-    step9e_join = step9e_feature_integration()
+    step9e_join = step9e_feature_integration(source_id, target_id)
+    pair_token = f"{source_id}__{target_id}"
+    source_key = _region_output_key(source_id, source_id, target_id)
+    target_key = _region_output_key(target_id, source_id, target_id)
+    contrast_key = (
+        "auc_difference_bejis_minus_manavgat"
+        if (source_id, target_id) == (SOURCE_ID, TARGET_ID)
+        else "auc_difference_target_minus_source"
+    )
+    claim_boundary = (
+        CLAIM_BOUNDARY_TEXT
+        if (source_id, target_id) == (SOURCE_ID, TARGET_ID)
+        else (
+            "Feature-level univariate AUC direction reversals indicate that marginal "
+            "feature-label relationships are not stable across the selected regions, "
+            "a pattern consistent with concept/relationship shift. Target labels are "
+            "used only for this diagnostic evaluation. This does NOT prove causality "
+            "or establish concept shift as the only transfer-failure mechanism; AUC "
+            "below 0.5 is a direction and is never inverted."
+        )
+    )
     for feature in NUMERIC_FEATURES:
-        m = boot_cache[(SOURCE_ID, feature)]
-        b = boot_cache[(TARGET_ID, feature)]
-        status = _reversal_status(m, b)
-        diff, diff_lo, diff_hi = _contrast_ci(m["replicate_aucs"], b["replicate_aucs"])
+        source_boot = boot_cache[(source_id, feature)]
+        target_boot = boot_cache[(target_id, feature)]
+        status = _reversal_status(source_boot, target_boot)
+        diff, diff_lo, diff_hi = _contrast_ci(
+            source_boot["replicate_aucs"], target_boot["replicate_aucs"],
+        )
         e_flag = None
-        sub = step9e_join[(step9e_join["feature"] == feature) & (step9e_join["step9e_direction"] == PAIR_TOKEN)]
+        sub = step9e_join[(step9e_join["feature"] == feature) & (step9e_join["step9e_direction"] == pair_token)]
         if not sub.empty and "step9e_rank_effect_direction_flip" in sub.columns:
             e_flag = sub.iloc[0].get("step9e_rank_effect_direction_flip")
         reversal_rows.append({
             "feature": feature,
-            "manavgat_auc": m["point_auc"], "manavgat_ci_low": m["ci_low"], "manavgat_ci_high": m["ci_high"],
-            "manavgat_direction": _direction_label(m["point_auc"]),
-            "manavgat_support_status": _support_status(m["ci_low"], m["ci_high"], m["stable"]),
-            "bejis_auc": b["point_auc"], "bejis_ci_low": b["ci_low"], "bejis_ci_high": b["ci_high"],
-            "bejis_direction": _direction_label(b["point_auc"]),
-            "bejis_support_status": _support_status(b["ci_low"], b["ci_high"], b["stable"]),
-            "auc_difference_bejis_minus_manavgat": diff,
+            "source_experiment_id": source_id, "target_experiment_id": target_id,
+            f"{source_key}_auc": source_boot["point_auc"], f"{source_key}_ci_low": source_boot["ci_low"], f"{source_key}_ci_high": source_boot["ci_high"],
+            f"{source_key}_direction": _direction_label(source_boot["point_auc"]),
+            f"{source_key}_support_status": _support_status(source_boot["ci_low"], source_boot["ci_high"], source_boot["stable"]),
+            f"{target_key}_auc": target_boot["point_auc"], f"{target_key}_ci_low": target_boot["ci_low"], f"{target_key}_ci_high": target_boot["ci_high"],
+            f"{target_key}_direction": _direction_label(target_boot["point_auc"]),
+            f"{target_key}_support_status": _support_status(target_boot["ci_low"], target_boot["ci_high"], target_boot["stable"]),
+            contrast_key: diff,
             "auc_difference_ci_low": diff_lo, "auc_difference_ci_high": diff_hi,
-            "point_direction_reversal": _point_direction_reversal(m["point_auc"], b["point_auc"]),
+            "point_direction_reversal": _point_direction_reversal(source_boot["point_auc"], target_boot["point_auc"]),
             "reversal_status": status,
             "step9e_relationship_direction_flag": e_flag,
-            "integrated_interpretation": CLAIM_BOUNDARY_TEXT,
+            "integrated_interpretation": claim_boundary,
         })
 
     # --- landcover descriptive ---
     landcover_df = pd.concat(
-        [landcover_descriptive(populations[e], e) for e in EXPERIMENT_IDS], ignore_index=True
-    ) if all(LANDCOVER_COLUMN in populations[e].columns for e in EXPERIMENT_IDS) else pd.DataFrame()
+        [landcover_descriptive(populations[e], e) for e in experiment_ids], ignore_index=True
+    ) if all(LANDCOVER_COLUMN in populations[e].columns for e in experiment_ids) else pd.DataFrame()
 
     # --- write outputs (namespace-isolated) ---
     output_root.mkdir(parents=True, exist_ok=True)
 
     def _write(name: str, writer) -> Path:
         path = output_root / name
-        _assert_output_namespace_isolated(path)
+        _assert_output_namespace_isolated(path, output_root)
         writer(path)
         return path
 
@@ -817,12 +941,12 @@ def run_analysis(dry: bool = False, force: bool = False, output_root: Path | Non
     _write("step9g_direction_reversal_table.csv", lambda p: reversal_df.to_csv(p, index=False))
     _write("step9g_bootstrap_replicates.parquet", lambda p: replicate_df.to_parquet(p, index=False))
     _write("step9g_step9e_feature_integration.csv", lambda p: step9e_join.to_csv(p, index=False))
-    step9f_payload = step9f_model_level_integration()
+    step9f_payload = step9f_model_level_integration(source_id, target_id)
     _write("step9g_step9f_model_level_integration.json", lambda p: p.write_text(json.dumps(step9f_payload, indent=2, default=str) + "\n"))
     if not landcover_df.empty:
         _write("step9g_landcover_descriptive.csv", lambda p: landcover_df.to_csv(p, index=False))
 
-    plot_path = make_direction_plot(reversal_rows, output_root)
+    plot_path = make_direction_plot(reversal_rows, output_root, source_id, target_id)
 
     supported = [r["feature"] for r in reversal_rows if r["reversal_status"] == "bootstrap_supported_direction_reversal"]
     uncertain = [r["feature"] for r in reversal_rows if r["reversal_status"] == "point_direction_reversal_interval_uncertain"]
@@ -831,6 +955,8 @@ def run_analysis(dry: bool = False, force: bool = False, output_root: Path | Non
     final_report = {
         "analysis_id": analysis_id,
         "schema_version": SCHEMA_VERSION,
+        "source_experiment_id": source_id,
+        "target_experiment_id": target_id,
         "primary_population": PRIMARY_POPULATION,
         "input_audit": input_audit["regions"],
         "direction_reversal_table": reversal_rows,
@@ -839,7 +965,7 @@ def run_analysis(dry: bool = False, force: bool = False, output_root: Path | Non
         "same_direction_features": same_dir,
         "landcover_exclusion_reason": LANDCOVER_EXCLUSION_REASON,
         "step9f_model_level_integration": step9f_payload,
-        "step10_transfer_summary": step10_transfer_summary(),
+        "step10_transfer_summary": step10_transfer_summary(source_id, target_id),
         "answers": {
             "which_features_reverse": [r["feature"] for r in reversal_rows if r["point_direction_reversal"]],
             "which_reversals_bootstrap_supported": supported,
@@ -849,12 +975,14 @@ def run_analysis(dry: bool = False, force: bool = False, output_root: Path | Non
                 if r["step9e_relationship_direction_flag"] and r["point_direction_reversal"]
             ],
         },
-        "claim_boundary": CLAIM_BOUNDARY_TEXT,
+        "claim_boundary": claim_boundary,
     }
     _write("step9g_final_report.json", lambda p: p.write_text(json.dumps(final_report, indent=2, default=str) + "\n"))
-    _write("step9g_final_report.md", lambda p: p.write_text(_final_report_md(final_report, reversal_rows), encoding="utf-8"))
+    _write("step9g_final_report.md", lambda p: p.write_text(
+        _final_report_md(final_report, reversal_rows, source_id, target_id), encoding="utf-8",
+    ))
 
-    after = protected_paths()
+    after = protected_paths(source_id, target_id)
     assert_protected_unchanged(before, after)
 
     return {
@@ -869,17 +997,25 @@ def run_analysis(dry: bool = False, force: bool = False, output_root: Path | Non
     }
 
 
-def _final_report_md(report: dict[str, Any], reversal_rows: list[dict[str, Any]]) -> str:
+def _final_report_md(
+    report: dict[str, Any], reversal_rows: list[dict[str, Any]],
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> str:
     def _fmt(v):
         return "n/a" if v is None else (f"{v:.4f}" if isinstance(v, float) else str(v))
+    source_key = _region_output_key(source_id, source_id, target_id)
+    target_key = _region_output_key(target_id, source_id, target_id)
     header = [
-        "feature", "manavgat_auc", "manavgat_ci", "manavgat_direction",
-        "bejis_auc", "bejis_ci", "bejis_direction", "direction_reversal_status", "step9_diagnostic_concordance",
+        "feature", f"{source_key}_auc", f"{source_key}_ci", f"{source_key}_direction",
+        f"{target_key}_auc", f"{target_key}_ci", f"{target_key}_direction",
+        "direction_reversal_status", "step9_diagnostic_concordance",
     ]
     lines = [
         "# Step9G Univariate Feature-AUC Direction-Reversal -- Final Report",
         "",
         f"- analysis_id: `{report['analysis_id']}`",
+        f"- source: `{source_id}`",
+        f"- target: `{target_id}`",
         f"- primary population: {PRIMARY_POPULATION}",
         f"- protected frozen inputs/references: unchanged",
         "",
@@ -888,14 +1024,15 @@ def _final_report_md(report: dict[str, Any], reversal_rows: list[dict[str, Any]]
     ]
     for r in reversal_rows:
         lines.append("| " + " | ".join([
-            r["feature"], _fmt(r["manavgat_auc"]),
-            f"[{_fmt(r['manavgat_ci_low'])}, {_fmt(r['manavgat_ci_high'])}]", r["manavgat_direction"],
-            _fmt(r["bejis_auc"]), f"[{_fmt(r['bejis_ci_low'])}, {_fmt(r['bejis_ci_high'])}]", r["bejis_direction"],
+            r["feature"], _fmt(r[f"{source_key}_auc"]),
+            f"[{_fmt(r[f'{source_key}_ci_low'])}, {_fmt(r[f'{source_key}_ci_high'])}]", r[f"{source_key}_direction"],
+            _fmt(r[f"{target_key}_auc"]),
+            f"[{_fmt(r[f'{target_key}_ci_low'])}, {_fmt(r[f'{target_key}_ci_high'])}]", r[f"{target_key}_direction"],
             r["reversal_status"], _fmt(r["step9e_relationship_direction_flag"]),
         ]) + " |")
     lines += [
         "",
-        "## Which features reverse direction between Manavgat and Bejis?",
+        f"## Which features reverse direction between {source_id} and {target_id}?",
         f"{report['answers']['which_features_reverse'] or 'none'}",
         "",
         "## Which reversals are bootstrap-supported?",
@@ -916,6 +1053,8 @@ def _final_report_md(report: dict[str, Any], reversal_rows: list[dict[str, Any]]
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Step9G univariate feature-AUC direction-reversal diagnostic.")
+    parser.add_argument("--source", required=True, help="Source experiment ID.")
+    parser.add_argument("--target", required=True, help="Target experiment ID.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true")
     return parser
@@ -923,7 +1062,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def cli(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    result = run_analysis(dry=args.dry_run, force=args.force)
+    result = run_analysis(
+        source_id=args.source, target_id=args.target,
+        dry=args.dry_run, force=args.force,
+    )
     print(json.dumps(result, indent=2, default=str))
     return 0
 

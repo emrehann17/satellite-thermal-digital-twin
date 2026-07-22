@@ -111,11 +111,17 @@ EPILOG_EXAMPLES = """\
   python scripts/main.py large-block-robustness --dry-run
   python scripts/main.py large-block-robustness --run-large-block-fit --force
 
+  # single-experiment Step8 big-spatial-block robustness (any experiment_id)
+  python scripts/main.py step8-big-block-robustness \\
+    --experiment mugla_2021 --block-sizes 10 20 --dry-run
+  python scripts/main.py step8-big-block-robustness \\
+    --experiment mugla_2021 --block-sizes 10 20 --force
+
   # Step9G concept/relationship-shift diagnostic (COMPUTES metrics)
-  python scripts/main.py concept-shift --force
+  python scripts/main.py concept-shift --source manavgat_2021 --target bejis_2022 --force
 
   # Step9G canonical integration-v2 report (REPORT-ONLY; recomputes nothing)
-  python scripts/main.py concept-shift --integration-only --force
+  python scripts/main.py concept-shift --source manavgat_2021 --target bejis_2022 --integration-only --force
 
   # legacy Kozan (Google Drive tabanlı) tam pipeline
   python scripts/main.py legacy --experiment kozan_2023 --force
@@ -268,14 +274,35 @@ def cmd_large_block_robustness(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_step8_big_block_robustness(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_step8_big_block_robustness_stage(
+            experiment=args.experiment,
+            block_sizes=args.block_sizes,
+            dry_run=args.dry_run,
+            force=args.force,
+            regenerate_reports_only=args.regenerate_reports_only,
+        )
+    except SystemExit as exc:
+        return _fail("step8-big-block-robustness", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("step8-big-block-robustness", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info("[step8-big-block-robustness] tamamlandı: ran=%s", result.get("ran"))
+    return 0
+
+
 def cmd_concept_shift(args: argparse.Namespace) -> int:
     try:
         if args.integration_only:
             result = orch.run_concept_shift_integration_stage(
+                source_id=args.source, target_id=args.target,
                 dry_run=args.dry_run, force=args.force,
             )
         else:
             result = orch.run_concept_shift_stage(
+                source_id=args.source, target_id=args.target,
                 dry_run=args.dry_run, force=args.force,
             )
     except SystemExit as exc:
@@ -285,6 +312,22 @@ def cmd_concept_shift(args: argparse.Namespace) -> int:
     if args.dry_run:
         print(json.dumps(result, indent=2, default=str))
     log.info("[concept-shift] tamamlandı (integration_only=%s): ran=%s", args.integration_only, result.get("ran"))
+    return 0
+
+
+def cmd_transfer_synthesis(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_multi_aoi_transfer_synthesis_stage(
+            aois=args.aoi, dry_run=args.dry_run, force=args.force,
+            output_root=args.output_root,
+        )
+    except SystemExit as exc:
+        return _fail("transfer-synthesis", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("transfer-synthesis", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info("[transfer-synthesis] tamamlandı: ran=%s canonical_set_id=%s", result.get("ran"), result.get("canonical_set_id"))
     return 0
 
 
@@ -354,7 +397,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=EPILOG_EXAMPLES,
     )
-    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,step10,step8-robustness,large-block-robustness,concept-shift,legacy}")
+    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,step10,step8-robustness,large-block-robustness,step8-big-block-robustness,concept-shift,legacy}")
 
     # --- experiment ---
     p_exp = subparsers.add_parser(
@@ -549,13 +592,50 @@ def build_parser() -> argparse.ArgumentParser:
     p_large_block.add_argument("--dry-run", action="store_true", help="Dondurulmuş planı çöz ve bas; fit/bootstrap yapma, bilimsel çıktı yazma.")
     p_large_block.set_defaults(func=cmd_large_block_robustness)
 
+    # --- step8-big-block-robustness ---
+    p_big_block = subparsers.add_parser(
+        "step8-big-block-robustness",
+        help="Single-experiment Step8 big-spatial-block robustness (10/20 cells; COMPUTES metrics).",
+        description=(
+            "Scientific purpose: test whether a single experiment's existing "
+            "within-region Step8B/Step8C thermal contribution (population "
+            "burnable_tree_shrub_grass) survives predefined larger spatial "
+            "validation blocks (default 10 cells ~5 km, 20 cells ~10 km), "
+            "compared read-only against the existing small-block (2-cell) "
+            "result. Reuses step8b.train_population/add_spatial_block_id "
+            "unmodified (no independent OOF algorithm). Never regenerates "
+            "Step8A or overwrites existing Step8B/C/E outputs -- writes only "
+            "under outputs/experiments/<experiment>/robustness/step8_big_blocks/. "
+            "Takes --experiment as a plain argument; no AOI is hard-coded. "
+            "Delegates to scripts/run_step8_big_block_robustness.py."
+        ),
+    )
+    p_big_block.add_argument("--experiment", required=True, help="core/regions.py EXPERIMENTS kaydındaki experiment_id.")
+    p_big_block.add_argument("--block-sizes", nargs="+", type=int, default=[10, 20], help="Büyük blok boyutları (500m hücre cinsinden; varsayılan: 10 20).")
+    p_big_block.add_argument("--force", action="store_true", help="Yalnızca downstream robustness çıktılarını üzerine yaz; preregistration'ı veya orijinal Step8 çıktılarını asla yeniden yazma.")
+    p_big_block.add_argument("--dry-run", action="store_true", help="Dondurulmuş planı çöz ve bas; fit/bootstrap yapma, bilimsel çıktı yazma.")
+    p_big_block.add_argument(
+        "--regenerate-reports-only", action="store_true",
+        help=(
+            "Rapor-only mod: yalnızca önceki tam çalıştırmanın dondurulmuş "
+            "JSON/Parquet çıktılarını (step8b_metrics.json, "
+            "bootstrap_summary.json, fold_assignments.parquet) okur ve "
+            "JSON/Markdown/CSV/manifest raporlarını güncel şemayla yeniden "
+            "üretir. Model fit, fold oluşturma, tahmin üretimi veya "
+            "bootstrap örnekleme ASLA çalıştırılmaz; oof_predictions.parquet, "
+            "fold_assignments.parquet ve bootstrap_replicates.parquet asla "
+            "yazılmaz."
+        ),
+    )
+    p_big_block.set_defaults(func=cmd_step8_big_block_robustness)
+
     # --- concept-shift ---
     p_concept = subparsers.add_parser(
         "concept-shift",
         help="Step9G univariate feature-AUC direction-reversal concept/relationship-shift diagnostic.",
         description=(
             "Scientific purpose: per-feature univariate burned ROC-AUC "
-            "direction-reversal diagnostic between manavgat_2021 and bejis_2022, "
+            "direction-reversal diagnostic between a selected source/target pair, "
             "as evidence consistent with residual concept/relationship shift "
             "(not causal proof; not the only transfer-failure source). "
             "Population: burnable_tree_shrub_grass (the primary cross-region "
@@ -569,6 +649,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Delegates to the Step9G module and its integration-v2 module."
         ),
     )
+    p_concept.add_argument("--source", required=True, help="Source experiment ID.")
+    p_concept.add_argument("--target", required=True, help="Target experiment ID.")
     p_concept.add_argument(
         "--integration-only", action="store_true",
         help=(
@@ -576,12 +658,42 @@ def build_parser() -> argparse.ArgumentParser:
             "integration-v2 raporunu üret (frozen Step9G çıktılarını birebir "
             "kullanır). Çıktı: outputs/diagnostics/"
             "step9g_univariate_feature_auc_direction_reversal_integration_v2/"
-            "manavgat_2021__bejis_2022/."
+            "<source>__<target>/."
         ),
     )
     p_concept.add_argument("--force", action="store_true", help="İlgili çıktılar zaten varsa üzerine yaz (orijinal frozen Step9G sayısal çıktıları HARİÇ -- onlar değişmez).")
     p_concept.add_argument("--dry-run", action="store_true", help="Hiçbir AUC/bootstrap hesaplama, hiçbir dosya yazma; yalnızca planı bas.")
     p_concept.set_defaults(func=cmd_concept_shift)
+
+    # --- transfer-synthesis ---
+    p_transfer_synthesis = subparsers.add_parser(
+        "transfer-synthesis",
+        help="Generic, REPORT-ONLY multi-AOI (2-5) cross-region transfer synthesis.",
+        description=(
+            "Scientific purpose: synthesize a generic cross-AOI report from "
+            "already-frozen Step8/Step9B-G/Step10 outputs for a caller-supplied "
+            "set of 2-5 AOI experiment IDs (--aoi, repeatable). REPORT-ONLY -- "
+            "never runs modeling, adaptation, prediction, bootstrap, or any "
+            "scientific analysis; only reads frozen JSON/CSV/parquet outputs "
+            "and writes a JSON/Markdown report plus 3 CSV tables and a "
+            "manifest under outputs/diagnostics/multi_aoi_transfer_synthesis/"
+            "<canonical_set_id>/ (or --output-root, if supplied). No AOI name, "
+            "path, or pair is hard-coded: directions/pairs are generated "
+            "programmatically from the supplied --aoi list. "
+            "Delegates to src/multi_aoi_transfer_synthesis/."
+        ),
+    )
+    p_transfer_synthesis.add_argument(
+        "--aoi", action="append", required=True, dest="aoi",
+        help="AOI experiment ID (core/regions.py EXPERIMENTS kaydı). En az 2, en fazla 5 kez tekrarlanabilir.",
+    )
+    p_transfer_synthesis.add_argument(
+        "--output-root", default=None,
+        help="Varsayılan outputs/diagnostics/multi_aoi_transfer_synthesis/ kökü yerine kullanılacak kök dizin.",
+    )
+    p_transfer_synthesis.add_argument("--force", action="store_true", help="Çıktı dizini zaten doluysa üzerine yaz.")
+    p_transfer_synthesis.add_argument("--dry-run", action="store_true", help="Hiçbir dosya yazma; yalnızca çözümlenen plan/girdileri (ve varsa eksik/çelişkili girdileri) bas.")
+    p_transfer_synthesis.set_defaults(func=cmd_transfer_synthesis)
 
     # --- legacy ---
     p_legacy = subparsers.add_parser(

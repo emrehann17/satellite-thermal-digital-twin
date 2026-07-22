@@ -204,7 +204,10 @@ def inspect_predictions_for_qa(path: Path) -> dict[str, Any]:
     return {"schema_columns": columns, "target_label_present_in_predictions": False, "row_counts": rows}
 
 
-def _target_performance(metrics: dict[str, Any], bootstrap: dict[str, Any], prediction_qa: dict[str, Any]) -> list[dict[str, Any]]:
+def _target_performance(
+    metrics: dict[str, Any], bootstrap: dict[str, Any],
+    prediction_qa: dict[str, Any], brier_preregistered: bool,
+) -> list[dict[str, Any]]:
     counts = {(r["direction"], r["model_family"], r["adaptation_method"]): r for r in prediction_qa["row_counts"]}
     rows = []
     for direction, point in metrics["point_metrics"].items():
@@ -213,7 +216,15 @@ def _target_performance(metrics: dict[str, Any], bootstrap: dict[str, Any], pred
         for model in MODEL_FAMILIES:
             for method in ADAPTATION_METHODS:
                 values, pred = point.get(method, {}).get(model, {}), counts.get((direction, model, method), {})
-                roc_ci, pr_ci, brier_ci = (_ci(ci_map, f"{metric}__{method}_{model}") for metric in ("roc_auc", "pr_auc", "brier"))
+                roc_ci, pr_ci = (
+                    _ci(ci_map, f"{metric}__{method}_{model}")
+                    for metric in ("roc_auc", "pr_auc")
+                )
+                brier_ci = (
+                    _ci(ci_map, f"brier__{method}_{model}")
+                    if brier_preregistered else _ci({}, "not_preregistered")
+                )
+                brier_value = values.get("brier") if brier_preregistered else None
                 rows.append({
                     "direction": direction, "source_experiment": pred.get("source_experiment"),
                     "target_experiment": pred.get("target_experiment"), "model_family": model,
@@ -224,9 +235,14 @@ def _target_performance(metrics: dict[str, Any], bootstrap: dict[str, Any], pred
                     "roc_auc_chance_status": classify_chance_status(roc_ci["ci_2_5"], roc_ci["ci_97_5"]),
                     "pr_auc": values.get("pr_auc"),
                     "pr_auc_bootstrap_95_percentile_ci": [pr_ci["ci_2_5"], pr_ci["ci_97_5"]],
-                    "brier": values.get("brier"),
+                    "brier": brier_value,
                     "brier_bootstrap_95_percentile_ci": [brier_ci["ci_2_5"], brier_ci["ci_97_5"]] if brier_ci["ci_2_5"] is not None and brier_ci["ci_97_5"] is not None else None,
-                    "brier_availability": "available" if values.get("brier") is not None else "unavailable_in_frozen_outputs",
+                    "brier_availability": (
+                        "available" if brier_value is not None
+                        else "preregistered_but_unavailable_requires_step10a_c_rerun"
+                        if brier_preregistered
+                        else "not_preregistered_no_post_hoc_addition"
+                    ),
                     "requested_bootstrap_replicates": boot.get("n_requested"), "valid_bootstrap_replicates": boot.get("n_valid"),
                     "invalid_single_class_replicates": boot.get("n_invalid_single_class"),
                     "bootstrap_stability_status": "unstable" if boot.get("bootstrap_unstable") else "stable",
@@ -309,6 +325,29 @@ def _diagnostics(statistics: dict[str, Any]) -> dict[str, Any]:
     return {"coral_covariance_condition_numbers": rows, "acceptance_threshold_added": False, "caveat": "The thermal CORAL comparison was obtained with strongly correlated numeric thermal features and relatively high covariance condition numbers. It is therefore treated as a two-region diagnostic comparison, not evidence of universal superiority."}
 
 
+def _brier_preregistration_audit(preregistration: dict[str, Any]) -> dict[str, Any]:
+    config = preregistration.get("scientific_config")
+    if not isinstance(config, dict):
+        raise Step10Error("Step10 preregistration has no scientific_config object.")
+    serialized = json.dumps(config, sort_keys=True).lower()
+    preregistered = "brier" in serialized
+    return {
+        "preregistered": preregistered,
+        "status": (
+            "preregistered_requires_point_estimates_and_paired_bootstrap"
+            if preregistered else "not_preregistered_no_post_hoc_addition"
+        ),
+        "protocol_mismatch": not preregistered,
+        "statement": (
+            "Brier was preregistered; Step10C must provide point estimates, raw "
+            "Step9 reproduction, and paired target-block bootstrap intervals."
+            if preregistered else
+            "Brier was not preregistered in the immutable Step10 scientific "
+            "configuration. It is not added post hoc; Brier fields remain unavailable."
+        ),
+    }
+
+
 def _interpretation(metrics: dict[str, Any], bootstrap: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
     result = {}
     for direction in metrics["point_metrics"]:
@@ -322,14 +361,37 @@ def _interpretation(metrics: dict[str, Any], bootstrap: dict[str, Any]) -> tuple
             coral_z = _ci(ci_map, f"delta_roc_auc__coral_minus_zscore__{model}")
             within_z, within_c = _ci(ci_map, f"delta_roc_auc__within_minus_zscore__{model}"), _ci(ci_map, f"delta_roc_auc__within_minus_coral__{model}")
             z_support = classify_paired_difference_support(z_raw["ci_2_5"], z_raw["ci_97_5"])
+            coral_support = classify_paired_difference_support(
+                coral_raw["ci_2_5"], coral_raw["ci_97_5"]
+            )
+            point = metrics["point_metrics"][direction]
+            raw_value = point["raw_source_only"][model]["roc_auc"]
+            z_value = point["regionwise_zscore"][model]["roc_auc"]
+            coral_value = point["coral_after_regionwise_zscore"][model]["roc_auc"]
+            within_value = point["within"][model]["roc_auc"]
             models[model] = {
                 "raw_anti_predictive": classify_chance_status(raw_ci["ci_2_5"], raw_ci["ci_97_5"]),
-                "covariate_recovery_zscore": z_support, "residual_gap_zscore": classify_residual_gap_support(within_z["ci_2_5"], within_z["ci_97_5"]),
+                "covariate_recovery_zscore": z_support,
+                "covariate_recovery_coral": coral_support,
+                "residual_gap_zscore": classify_residual_gap_support(within_z["ci_2_5"], within_z["ci_97_5"]),
                 "residual_gap_coral": classify_residual_gap_support(within_c["ci_2_5"], within_c["ci_97_5"]),
                 "coral_vs_zscore": classify_paired_difference_support(coral_z["ci_2_5"], coral_z["ci_97_5"]),
+                "point_estimates": {
+                    "raw_roc_auc": raw_value,
+                    "regionwise_zscore_roc_auc": z_value,
+                    "coral_after_regionwise_zscore_roc_auc": coral_value,
+                    "within_region_roc_auc": within_value,
+                    "zscore_minus_raw": z_value - raw_value,
+                    "coral_minus_raw": coral_value - raw_value,
+                    "coral_minus_zscore": coral_value - z_value,
+                    "within_minus_zscore": within_value - z_value,
+                    "within_minus_coral": within_value - coral_value,
+                },
                 "delta_roc_auc_zscore_minus_raw_ci": z_raw, "delta_roc_auc_coral_minus_raw_ci": coral_raw, "delta_roc_auc_coral_minus_zscore_ci": coral_z,
                 "separate_questions": {
                     "improvement_over_raw": z_support,
+                    "zscore_improvement_over_raw": z_support,
+                    "coral_improvement_over_raw": coral_support,
                     "regionwise_zscore_performance_relative_to_chance": classify_chance_status(
                         z_ci["ci_2_5"], z_ci["ci_97_5"]
                     ),
@@ -345,10 +407,89 @@ def _interpretation(metrics: dict[str, Any], bootstrap: dict[str, Any]) -> tuple
     directions, bidirectional = list(result), {}
     if len(directions) == 2:
         for model in MODEL_FAMILIES:
-            for key in ("covariate_recovery_zscore", "residual_gap_zscore", "residual_gap_coral", "coral_vs_zscore"):
+            for key in (
+                "covariate_recovery_zscore", "covariate_recovery_coral",
+                "residual_gap_zscore", "residual_gap_coral", "coral_vs_zscore",
+            ):
                 labels = [result[d]["by_model_family"][model][key] for d in directions]
                 bidirectional[f"{model}__{key}"] = "bidirectional" if labels[0] == labels[1] else "direction-dependent"
     return result, bidirectional
+
+
+def _effect_word(delta: float) -> str:
+    if delta > 0:
+        return "improves"
+    if delta < 0:
+        return "worsens"
+    return "does not change"
+
+
+def _support_qualifier(status: str) -> str:
+    if status == "bootstrap_supported_positive":
+        return "bootstrap-supported positive difference"
+    if status == "bootstrap_supported_negative":
+        return "bootstrap-supported negative difference"
+    if status == "uncertain_interval_includes_zero":
+        return "paired interval includes zero"
+    return status
+
+
+def _gap_phrase(gap: float) -> str:
+    if gap > 0:
+        return "a residual within-region gap remains"
+    if gap < 0:
+        return "adapted ROC-AUC exceeds the within-region reference"
+    return "there is no point-estimate gap to the within-region reference"
+
+
+def build_scientific_summary(
+    source_id: str, target_id: str, per_direction: dict[str, Any],
+) -> list[str]:
+    """Generate report claims only from the selected pair's interpreted data."""
+    statements = [
+        f"Selected pair: {source_id} <-> {target_id}. All recovery statements "
+        "below are direction- and model-family-specific."
+    ]
+    for direction, direction_data in per_direction.items():
+        for model in MODEL_FAMILIES:
+            item = direction_data["by_model_family"][model]
+            point = item["point_estimates"]
+            statements.extend([
+                f"{direction} [{model}]: region-wise z-score {_effect_word(point['zscore_minus_raw'])} "
+                f"raw ROC-AUC (delta={point['zscore_minus_raw']:.6f}; "
+                f"{_support_qualifier(item['covariate_recovery_zscore'])}).",
+                f"{direction} [{model}]: CORAL after z-score {_effect_word(point['coral_minus_raw'])} "
+                f"raw ROC-AUC (delta={point['coral_minus_raw']:.6f}; "
+                f"{_support_qualifier(item['covariate_recovery_coral'])}).",
+                f"{direction} [{model}]: CORAL versus z-score {_effect_word(point['coral_minus_zscore'])} "
+                f"ROC-AUC (delta={point['coral_minus_zscore']:.6f}; "
+                f"{_support_qualifier(item['coral_vs_zscore'])}).",
+                f"{direction} [{model}]: after z-score, {_gap_phrase(point['within_minus_zscore'])} "
+                f"(within-minus-adapted={point['within_minus_zscore']:.6f}; "
+                f"{_support_qualifier(item['residual_gap_zscore'])}); after CORAL, "
+                f"{_gap_phrase(point['within_minus_coral'])} "
+                f"(within-minus-adapted={point['within_minus_coral']:.6f}; "
+                f"{_support_qualifier(item['residual_gap_coral'])}).",
+            ])
+
+    directions = list(per_direction)
+    if len(directions) == 2:
+        for model in MODEL_FAMILIES:
+            for label, point_key in (
+                ("region-wise z-score", "zscore_minus_raw"),
+                ("CORAL after z-score", "coral_minus_raw"),
+            ):
+                deltas = [
+                    per_direction[d]["by_model_family"][model]["point_estimates"][point_key]
+                    for d in directions
+                ]
+                if (deltas[0] > 0) != (deltas[1] > 0):
+                    statements.append(
+                        f"{model} {label} recovery is direction-dependent, not "
+                        f"bidirectional: it {_effect_word(deltas[0])} raw ROC-AUC in "
+                        f"{directions[0]} and {_effect_word(deltas[1])} it in {directions[1]}."
+                    )
+    return statements
 
 
 def build_final_report(source_id: str, target_id: str, analysis_id: str, protected_hashes: dict[str, str] | None = None, report_only_generation: bool = True) -> dict[str, Any]:
@@ -360,34 +501,39 @@ def build_final_report(source_id: str, target_id: str, analysis_id: str, protect
     metrics, bootstrap = _read_json(output_dir / "step10_metrics.json"), _read_json(output_dir / "step10_bootstrap_summary.json")
     adaptation, audit = _read_json(output_dir / "step10_adaptation_statistics.json"), _read_json(output_dir / "step10_input_audit.json")
     prereg, prediction_qa = _read_json(output_dir / "step10_preregistration.json"), inspect_predictions_for_qa(output_dir / "step10_predictions.parquet")
-    performance = _target_performance(metrics, bootstrap, prediction_qa)
+    brier_audit = _brier_preregistration_audit(prereg)
+    performance = _target_performance(
+        metrics, bootstrap, prediction_qa, brier_audit["preregistered"],
+    )
     expected = len(metrics["point_metrics"]) * len(MODEL_FAMILIES) * len(ADAPTATION_METHODS)
     if len(performance) != expected:
         raise Step10Error(f"Incomplete target performance table: expected {expected}, got {len(performance)}.")
     raw_rows, raw_max = _reproduction(metrics.get("raw_reproduction", {}), "Step9B")
     within_rows, within_max = _reproduction(metrics.get("within_region_reproduction", {}), "Step8B")
     per_direction, bidirectional = _interpretation(metrics, bootstrap)
+    scientific_summary = build_scientific_summary(
+        source_id, target_id, per_direction,
+    )
     unstable = any(bool(value.get("bootstrap_unstable")) for value in bootstrap.get("by_direction", {}).values())
     qa = {"analysis_id": analysis_id, "preregistration_present": True, "analysis_id_consistent_across_inputs": True, "raw_step9b_reproduction": raw_rows, "maximum_raw_reproduction_absolute_difference": raw_max, "within_region_step8b_reproduction": within_rows, "maximum_within_reproduction_absolute_difference": within_max, "target_label_present_in_predictions": False, "prediction_rows_by_direction_model_method": prediction_qa["row_counts"], "protected_input_hash_check": "passed", "bootstrap_unstable": unstable, "package_versions": audit.get("package_versions", {}), "dataset_input_hashes_are_recorded": _hashes_recorded(audit)}
     return {
         "report_schema_version": "step10.final_report.v2", "analysis_id": analysis_id, "source_experiment_id": source_id,
         "target_experiment_id": target_id, "directions": list(metrics["point_metrics"]), "frozen_created_at": prereg.get("created_at"),
-        "report_only_generation": {"enabled": report_only_generation, "scientific_stages_called": [], "step10d_only": report_only_generation, "writable_files": list(REPORT_FILENAMES), "deterministic_timestamp_source": "step10_preregistration.json:created_at"},
+        "report_only_generation": {
+            "enabled": report_only_generation,
+            "scientific_stages_called": [] if report_only_generation else ["Step10A", "Step10B", "Step10C"],
+            "step10d_only": report_only_generation,
+            "writable_files": list(REPORT_FILENAMES),
+            "deterministic_timestamp_source": "step10_preregistration.json:created_at",
+        },
         "protected_input_integrity": {"status": "passed", "criterion": "SHA-256 content hashes; mtimes are not used", "protected_files": protected_hashes},
         "input_analysis_id_consistency": consistency, "target_performance": performance,
         "paired_adaptation_differences": _paired_differences(metrics, bootstrap),
         "within_transfer_decomposition": _decomposition(_read_csv(output_dir / "step10_decomposition.csv"), bootstrap),
         "reproducibility_qa": qa, "adaptation_diagnostics": _diagnostics(adaptation),
         "per_direction_interpretation": per_direction, "bidirectional_vs_direction_dependent": bidirectional,
-        "scientific_summary": [
-            "Raw transfer is below chance with bootstrap support in both directions.",
-            "Baseline region-wise z-score recovery over raw transfer is bootstrap-supported in both directions.",
-            "Thermal region-wise z-score recovery is direction-dependent: supported for Manavgat to Bejis, but only a point-estimate improvement for Bejis to Manavgat because the paired interval includes zero.",
-            "Thermal CORAL improves over region-wise z-score with bootstrap support in both directions in this two-region experiment.",
-            "Baseline CORAL does not show supported improvement over region-wise z-score in either direction.",
-            "Residual within-region versus adapted-transfer gaps remain bootstrap-supported in both directions.",
-            "The residual gap is consistent with concept shift or other non-covariate regional differences, but is not causal proof or the exact amount of concept shift.",
-        ],
+        "scientific_summary": scientific_summary,
+        "brier_protocol_audit": brier_audit,
         "safe_wording": SAFE_WORDING, "never_claims": NEVER_CLAIMS, "any_direction_bootstrap_unstable": unstable,
         "raw_reproduction": metrics.get("raw_reproduction"), "within_region_reproduction": metrics.get("within_region_reproduction"),
     }
@@ -414,10 +560,27 @@ def _table(headers: list[str], rows: list[list[Any]]) -> list[str]:
 
 
 def render_final_report_md(report: dict[str, Any]) -> str:
-    lines = ["# Step10 Final Report: Report-Only QA of Frozen Cross-Region Transfer", "", f"- analysis_id: `{report['analysis_id']}`", f"- source/target pair: `{report['source_experiment_id']}` / `{report['target_experiment_id']}`", f"- frozen creation time: `{report['frozen_created_at']}`", "- report schema: `step10.final_report.v2`", "", "## Report-only integrity statement", "", "This report was generated by Step10D only from the frozen Step10A-C outputs. Step10A, Step10B, and Step10C were not called. Only `step10_final_report.json` and `step10_final_report.md` were writable.", "", f"Protected input SHA-256 check: **{report['protected_input_integrity']['status']}**. Analysis-ID consistency: **{report['input_analysis_id_consistency']['status']}**.", "", "## Target performance", ""]
+    report_only = bool(report["report_only_generation"]["enabled"])
+    title = (
+        "# Step10 Final Report: Report-Only QA of Frozen Cross-Region Transfer"
+        if report_only else "# Step10 Final Report: Cross-Region Transfer"
+    )
+    integrity_heading = (
+        "## Report-only integrity statement" if report_only else "## Run integrity statement"
+    )
+    integrity_statement = (
+        "This report was generated by Step10D only from the frozen Step10A-C "
+        "outputs. Step10A, Step10B, and Step10C were not called. Only "
+        "`step10_final_report.json` and `step10_final_report.md` were writable."
+        if report_only else
+        "This report was generated by Step10D after the selected pair's Step10A-C "
+        "stages completed in the full Step10 run. Step10D verified the protected "
+        "input hashes and analysis-ID consistency before writing the two report files."
+    )
+    lines = [title, "", f"- analysis_id: `{report['analysis_id']}`", f"- source/target pair: `{report['source_experiment_id']}` / `{report['target_experiment_id']}`", f"- frozen creation time: `{report['frozen_created_at']}`", "- report schema: `step10.final_report.v2`", "", integrity_heading, "", integrity_statement, "", f"Protected input SHA-256 check: **{report['protected_input_integrity']['status']}**. Analysis-ID consistency: **{report['input_analysis_id_consistency']['status']}**.", "", "## Target performance", ""]
     rows = [[r["direction"], r["source_experiment"], r["target_experiment"], r["model_family"], r["adaptation_method"], r["target_row_count"], r["target_burned_count"], _fmt(r["roc_auc"]), _fmt_ci(r["roc_auc_bootstrap_95_percentile_ci"]), r["roc_auc_chance_status"], _fmt(r["pr_auc"]), _fmt_ci(r["pr_auc_bootstrap_95_percentile_ci"]), _fmt(r["brier"]), _fmt_ci(r["brier_bootstrap_95_percentile_ci"]), r["requested_bootstrap_replicates"], r["valid_bootstrap_replicates"], r["invalid_single_class_replicates"], r["bootstrap_stability_status"]] for r in report["target_performance"]]
     lines += _table(["direction", "source", "target", "model", "method", "n target", "n burned", "ROC-AUC", "ROC 95% CI", "chance status", "PR-AUC", "PR 95% CI", "Brier", "Brier 95% CI", "B req", "B valid", "B invalid", "stability"], rows)
-    lines += ["", "Brier point estimates and bootstrap intervals are unavailable in the frozen Step10 outputs and were not recomputed.", "", "## Paired adaptation differences", ""]
+    lines += ["", report["brier_protocol_audit"]["statement"], "", "## Paired adaptation differences", ""]
     rows = [[r["direction"], r["model_family"], r["metric"], r["comparison"], _fmt(r["point_estimate_difference"]), _fmt(r["paired_bootstrap_mean"]), _fmt(r["paired_bootstrap_median"]), _fmt_ci(r["paired_bootstrap_95_percentile_ci"]), r["support_status"]] for r in report["paired_adaptation_differences"]]
     lines += _table(["direction", "model", "metric", "comparison", "point difference", "bootstrap mean", "bootstrap median", "95% CI", "support"], rows)
     lines += ["", "## Within–raw–adapted decomposition", ""]
@@ -429,7 +592,8 @@ def render_final_report_md(report: dict[str, Any]) -> str:
         for model, item in data["by_model_family"].items():
             separate = item["separate_questions"]
             lines += [
-                f"- `{model}` improvement over raw: `{separate['improvement_over_raw']}`",
+                f"- `{model}` z-score versus raw: `{separate['zscore_improvement_over_raw']}`",
+                f"- `{model}` CORAL versus raw: `{separate['coral_improvement_over_raw']}`",
                 f"- `{model}` regionwise_zscore performance relative to chance: "
                 f"`{separate['regionwise_zscore_performance_relative_to_chance']}`",
                 f"- `{model}` coral_after_regionwise_zscore performance relative to chance: "

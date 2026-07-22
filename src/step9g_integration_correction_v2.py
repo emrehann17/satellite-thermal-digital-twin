@@ -98,21 +98,21 @@ EXPECTED_FROZEN_STEP9G_ANALYSIS_ID = (
 )
 
 # The pair directory holding all shared cross-region stage artifacts.
-def _pair_dir() -> Path:
-    return PROJECT_ROOT / "outputs" / "cross_region" / PAIR_TOKEN
+def _pair_dir(source_id: str = SOURCE_ID, target_id: str = TARGET_ID) -> Path:
+    return PROJECT_ROOT / "outputs" / "cross_region" / f"{source_id}__{target_id}"
 
 
-def _step9g_frozen_root() -> Path:
+def _step9g_frozen_root(source_id: str = SOURCE_ID, target_id: str = TARGET_ID) -> Path:
     return (
         PROJECT_ROOT / "outputs" / "diagnostics"
-        / "step9g_univariate_feature_auc_direction_reversal" / PAIR_TOKEN
+        / "step9g_univariate_feature_auc_direction_reversal" / f"{source_id}__{target_id}"
     )
 
 
-def _output_root() -> Path:
+def _output_root(source_id: str = SOURCE_ID, target_id: str = TARGET_ID) -> Path:
     return (
         PROJECT_ROOT / "outputs" / "diagnostics"
-        / "step9g_univariate_feature_auc_direction_reversal_integration_v2" / PAIR_TOKEN
+        / "step9g_univariate_feature_auc_direction_reversal_integration_v2" / f"{source_id}__{target_id}"
     )
 
 
@@ -138,12 +138,14 @@ FROZEN_STEP9G_NUMERIC_FILES = (
 )
 
 
-def frozen_step9g_root() -> Path:
-    return _step9g_frozen_root()
+def frozen_step9g_root(source_id: str = SOURCE_ID, target_id: str = TARGET_ID) -> Path:
+    return _step9g_frozen_root(source_id, target_id)
 
 
-def hash_frozen_step9g() -> dict[str, str]:
-    root = frozen_step9g_root()
+def hash_frozen_step9g(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> dict[str, str]:
+    root = frozen_step9g_root(source_id, target_id)
     if not root.exists():
         raise Step9GIntegrationError(f"Frozen Step9G outputs not found: {root}")
     hashes = {}
@@ -158,22 +160,31 @@ def hash_frozen_step9g() -> dict[str, str]:
     return hashes
 
 
-def assert_frozen_step9g_analysis_id() -> str:
-    report = json.loads((frozen_step9g_root() / "step9g_final_report.json").read_text(encoding="utf-8"))
+def assert_frozen_step9g_analysis_id(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> str:
+    root = frozen_step9g_root(source_id, target_id)
+    report = json.loads((root / "step9g_final_report.json").read_text(encoding="utf-8"))
     analysis_id = report.get("analysis_id")
-    if analysis_id != EXPECTED_FROZEN_STEP9G_ANALYSIS_ID:
+    prereg = _read_json(root / "step9g_preregistration.json") or {}
+    expected = prereg.get("analysis_id")
+    if (source_id, target_id) == (SOURCE_ID, TARGET_ID):
+        expected = EXPECTED_FROZEN_STEP9G_ANALYSIS_ID
+    if not expected or analysis_id != expected:
         raise Step9GIntegrationError(
             "Frozen Step9G analysis_id does not match the protected value. "
-            f"Expected {EXPECTED_FROZEN_STEP9G_ANALYSIS_ID}, found {analysis_id}. "
+            f"Expected {expected}, found {analysis_id}. "
             "Refusing to proceed."
         )
     return analysis_id
 
 
-def load_frozen_reversal_table() -> pd.DataFrame:
+def load_frozen_reversal_table(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> pd.DataFrame:
     """Reads the frozen Step9G direction-reversal table VERBATIM. No AUC, CI,
     reversal status, or feature ordering is altered."""
-    return pd.read_csv(frozen_step9g_root() / "step9g_direction_reversal_table.csv")
+    return pd.read_csv(frozen_step9g_root(source_id, target_id) / "step9g_direction_reversal_table.csv")
 
 
 # =============================================================================
@@ -225,7 +236,9 @@ def _as_bool_or_none(value: Any) -> bool | None:
     return None
 
 
-def parse_step9e() -> dict[str, Any]:
+def parse_step9e(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> dict[str, Any]:
     """
     Step9E stores relationship-direction diagnostics PAIR-GLOBALLY in one
     shared `relationship_direction_flips.csv`. Each row carries
@@ -233,7 +246,7 @@ def parse_step9e() -> dict[str, Any]:
     flip flags for the pair. There is NO per-direction directory; this schema
     is represented as `pair_global`, not duplicated into two direction records.
     """
-    path = _pair_dir() / "step9e" / "relationship_direction_flips.csv"
+    path = _pair_dir(source_id, target_id) / "step9e" / "relationship_direction_flips.csv"
     df = _read_csv(path)
     result: dict[str, Any] = {
         "artifact": str(path),
@@ -265,7 +278,9 @@ def parse_step9e() -> dict[str, Any]:
     return result
 
 
-def parse_step9f() -> dict[str, Any]:
+def parse_step9f(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> dict[str, Any]:
     """
     Step9F stores BOTH directions inside one shared pair-level directory.
     `exploratory_candidate_screening.csv` carries per-direction columns
@@ -273,9 +288,10 @@ def parse_step9f() -> dict[str, Any]:
     `transfer_direction`. This is MODEL/representation-level only; it is never
     joined per univariate feature.
     """
-    screening = _read_csv(_pair_dir() / "step9f" / "exploratory_candidate_screening.csv")
-    manifest = _read_json(_pair_dir() / "step9f" / "step9f_experiment_manifest.json")
-    boot = _read_json(_pair_dir() / "step9f" / "spatial_block_bootstrap_deltas.json")
+    pair_dir = _pair_dir(source_id, target_id)
+    screening = _read_csv(pair_dir / "step9f" / "exploratory_candidate_screening.csv")
+    manifest = _read_json(pair_dir / "step9f" / "step9f_experiment_manifest.json")
+    boot = _read_json(pair_dir / "step9f" / "spatial_block_bootstrap_deltas.json")
 
     result: dict[str, Any] = {
         "level": "model_representation_level_only",
@@ -289,7 +305,10 @@ def parse_step9f() -> dict[str, Any]:
         "directions": {},
     }
     boot_groups = (boot or {}).get("groups", []) if isinstance(boot, dict) else []
-    for direction in LOGICAL_DIRECTIONS:
+    logical_directions = (
+        f"{source_id}_to_{target_id}", f"{target_id}_to_{source_id}",
+    )
+    for direction in logical_directions:
         entry: dict[str, Any] = {"available": False}
         if screening is not None:
             dir_cols = [c for c in screening.columns if c.startswith(f"{direction}__")]
@@ -312,22 +331,29 @@ def parse_step9f() -> dict[str, Any]:
     return result
 
 
-def parse_step10() -> dict[str, Any]:
+def parse_step10(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> dict[str, Any]:
     """
     Step10 stores a SINGLE combined final report keyed `by_direction`, holding
     both directions. Confirm both from that combined report + associated
     tables (target_performance / adaptation_effect rows also carry a
     `direction` field).
     """
-    report = _read_json(_pair_dir() / "step10" / "step10_final_report.json")
+    pair_dir = _pair_dir(source_id, target_id)
+    report = _read_json(pair_dir / "step10" / "step10_final_report.json")
     result: dict[str, Any] = {
-        "artifact": str(_pair_dir() / "step10" / "step10_final_report.json"),
+        "artifact": str(pair_dir / "step10" / "step10_final_report.json"),
         "available": report is not None,
         "analysis_id": (report or {}).get("analysis_id") if report else None,
         "directions": {},
     }
     if report is None:
         return result
+
+    logical_directions = (
+        f"{source_id}_to_{target_id}", f"{target_id}_to_{source_id}",
+    )
 
     # Directions can be confirmed from any of: target_performance rows,
     # within_transfer_decomposition, or the integrated interpretation block.
@@ -338,14 +364,14 @@ def parse_step10() -> dict[str, Any]:
                 if isinstance(row, dict) and "direction" in row:
                     found.add(row["direction"])
         elif isinstance(section, dict):
-            found |= {k for k in section.keys() if k in LOGICAL_DIRECTIONS}
+            found |= {k for k in section.keys() if k in logical_directions}
         return found
 
     confirmed: set[str] = set()
     for key in ("target_performance", "adaptation_effect", "within_transfer_decomposition", "integrated_interpretation"):
         confirmed |= _directions_in(report.get(key))
 
-    for direction in LOGICAL_DIRECTIONS:
+    for direction in logical_directions:
         rows = [
             r for r in (report.get("target_performance") or [])
             if isinstance(r, dict) and r.get("direction") == direction
@@ -360,11 +386,15 @@ def parse_step10() -> dict[str, Any]:
 # =============================================================================
 # Corrected feature-level integration (Step9E per-feature; 9F/10 model-level)
 # =============================================================================
-def build_corrected_integration() -> dict[str, Any]:
-    reversal_df = load_frozen_reversal_table()
-    step9e = parse_step9e()
-    step9f = parse_step9f()
-    step10 = parse_step10()
+def build_corrected_integration(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> dict[str, Any]:
+    reversal_df = load_frozen_reversal_table(source_id, target_id)
+    step9e = parse_step9e(source_id, target_id)
+    step9f = parse_step9f(source_id, target_id)
+    step10 = parse_step10(source_id, target_id)
+    source_key = step9g._region_output_key(source_id, source_id, target_id)
+    target_key = step9g._region_output_key(target_id, source_id, target_id)
 
     # Which features have a Step9E relationship-direction flag AND a Step9G
     # point reversal -> "consistent with Step9E". Real booleans throughout.
@@ -380,14 +410,16 @@ def build_corrected_integration() -> dict[str, Any]:
             consistent_features.append(feature)
         per_feature_rows.append({
             "feature": feature,
-            "manavgat_auc": r.get("manavgat_auc"),
-            "manavgat_ci_low": r.get("manavgat_ci_low"),
-            "manavgat_ci_high": r.get("manavgat_ci_high"),
-            "manavgat_direction": r.get("manavgat_direction"),
-            "bejis_auc": r.get("bejis_auc"),
-            "bejis_ci_low": r.get("bejis_ci_low"),
-            "bejis_ci_high": r.get("bejis_ci_high"),
-            "bejis_direction": r.get("bejis_direction"),
+            "source_experiment_id": source_id,
+            "target_experiment_id": target_id,
+            "source_auc": r.get(f"{source_key}_auc"),
+            "source_ci_low": r.get(f"{source_key}_ci_low"),
+            "source_ci_high": r.get(f"{source_key}_ci_high"),
+            "source_direction": r.get(f"{source_key}_direction"),
+            "target_auc": r.get(f"{target_key}_auc"),
+            "target_ci_low": r.get(f"{target_key}_ci_low"),
+            "target_ci_high": r.get(f"{target_key}_ci_high"),
+            "target_direction": r.get(f"{target_key}_direction"),
             "reversal_status": r.get("reversal_status"),
             "point_direction_reversal": point_reversal,  # real bool
             "step9e_rank_effect_direction_flip": e_flag,  # real bool or None
@@ -422,7 +454,10 @@ def build_corrected_integration() -> dict[str, Any]:
 # =============================================================================
 # Availability before/after table
 # =============================================================================
-def availability_table(corrected: dict[str, Any]) -> list[dict[str, Any]]:
+def availability_table(
+    corrected: dict[str, Any], source_id: str = SOURCE_ID,
+    target_id: str = TARGET_ID,
+) -> list[dict[str, Any]]:
     """Before = v1 (reverse direction wrongly unavailable / zero files).
     After = v2 corrected parsing of the shared pair-level artifacts."""
     rows = []
@@ -434,16 +469,20 @@ def availability_table(corrected: dict[str, Any]) -> list[dict[str, Any]]:
         "after_v2": "available" if corrected["step9e"]["available"] else "unavailable",
         "schema": "pair_global",
     })
-    for direction in LOGICAL_DIRECTIONS:
-        is_reverse = direction == REVERSE_DIRECTION
+    logical_directions = (
+        f"{source_id}_to_{target_id}", f"{target_id}_to_{source_id}",
+    )
+    reverse_direction = logical_directions[1]
+    for direction in logical_directions:
+        is_reverse = direction == reverse_direction
         rows.append({
             "stage": "step9f", "direction": direction,
             "before_v1": "unavailable" if is_reverse else "available",
             "after_v2": "available" if step9f_dirs.get(direction, {}).get("available") else "unavailable",
             "schema": "shared_pair_directory",
         })
-    for direction in LOGICAL_DIRECTIONS:
-        is_reverse = direction == REVERSE_DIRECTION
+    for direction in logical_directions:
+        is_reverse = direction == reverse_direction
         rows.append({
             "stage": "step10", "direction": direction,
             "before_v1": "unavailable" if is_reverse else "available",
@@ -456,24 +495,34 @@ def availability_table(corrected: dict[str, Any]) -> list[dict[str, Any]]:
 # =============================================================================
 # Analysis id / manifest for the correction
 # =============================================================================
-def used_reference_hashes() -> dict[str, str]:
+def used_reference_hashes(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> dict[str, str]:
     """Hashes of the ACTUALLY-USED shared 9E/9F/10 artifacts."""
+    pair_dir = _pair_dir(source_id, target_id)
     candidates = {
-        "step9e_relationship_direction_flips.csv": _pair_dir() / "step9e" / "relationship_direction_flips.csv",
-        "step9f_exploratory_candidate_screening.csv": _pair_dir() / "step9f" / "exploratory_candidate_screening.csv",
-        "step9f_spatial_block_bootstrap_deltas.json": _pair_dir() / "step9f" / "spatial_block_bootstrap_deltas.json",
-        "step9f_experiment_manifest.json": _pair_dir() / "step9f" / "step9f_experiment_manifest.json",
-        "step10_final_report.json": _pair_dir() / "step10" / "step10_final_report.json",
+        "step9e_relationship_direction_flips.csv": pair_dir / "step9e" / "relationship_direction_flips.csv",
+        "step9f_exploratory_candidate_screening.csv": pair_dir / "step9f" / "exploratory_candidate_screening.csv",
+        "step9f_spatial_block_bootstrap_deltas.json": pair_dir / "step9f" / "spatial_block_bootstrap_deltas.json",
+        "step9f_experiment_manifest.json": pair_dir / "step9f" / "step9f_experiment_manifest.json",
+        "step10_final_report.json": pair_dir / "step10" / "step10_final_report.json",
     }
     return {name: sha256_file(path) for name, path in candidates.items() if path.is_file()}
 
 
-def correction_configuration(frozen_step9g_hashes: dict[str, str], reference_hashes: dict[str, str]) -> dict[str, Any]:
+def correction_configuration(
+    frozen_step9g_hashes: dict[str, str], reference_hashes: dict[str, str],
+    corrected_analysis_id: str = EXPECTED_FROZEN_STEP9G_ANALYSIS_ID,
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> dict[str, Any]:
+    logical_directions = (
+        f"{source_id}_to_{target_id}", f"{target_id}_to_{source_id}",
+    )
     return {
         "schema_version": SCHEMA_VERSION,
-        "corrects_analysis_id": EXPECTED_FROZEN_STEP9G_ANALYSIS_ID,
-        "pair_token": PAIR_TOKEN,
-        "logical_directions": list(LOGICAL_DIRECTIONS),
+        "corrects_analysis_id": corrected_analysis_id,
+        "pair_token": f"{source_id}__{target_id}",
+        "logical_directions": list(logical_directions),
         "recomputes_step9g_numeric": False,
         "frozen_step9g_numeric_hashes": frozen_step9g_hashes,
         "used_reference_hashes": reference_hashes,
@@ -489,14 +538,21 @@ def correction_configuration(frozen_step9g_hashes: dict[str, str], reference_has
         ],
         "baseline_numeric_features": list(BASELINE_NUMERIC_FEATURES),
         "thermal_numeric_features": list(THERMAL_NUMERIC_FEATURES),
-        "output_namespace": str(_output_root()),
+        "output_namespace": str(_output_root(source_id, target_id)),
         "package_versions": _package_versions(),
         "git_commit": _git_commit(),
     }
 
 
-def build_manifest(frozen_step9g_hashes: dict[str, str], reference_hashes: dict[str, str]) -> dict[str, Any]:
-    config = correction_configuration(frozen_step9g_hashes, reference_hashes)
+def build_manifest(
+    frozen_step9g_hashes: dict[str, str], reference_hashes: dict[str, str],
+    corrected_analysis_id: str = EXPECTED_FROZEN_STEP9G_ANALYSIS_ID,
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+) -> dict[str, Any]:
+    config = correction_configuration(
+        frozen_step9g_hashes, reference_hashes, corrected_analysis_id,
+        source_id, target_id,
+    )
     analysis_id = sha256_bytes(canonical_json(config).encode("utf-8"))
     return {"analysis_id": analysis_id, "created_at": datetime.now(timezone.utc).isoformat(), "correction_configuration": config}
 
@@ -543,20 +599,24 @@ def _assert_required_statements(corrected: dict[str, Any]) -> None:
 # =============================================================================
 # Report writing (new namespace only; original Step9G untouched)
 # =============================================================================
-def _assert_namespace(path: Path) -> None:
+def _assert_namespace(path: Path, output_root: Path = OUTPUT_ROOT) -> None:
     resolved = path.resolve()
-    root = _output_root().resolve()
+    root = output_root.resolve()
     if root not in resolved.parents and resolved != root:
-        raise Step9GIntegrationError(f"Namespace isolation FAILED: '{path}' is outside '{_output_root()}'.")
+        raise Step9GIntegrationError(f"Namespace isolation FAILED: '{path}' is outside '{output_root}'.")
 
 
-def write_reports(output_root: Path, manifest: dict[str, Any], corrected: dict[str, Any], avail: list[dict[str, Any]]) -> dict[str, Path]:
+def write_reports(
+    output_root: Path, manifest: dict[str, Any], corrected: dict[str, Any],
+    avail: list[dict[str, Any]], source_id: str = SOURCE_ID,
+    target_id: str = TARGET_ID,
+) -> dict[str, Path]:
     output_root.mkdir(parents=True, exist_ok=True)
     analysis_id = manifest["analysis_id"]
 
     def _w(name: str, writer) -> Path:
         path = output_root / name
-        _assert_namespace(path)
+        _assert_namespace(path, output_root)
         writer(path)
         return path
 
@@ -573,7 +633,9 @@ def write_reports(output_root: Path, manifest: dict[str, Any], corrected: dict[s
     report = {
         "analysis_id": analysis_id,
         "schema_version": SCHEMA_VERSION,
-        "corrects_analysis_id": EXPECTED_FROZEN_STEP9G_ANALYSIS_ID,
+        "corrects_analysis_id": manifest["correction_configuration"]["corrects_analysis_id"],
+        "source_experiment_id": source_id,
+        "target_experiment_id": target_id,
         "frozen_step9g_numeric_reused_verbatim": True,
         "primary_population": step9g.PRIMARY_POPULATION,
         "bootstrap_supported_direction_reversal": corrected["bootstrap_supported_direction_reversals"],
@@ -609,13 +671,15 @@ def _report_md(report: dict[str, Any]) -> str:
         "",
         f"- correction analysis_id: `{report['analysis_id']}`",
         f"- corrects Step9G analysis_id: `{report['corrects_analysis_id']}`",
+        f"- source: `{report['source_experiment_id']}`",
+        f"- target: `{report['target_experiment_id']}`",
         "- frozen Step9G numeric outputs reused verbatim (nothing recomputed)",
         f"- primary population: {report['primary_population']}",
         "",
         "## Direction-reversal findings (from frozen Step9G numeric outputs)",
         "",
-        f"- One bootstrap-supported reversal: **{', '.join(report['bootstrap_supported_direction_reversal'])}**",
-        f"- Four point reversals with intervals including chance: "
+        f"- Bootstrap-supported reversals: **{', '.join(report['bootstrap_supported_direction_reversal']) or 'none'}**",
+        f"- Point reversals with intervals including chance: "
         f"**{', '.join(report['point_reversals_interval_uncertain'])}**",
         "- The uncertain LST/TVDI reversals are NOT described as bootstrap-supported.",
         "",
@@ -646,12 +710,20 @@ def _report_md(report: dict[str, Any]) -> str:
 # =============================================================================
 # Orchestration
 # =============================================================================
-def run_correction(dry: bool = False, force: bool = False, output_root: Path | None = None) -> dict[str, Any]:
-    output_root = _output_root() if output_root is None else output_root
+def run_correction(
+    source_id: str = SOURCE_ID, target_id: str = TARGET_ID,
+    dry: bool = False, force: bool = False, output_root: Path | None = None,
+) -> dict[str, Any]:
+    if source_id == target_id:
+        raise Step9GIntegrationError("--source and --target must be different experiment IDs.")
+    output_root = _output_root(source_id, target_id) if output_root is None else output_root
 
-    frozen_step9g_hashes_before = hash_frozen_step9g()
-    assert_frozen_step9g_analysis_id()
-    reference_hashes = used_reference_hashes()
+    frozen_step9g_hashes_before = hash_frozen_step9g(source_id, target_id)
+    corrected_analysis_id = assert_frozen_step9g_analysis_id(source_id, target_id)
+    reference_hashes = used_reference_hashes(source_id, target_id)
+    logical_directions = (
+        f"{source_id}_to_{target_id}", f"{target_id}_to_{source_id}",
+    )
 
     if dry:
         return {
@@ -660,14 +732,20 @@ def run_correction(dry: bool = False, force: bool = False, output_root: Path | N
             "writes_files": False,
             "frozen_step9g_files": list(frozen_step9g_hashes_before.keys()),
             "used_reference_files": list(reference_hashes.keys()),
-            "logical_directions": list(LOGICAL_DIRECTIONS),
+            "source_experiment_id": source_id,
+            "target_experiment_id": target_id,
+            "logical_directions": list(logical_directions),
             "output_namespace": str(output_root),
         }
 
-    corrected = build_corrected_integration()
-    _assert_required_statements(corrected)
-    avail = availability_table(corrected)
-    manifest = build_manifest(frozen_step9g_hashes_before, reference_hashes)
+    corrected = build_corrected_integration(source_id, target_id)
+    if (source_id, target_id) == (SOURCE_ID, TARGET_ID):
+        _assert_required_statements(corrected)
+    avail = availability_table(corrected, source_id, target_id)
+    manifest = build_manifest(
+        frozen_step9g_hashes_before, reference_hashes, corrected_analysis_id,
+        source_id, target_id,
+    )
 
     if output_root.exists() and not force:
         existing = list(p for p in output_root.rglob("*") if p.is_file())
@@ -676,17 +754,19 @@ def run_correction(dry: bool = False, force: bool = False, output_root: Path | N
                 f"Correction outputs already exist under {output_root}; use --force. "
                 f"({[p.name for p in existing]})"
             )
-    paths = write_reports(output_root, manifest, corrected, avail)
+    paths = write_reports(
+        output_root, manifest, corrected, avail, source_id, target_id,
+    )
 
     # frozen Step9G numeric outputs must be byte-identical after the run
-    frozen_step9g_hashes_after = hash_frozen_step9g()
+    frozen_step9g_hashes_after = hash_frozen_step9g(source_id, target_id)
     if frozen_step9g_hashes_before != frozen_step9g_hashes_after:
         raise Step9GIntegrationError("Frozen Step9G numeric outputs changed during the correction run.")
 
     return {
         "ran": True,
         "analysis_id": manifest["analysis_id"],
-        "corrects_analysis_id": EXPECTED_FROZEN_STEP9G_ANALYSIS_ID,
+        "corrects_analysis_id": corrected_analysis_id,
         "bootstrap_supported_direction_reversal": corrected["bootstrap_supported_direction_reversals"],
         "point_reversals_interval_uncertain": corrected["point_reversals_interval_uncertain"],
         "thermal_features_consistent_with_step9e": corrected["thermal_features_consistent_with_step9e"],
@@ -699,6 +779,8 @@ def run_correction(dry: bool = False, force: bool = False, output_root: Path | N
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Step9G report-integration correction (v2).")
+    parser.add_argument("--source", required=True, help="Source experiment ID.")
+    parser.add_argument("--target", required=True, help="Target experiment ID.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true")
     return parser
@@ -706,7 +788,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def cli(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    result = run_correction(dry=args.dry_run, force=args.force)
+    result = run_correction(
+        source_id=args.source, target_id=args.target,
+        dry=args.dry_run, force=args.force,
+    )
     print(json.dumps(result, indent=2, default=str))
     return 0
 
