@@ -185,6 +185,7 @@ def cmd_shift_audit(args: argparse.Namespace) -> int:
         result = orch.run_shift_audit_stage(
             source_id=args.source, target_id=args.target,
             dry_run=args.dry_run, force=args.force,
+            report_only=args.report_only,
         )
     except SystemExit as exc:
         return _fail("shift-audit", exc)
@@ -467,6 +468,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_shift.add_argument("--target", required=True, help="Hedef (target) experiment_id.")
     p_shift.add_argument("--force", action="store_true", help="step9e çıktısı zaten varsa üzerine yaz.")
     p_shift.add_argument("--dry-run", action="store_true", help="Hiçbir hesaplama çalıştırma; planlanan yolları/feature setlerini bas.")
+    p_shift.add_argument(
+        "--report-only", action="store_true",
+        help="Part A-F'yi YENİDEN HESAPLAMADAN, yalnızca safe_wording + Step9B "
+        "provenance alanlarını + created_at'i günceller (mevcut bir Step9E "
+        "çıktısı gerektirir; --force ile birlikte kullanılmalıdır).",
+    )
     p_shift.set_defaults(func=cmd_shift_audit)
 
     # --- transfer-explore ---

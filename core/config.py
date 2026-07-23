@@ -382,6 +382,54 @@ STEP6_BURNED_LANDCOVER_GATE_LEVEL = "500m_reconstructed_mcd64a1_cell"
 
 
 # =============================================================================
+# Step0F: experiment-aware MODIS mean/std/valid-count input QA
+# (scripts/prepare_modis_for_step7.py). Independent from the legacy Kozan
+# Step2 MODIS baseline (src/step2_modis_5year_mean.py / data/modis/), which
+# is UNCHANGED by these constants.
+# =============================================================================
+# MOD11A1 QC_Day conservative acceptance rule (documented MODIS product bits,
+# https://lpdaac.usgs.gov MOD11A1 QC layer bit description):
+#   bits 0-1 (Mandatory QA flag):  0b00 = "LST produced, good quality, not
+#       necessary to examine detailed QA"
+#   bits 2-3 (Data quality flag):  0b00 = "good data quality"
+# A pixel-day is accepted ONLY if BOTH fields are exactly 0 (conservative --
+# every other documented value for these two fields means either no
+# retrieval, cloud, or a quality caveat). Bits 4-5 (emissivity error) and
+# bits 6-7 (LST error) are NOT used here (task scope: mandatory QA + data
+# quality bits only; no undocumented bit semantics are invented).
+STEP7_MODIS_QC_MANDATORY_QA_MASK = 0b0011      # bits 0-1
+STEP7_MODIS_QC_MANDATORY_QA_ACCEPT = 0b0000    # "good quality" only
+STEP7_MODIS_QC_DATA_QUALITY_SHIFT = 2
+STEP7_MODIS_QC_DATA_QUALITY_MASK = 0b0011      # bits 2-3 (after shifting right by 2)
+STEP7_MODIS_QC_DATA_QUALITY_ACCEPT = 0b0000    # "good data quality" only
+
+# Minimum number of QC-accepted daily MODIS scenes required at a pixel within
+# the experiment's predictor window before that pixel's mean/std is
+# considered statistically supported (below this, the pixel stays nodata in
+# BOTH modis_lst_mean_celsius.tif and modis_lst_std_celsius.tif). This is a
+# generic, conservative statistical-support floor -- a sample stdDev needs
+# n>=2 to be non-degenerate, +1 for margin -- and is NOT tuned against any
+# specific experiment's (e.g. evia_2021) downstream model performance.
+STEP7_MODIS_MIN_VALID_OBSERVATIONS = 3
+
+# Explicit finite nodata sentinel for the experiment-aware MODIS mean/std
+# GeoTIFFs. Zero is NEVER used as nodata (0.0 deg C is a physically valid
+# Celsius temperature). Earth Engine's local/tiled GeoTIFF export path cannot
+# encode NaN directly, so the EE image is `.unmask(STEP7_MODIS_NODATA_VALUE)`
+# before download and the value is then stamped as the GeoTIFF's `nodata` tag
+# (no further rewriting) -- a documented finite sentinel, as allowed as an
+# alternative to NaN.
+STEP7_MODIS_NODATA_VALUE = -9999.0
+
+# Suspicious-zero-fraction guard used by Step7B's pre-alignment MODIS source
+# validation (src/step7b_prepare_downscaling_dataset.py
+# validate_modis_source_rasters()): if a MODIS mean input has NO nodata tag
+# defined AND at least this fraction of its "valid" pixels are exact 0.0,
+# Step7B fails fast rather than silently treating a masked/no-observation
+# region (e.g. sea) as valid Celsius data.
+STEP7B_MODIS_SUSPICIOUS_ZERO_FRACTION = 0.05
+
+# =============================================================================
 # Step7B: MODIS downscaling training dataset builder
 # =============================================================================
 # Step7B, MODIS->Landsat LST downscaling için pencere/tile-bazlı bir EĞİTİM

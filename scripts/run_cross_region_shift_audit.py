@@ -106,13 +106,34 @@ def _log_dry_run(source_id: str, target_id: str) -> None:
     )
 
 
-def main(source_id: str, target_id: str, dry_run: bool = False, force: bool = False) -> dict:
+def main(
+    source_id: str, target_id: str, dry_run: bool = False, force: bool = False,
+    report_only: bool = False,
+) -> dict:
     if source_id == target_id:
         raise CrossRegionShiftAuditRunnerError("--source ve --target ayni deney OLAMAZ.")
 
     if dry_run:
         _log_dry_run(source_id, target_id)
-        return {"ran": False, "reason": "dry_run"}
+        return {"ran": False, "reason": "dry_run", "report_only": report_only}
+
+    if report_only:
+        from src.step9e_distribution_shift_audit import regenerate_report_only
+
+        log.info("=" * 70)
+        log.info(
+            "STEP9E --report-only: yalnizca safe_wording + Step9B provenance "
+            "alanlari guncelleniyor; Part A-F YENIDEN HESAPLANMIYOR."
+        )
+        log.info("=" * 70)
+        result = regenerate_report_only(source_id=source_id, target_id=target_id, force=force)
+        log.info("=" * 70)
+        log.info(
+            "STEP9E --report-only TAMAMLANDI. step9d_overall_conclusion=%s, safe_wording=%r",
+            result.get("step9d_overall_conclusion"), result.get("safe_wording"),
+        )
+        log.info("=" * 70)
+        return {"ran": True, "report_only": True, "result": result}
 
     from src.step9e_distribution_shift_audit import run_shift_audit
 
@@ -128,7 +149,7 @@ def main(source_id: str, target_id: str, dry_run: bool = False, force: bool = Fa
     )
     log.info("=" * 70)
 
-    return {"ran": True, "result": result}
+    return {"ran": True, "report_only": False, "result": result}
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -149,9 +170,18 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--force", action="store_true",
         help="step9e ciktisi zaten varsa uzerine yaz.",
     )
+    parser.add_argument(
+        "--report-only", action="store_true",
+        help="Part A-F'yi YENIDEN HESAPLAMADAN, yalnizca safe_wording + Step9B "
+        "provenance alanlarini + created_at'i gunceller. Mevcut bir Step9E "
+        "ciktisi gerektirir; --force ile birlikte kullanilmalidir.",
+    )
     return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = parse_args()
-    main(source_id=args.source, target_id=args.target, dry_run=args.dry_run, force=args.force)
+    main(
+        source_id=args.source, target_id=args.target, dry_run=args.dry_run,
+        force=args.force, report_only=args.report_only,
+    )

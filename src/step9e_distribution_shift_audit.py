@@ -42,11 +42,13 @@ CIKTILAR:
     outputs/cross_region/<source>__<target>/step9e/prediction_probability_distributions.png
     outputs/cross_region/<source>__<target>/step9e/calibration_curves.png
 
-GUVENLI IFADE (rapor bunu kullanir):
-    "Cross-region discrimination was not supported in the original Step9
-    evaluation. Step9E examines whether feature distribution shift,
-    probability scale shift, or region-dependent feature-label relationships
-    may explain this result."
+GUVENLI IFADE (rapor bunu kullanir): ARTIK STATIK DEGIL. safe_wording, Step9D'nin
+    canonical final_cross_region_report.json'undaki `overall_conclusion`
+    degerinden (bkz. resolve_safe_wording()) DINAMIK olarak turetilir --
+    "transfer_not_supported", "partial_transfer_supported" ve (Step9D'nin
+    tam iki-yonlu destek icin urettigi) "bidirectional_transfer_supported"
+    (== "transfer_supported" template'i) icin AYRI, dogru ifadeler kullanilir.
+    Sabit tek bir "not supported" cumlesi HER ciftte KULLANILMAZ.
 
 ASLA IDDIA ETMEZ: istatistiksel anlamlilik, nedensel aciklama, basarili
 operasyonel transfer, veya "duzeltilmis" transfer performansi. Step9E'nin
@@ -54,13 +56,24 @@ onerdigi herhangi bir yeni normalizasyon/feature-secim stratejisi, YENI bir
 deney olarak degerlendirilmelidir (ayni hedef bolgelerde validate edilip
 "unbiased transfer sonucu" olarak sunulamaz).
 
+RAPOR-ONLY REGENERASYON (--report-only): mevcut distribution_shift_audit.json'u
+okur, YALNIZCA metadata alanlarini (safe_wording, step9b_predictions_source_path,
+step9b_metrics_source_path, step9b_predictions_sha256, step9b_metrics_sha256,
+step9d_overall_conclusion, created_at) gunceller; Part A-F'yi YENIDEN
+HESAPLAMAZ, hicbir CSV/PNG/Step9A-D dosyasina DOKUNMAZ. Yazmadan once eski/yeni
+JSON'u (yalnizca izin verilen metadata alanlari cikarilarak) karsilastirir ve
+herhangi bir sayisal/bilimsel alan degismisse FAIL-FAST yapar (bkz.
+assert_numeric_sections_unchanged()).
+
 CLI:
     python src/step9e_distribution_shift_audit.py --source manavgat_2021 --target bejis_2022 --force
+    python src/step9e_distribution_shift_audit.py --source manavgat_2021 --target evia_2021 --report-only --force
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import warnings as pywarnings
@@ -179,6 +192,10 @@ def resolve_step9b_metrics_path(source_id: str, target_id: str) -> Path:
     return cross_region_output_root(source_id, target_id) / "step9b" / "cross_region_transfer_metrics.json"
 
 
+def resolve_step9d_report_path(source_id: str, target_id: str) -> Path:
+    return cross_region_output_root(source_id, target_id) / "step9d" / "final_cross_region_report.json"
+
+
 def _assert_paths_are_safely_namespaced(source_id: str, target_id: str, path: Path) -> None:
     """
     Step9E'nin YALNIZCA kendi (source, target) ciftinin namespaced dizinlerine
@@ -237,6 +254,157 @@ def load_step9b_metrics(source_id: str, target_id: str) -> dict:
     if not path.exists():
         raise Step9EError(f"Step9B metrics dosyasi bulunamadi: {path}.")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_step9d_report(source_id: str, target_id: str) -> dict:
+    """Step9D'nin canonical final_cross_region_report.json'unu (salt-okunur)
+    yukler -- safe_wording'in turetilecegi TEK dogru kaynak (bkz.
+    resolve_step9e_provenance_and_wording())."""
+    path = resolve_step9d_report_path(source_id, target_id)
+    _assert_paths_are_safely_namespaced(source_id, target_id, path)
+    if not path.exists():
+        raise Step9EError(
+            f"Step9D final raporu bulunamadi: {path}. Step9E, Step9D'yi "
+            "YENIDEN CALISTIRMAZ; once Step9D tamamlanmis olmalidir."
+        )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+# =============================================================================
+# Dynamic safe_wording (Step9D overall_conclusion -> report wording)
+# =============================================================================
+SAFE_WORDING_BY_CONCLUSION = {
+    "transfer_not_supported": (
+        "Thermal incremental cross-region transfer was not supported in the "
+        "original Step9 evaluation. Step9E examines whether feature-distribution "
+        "shift, probability-scale shift, or region-dependent feature-label "
+        "relationships are consistent with this result."
+    ),
+    "partial_transfer_supported": (
+        "The original Step9 evaluation showed asymmetric or partial cross-region "
+        "support for the thermal predictor set. Step9E examines the "
+        "feature-distribution, probability-scale, and feature-label relationship "
+        "shifts associated with this mixed result."
+    ),
+    "transfer_supported": (
+        "The original Step9 evaluation showed cross-region support for the "
+        "thermal predictor set under the evaluated directions and populations. "
+        "Step9E examines the remaining feature-distribution, probability-scale, "
+        "and feature-label relationship differences."
+    ),
+}
+
+# src/step9d_build_cross_region_report.py:classify_overall_conclusion() emits
+# "bidirectional_transfer_supported" (not literally "transfer_supported") for
+# its full/both-directions-supported case. Treated as an alias of the
+# "transfer_supported" template -- same underlying claim (cross-region support
+# was observed), just Step9D's actual spelling for it.
+_CONCLUSION_ALIASES = {
+    "bidirectional_transfer_supported": "transfer_supported",
+}
+
+
+def resolve_safe_wording(overall_conclusion: str | None) -> str:
+    """Maps Step9D's `overall_conclusion` to the correct report wording.
+    Fails fast (rather than falling back to a generic/incorrect sentence) if
+    `overall_conclusion` is missing or not a recognized value."""
+    if not overall_conclusion:
+        raise Step9EError(
+            "Step9D final raporunda 'overall_conclusion' cozulemedi/None -- "
+            "safe_wording turetilemiyor."
+        )
+    key = _CONCLUSION_ALIASES.get(overall_conclusion, overall_conclusion)
+    wording = SAFE_WORDING_BY_CONCLUSION.get(key)
+    if wording is None:
+        raise Step9EError(
+            f"Step9D overall_conclusion ('{overall_conclusion}') taninmiyor -- "
+            "safe_wording turetilemiyor. Bilinen degerler: "
+            f"{sorted(SAFE_WORDING_BY_CONCLUSION)} (+ aliases: {_CONCLUSION_ALIASES})."
+        )
+    return wording
+
+
+# =============================================================================
+# Step9B provenance (predictions vs. metrics -- MUST stay distinct; this is
+# the exact bug this fix corrects, see module docstring / task).
+# =============================================================================
+def _assert_pair_matches(label: str, payload_source: str | None, payload_target: str | None, source_id: str, target_id: str) -> None:
+    if payload_source != source_id or payload_target != target_id:
+        raise Step9EError(
+            f"{label}: source/target ('{payload_source}'/'{payload_target}') "
+            f"Step9E ciftiyle ('{source_id}'/'{target_id}') UYUSMUYOR."
+        )
+
+
+def _assert_extension(label: str, path: Path, expected_suffix: str) -> None:
+    if path.suffix != expected_suffix:
+        raise Step9EError(
+            f"{label} beklenen uzantiya sahip degil (beklenen '{expected_suffix}', "
+            f"bulunan '{path.suffix}'): {path}"
+        )
+
+
+def _sha256_file(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def resolve_step9e_provenance_and_wording(source_id: str, target_id: str, step9b_metrics: dict) -> dict:
+    """
+    Single source of truth for the Step9B provenance fields + Step9D-derived
+    safe_wording, used by BOTH the full run_shift_audit() and the
+    --report-only regeneration path (regenerate_report_only()) -- so the
+    predictions/metrics field-swap bug and the static safe_wording bug
+    cannot silently reappear in only one of the two code paths.
+
+    Fails fast (Step9EError) when:
+        - the Step9B metrics' source/target ids do not match (source_id, target_id);
+        - the Step9B predictions or metrics files are missing;
+        - the resolved provenance paths do not have the expected extension
+          (predictions: .parquet, metrics: .json);
+        - the Step9D final report's source/target ids do not match
+          (source_id, target_id);
+        - the Step9D overall_conclusion is missing/unrecognized.
+    """
+    _assert_pair_matches(
+        "Step9B cross_region_transfer_metrics.json",
+        step9b_metrics.get("source_experiment_id"), step9b_metrics.get("target_experiment_id"),
+        source_id, target_id,
+    )
+
+    predictions_path = resolve_step9b_predictions_path(source_id, target_id)
+    metrics_path = resolve_step9b_metrics_path(source_id, target_id)
+    if not predictions_path.exists():
+        raise Step9EError(
+            f"Step9B tahmin dosyasi bulunamadi: {predictions_path}. Step9E, "
+            "Step9B'yi YENIDEN CALISTIRMAZ; once Step9B tamamlanmis olmalidir."
+        )
+    if not metrics_path.exists():
+        raise Step9EError(f"Step9B metrics dosyasi bulunamadi: {metrics_path}.")
+    _assert_extension("step9b_predictions_source_path", predictions_path, ".parquet")
+    _assert_extension("step9b_metrics_source_path", metrics_path, ".json")
+
+    step9d_report = load_step9d_report(source_id, target_id)
+    _assert_pair_matches(
+        "Step9D final_cross_region_report.json",
+        step9d_report.get("source_experiment_id"), step9d_report.get("target_experiment_id"),
+        source_id, target_id,
+    )
+    safe_wording = resolve_safe_wording(step9d_report.get("overall_conclusion"))
+
+    return {
+        "safe_wording": safe_wording,
+        "step9d_overall_conclusion": step9d_report.get("overall_conclusion"),
+        "step9b_predictions_source_path": str(predictions_path),
+        "step9b_metrics_source_path": str(metrics_path),
+        "step9b_predictions_sha256": _sha256_file(predictions_path),
+        "step9b_metrics_sha256": _sha256_file(metrics_path),
+    }
 
 
 def population_subset(df: pd.DataFrame, population: str) -> pd.DataFrame:
@@ -1091,12 +1259,10 @@ def plot_calibration_curves(calibration_bins_df: pd.DataFrame, primary_populatio
 # =============================================================================
 # Markdown summary
 # =============================================================================
-SAFE_WORDING = (
-    "Cross-region discrimination was not supported in the original Step9 "
-    "evaluation. Step9E examines whether feature distribution shift, "
-    "probability scale shift, or region-dependent feature-label "
-    "relationships may explain this result."
-)
+# NOTE: safe_wording is NO LONGER a static module constant -- it is resolved
+# dynamically per (source, target) pair from Step9D's overall_conclusion
+# (see SAFE_WORDING_BY_CONCLUSION / resolve_safe_wording() above) and read
+# from `payload["safe_wording"]` below.
 
 INTERPRETATION_RULES = [
     "Step9E is a post-hoc diagnostic analysis.",
@@ -1124,7 +1290,7 @@ def write_markdown_summary(payload: dict, output_dir: Path) -> Path:
         f"- target: `{payload['target_experiment_id']}`",
         f"- primary population: `{p['primary_population']}`",
         "",
-        "> " + SAFE_WORDING,
+        "> " + payload["safe_wording"],
         "",
         "## Diagnosis categories",
         "",
@@ -1282,11 +1448,17 @@ def run_shift_audit(source_id: str, target_id: str, force: bool = False) -> dict
     prediction_audit_df.to_csv(output_dir / "prediction_distribution_audit.csv", index=False)
     calibration_bins_df.to_csv(output_dir / "calibration_bins.csv", index=False)
 
+    # Step9B provenance (predictions vs. metrics paths/hashes, kept distinct)
+    # + Step9D-derived safe_wording -- SINGLE resolver shared with
+    # --report-only (regenerate_report_only()) so the two code paths cannot
+    # drift apart.
+    provenance_and_wording = resolve_step9e_provenance_and_wording(source_id, target_id, step9b_metrics)
+
     payload = {
         "source_experiment_id": source_id,
         "target_experiment_id": target_id,
         "audit_type": "post_hoc_distribution_and_relationship_shift_diagnostic",
-        "safe_wording": SAFE_WORDING,
+        **provenance_and_wording,
         "interpretation_rules": INTERPRETATION_RULES,
         "never_claims": NEVER_CLAIMS,
         "numeric_audit_features": NUMERIC_FEATURES,
@@ -1302,7 +1474,6 @@ def run_shift_audit(source_id: str, target_id: str, force: bool = False) -> dict
         "part_d_prediction_distribution_audit": prediction_audit_df.to_dict(orient="records"),
         "part_e_calibration_bins": calibration_bins_df.to_dict(orient="records"),
         "part_f_summary": part_f_summary,
-        "step9b_metrics_source_path": str(resolve_step9b_predictions_path(source_id, target_id)),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
@@ -1325,6 +1496,123 @@ def run_shift_audit(source_id: str, target_id: str, force: bool = False) -> dict
     return payload
 
 
+# =============================================================================
+# --report-only: metadata/provenance-only regeneration (Part A-F NEVER
+# recomputed; no CSV/PNG/Step9A-D file is ever touched here).
+# =============================================================================
+# The ONLY keys a --report-only regeneration is allowed to change. Everything
+# else in the JSON must remain byte-for-byte (value-)identical -- see
+# assert_numeric_sections_unchanged().
+METADATA_ONLY_FIELDS = frozenset({
+    "safe_wording",
+    "step9d_overall_conclusion",
+    "step9b_predictions_source_path",
+    "step9b_metrics_source_path",
+    "step9b_predictions_sha256",
+    "step9b_metrics_sha256",
+    "created_at",
+})
+
+
+def assert_numeric_sections_unchanged(old_payload: dict, new_payload: dict) -> None:
+    """
+    Fail-fast guard for --report-only: strips ONLY METADATA_ONLY_FIELDS from
+    both the old (on-disk) and new (about-to-be-written) payload, then
+    requires the remainder to be EXACTLY value-identical (part_a-f numeric
+    sections, diagnosis labels/counts, population counts, feature lists,
+    AUC/inverse-AUC diagnostics, etc.). Raises Step9EError -- WITHOUT writing
+    anything -- if any non-metadata field differs.
+    """
+    old_stripped = {k: v for k, v in old_payload.items() if k not in METADATA_ONLY_FIELDS}
+    new_stripped = {k: v for k, v in new_payload.items() if k not in METADATA_ONLY_FIELDS}
+    if old_stripped != new_stripped:
+        all_keys = sorted(set(old_stripped) | set(new_stripped))
+        diffs = [k for k in all_keys if old_stripped.get(k) != new_stripped.get(k)]
+        raise Step9EError(
+            "--report-only FAIL-FAST: bir veya daha fazla NUMERIC/bilimsel "
+            f"alan degisti (bu, salt metadata guncellemesi olmasi gereken bir "
+            f"islemde ASLA olmamali): {diffs}. Hicbir dosya YAZILMADI."
+        )
+
+
+def _markdown_is_stale(md_text: str, old_safe_wording: str | None, new_safe_wording: str) -> bool:
+    """True iff the on-disk markdown still contains the OLD safe_wording text
+    and that text has actually changed -- i.e. the markdown is genuinely
+    stale and needs rewriting. A markdown that already reflects the current
+    wording (e.g. a previous --report-only run already fixed it) is left
+    untouched."""
+    if not old_safe_wording or old_safe_wording == new_safe_wording:
+        return False
+    return old_safe_wording in md_text
+
+
+def regenerate_report_only(source_id: str, target_id: str, force: bool = False) -> dict:
+    """
+    Report-generation-only regeneration of an EXISTING Step9E audit: reads
+    the on-disk distribution_shift_audit.json, updates ONLY safe_wording +
+    Step9B provenance paths/hashes + created_at (via the SAME resolver
+    run_shift_audit() uses), and rewrites the JSON (and, only if it was
+    actually stale, the Markdown). Never recomputes Part A-F, never touches
+    any CSV/PNG, never touches any Step9A-D artifact.
+    """
+    if source_id == target_id:
+        raise Step9EError("--source ve --target ayni deney OLAMAZ.")
+
+    output_dir = step9e_output_dir(source_id, target_id)
+    json_path = output_dir / "distribution_shift_audit.json"
+    if not json_path.exists():
+        raise Step9EError(
+            f"--report-only: mevcut Step9E ciktisi bulunamadi: {json_path}. "
+            "--report-only Part A-F'yi YENIDEN HESAPLAMAZ; once tam bir "
+            "run_shift_audit() calistirmasi tamamlanmis olmalidir."
+        )
+    if not force:
+        log.info(
+            "--report-only: %s zaten var; --force verilmedigi icin atlaniyor.",
+            json_path,
+        )
+        return json.loads(json_path.read_text(encoding="utf-8"))
+
+    old_payload = json.loads(json_path.read_text(encoding="utf-8"))
+    _assert_pair_matches(
+        "mevcut distribution_shift_audit.json",
+        old_payload.get("source_experiment_id"), old_payload.get("target_experiment_id"),
+        source_id, target_id,
+    )
+
+    step9b_metrics = load_step9b_metrics(source_id, target_id)
+    provenance_and_wording = resolve_step9e_provenance_and_wording(source_id, target_id, step9b_metrics)
+
+    new_payload = dict(old_payload)
+    new_payload.update(provenance_and_wording)
+    new_payload["created_at"] = datetime.now(timezone.utc).isoformat()
+
+    assert_numeric_sections_unchanged(old_payload, new_payload)
+
+    json_path.write_text(json.dumps(new_payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    log.info("--report-only: distribution_shift_audit.json guncellendi (yalnizca metadata): %s", json_path)
+
+    md_path = output_dir / "distribution_shift_summary.md"
+    rewrote_md = False
+    if md_path.exists():
+        md_text = md_path.read_text(encoding="utf-8")
+        if _markdown_is_stale(md_text, old_payload.get("safe_wording"), new_payload["safe_wording"]):
+            write_markdown_summary(new_payload, output_dir)
+            rewrote_md = True
+            log.info("--report-only: distribution_shift_summary.md eski ifadeyi icerdigi icin yeniden yazildi: %s", md_path)
+        else:
+            log.info("--report-only: distribution_shift_summary.md zaten guncel/stale degil; DOKUNULMADI: %s", md_path)
+
+    log.info(
+        "--report-only TAMAMLANDI [%s <-> %s]: safe_wording (Step9D "
+        "overall_conclusion=%s uzerinden) ve Step9B provenance alanlari "
+        "guncellendi; markdown_rewritten=%s. Hicbir CSV/PNG/Step9A-D "
+        "dosyasina DOKUNULMADI.",
+        source_id, target_id, new_payload.get("step9d_overall_conclusion"), rewrote_md,
+    )
+    return new_payload
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Step9E: Manavgat<->Bejís cross-region transferinin "
@@ -1334,9 +1622,18 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--source", type=str, required=True)
     parser.add_argument("--target", type=str, required=True)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--report-only", action="store_true",
+        help="Part A-F'yi YENIDEN HESAPLAMADAN, yalnizca safe_wording + "
+        "Step9B provenance alanlarini + created_at'i gunceller (mevcut "
+        "distribution_shift_audit.json'un uzerine yazar).",
+    )
     return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run_shift_audit(source_id=args.source, target_id=args.target, force=args.force)
+    if args.report_only:
+        regenerate_report_only(source_id=args.source, target_id=args.target, force=args.force)
+    else:
+        run_shift_audit(source_id=args.source, target_id=args.target, force=args.force)

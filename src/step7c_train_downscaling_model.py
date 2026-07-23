@@ -354,7 +354,16 @@ def grouped_split(
                 "STEP7C_SPATIAL_BLOCK_SIZE_PIXELS for more effective grouping."
             )
 
-        groups = df[group_col].unique()
+        # np.asarray(...) ONCE: pandas 2.1+/3.x'te string kolonlarin (or.
+        # spatial_block_id) .unique() cikisi bir ArrowStringArray/ExtensionArray
+        # olabilir; numpy Generator.shuffle bunu dogrudan (Sequence olmayan bir
+        # nesne olarak) kabul ederse "may contain duplicates after shuffling"
+        # UYARISI verir (gercek bir dogruluk riski, yalnizca kozmetik degil).
+        # np.asarray(...) sayisal kolonlari (int64 modis_pixel_id/source_tile_id
+        # gibi) OLDUGU GIBI birakir, yalnizca ExtensionArray'leri duz bir numpy
+        # dizisine (object/str dtype) cevirir -- ayni tohumla ayni permutasyonu
+        # uretir (bkz. testler), split atamasini DEGISTIRMEZ.
+        groups = np.asarray(df[group_col].unique())
         rng.shuffle(groups)
         n_test_g = max(1, int(n_groups * test_size))
         n_val_g = max(1, int(n_groups * val_size))
@@ -375,6 +384,52 @@ def grouped_split(
             "train": len(train_groups), "val": len(val_groups), "test": len(test_groups),
         }
 
+    # --- Split integrity assertions (madde 8) ---
+    # Gruplu (spatial_block/modis_pixel_group/tile_group) VE random fallback
+    # yollarinin HER IKISI icin de: her satirin TAM OLARAK bir split'e
+    # atandigini dogrula (atanmamis veya birden fazla atanmis satir YOK).
+    all_idx = np.concatenate([train_idx, val_idx, test_idx])
+    if len(all_idx) != len(df):
+        raise SystemExit(
+            f"Split integrity FAILED: {len(all_idx)} satir train/val/test'e "
+            f"atandi ama veri setinde {len(df)} satir var (atanmamis satir(lar) var)."
+        )
+    if len(np.unique(all_idx)) != len(all_idx):
+        raise SystemExit(
+            "Split integrity FAILED: en az bir satir birden fazla split'e "
+            "(train/val/test) atanmis (duplicate row index)."
+        )
+    split_integrity = {
+        "all_rows_assigned_exactly_once": True,
+        "assigned_row_count": int(len(all_idx)),
+        "total_row_count": int(len(df)),
+    }
+    if group_col is not None:
+        if (train_groups & val_groups) or (train_groups & test_groups) or (val_groups & test_groups):
+            raise SystemExit(
+                "Split integrity FAILED: train/val/test grup kumeleri birbiriyle "
+                "KESISIYOR (bir grup birden fazla split'te)."
+            )
+        total_unique_groups = set(df[group_col].unique().tolist())
+        union_groups = train_groups | val_groups | test_groups
+        if union_groups != total_unique_groups:
+            raise SystemExit(
+                f"Split integrity FAILED: train/val/test grup birlesimi "
+                f"({len(union_groups)}) toplam benzersiz grup sayisiyla "
+                f"({len(total_unique_groups)}) eslesmiyor."
+            )
+        split_integrity.update({
+            "train_val_test_groups_disjoint": True,
+            "union_group_count": len(union_groups),
+            "total_unique_group_count": len(total_unique_groups),
+        })
+    else:
+        split_integrity.update({
+            "train_val_test_groups_disjoint": None,
+            "union_group_count": None,
+            "total_unique_group_count": None,
+        })
+
     train_df = df.loc[train_idx].reset_index(drop=True)
     val_df = df.loc[val_idx].reset_index(drop=True)
     test_df = df.loc[test_idx].reset_index(drop=True)
@@ -385,14 +440,15 @@ def grouped_split(
 
     log.info(
         "Split (%s, group_col=%s): train=%d val=%d test=%d (groups: %s) "
-        "samples_per_group=%s",
+        "samples_per_group=%s split_integrity=%s",
         split_mode_used, group_col, len(train_df), len(val_df), len(test_df),
-        group_info, samples_per_group,
+        group_info, samples_per_group, split_integrity,
     )
     return train_df, val_df, test_df, split_mode_used, group_col, {
         "group_counts": group_info,
         "samples_per_group": samples_per_group,
         "warnings": warnings_list,
+        "split_integrity": split_integrity,
     }
 
 
@@ -743,6 +799,7 @@ def main(
         "val_group_count": split_info["group_counts"].get("val"),
         "test_group_count": split_info["group_counts"].get("test"),
         "samples_per_group": split_info.get("samples_per_group"),
+        "split_integrity": split_info.get("split_integrity"),
         "spatial_block_size_pixels": spatial_block_size if split_mode_used == "spatial_block" else None,
         "train_sample_count": int(len(train_df)),
         "val_sample_count": int(len(val_df)),

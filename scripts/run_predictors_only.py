@@ -445,6 +445,27 @@ def _assert_tile_transforms_compatible(srcs: list, label: str) -> None:
             )
 
 
+def _assert_tile_nodata_compatible(srcs: list, label: str, expected_nodata: float) -> None:
+    """
+    Merge'den ONCE: `nodata` acikca istenmisse (caller bir sentinel/nodata
+    degeri gecirdiyse -- bkz. export_image_direct_or_tiled `nodata` param),
+    HER tile'in GeoTIFF nodata etiketinin BEKLENEN degerle (tam) eslestigini
+    dogrular. Eslesmiyorsa (or. eski/onceki-kod ile indirilmis, nodata
+    etiketsiz bir tile yeniden kullanildiysa) PredictorRunnerError firlatir --
+    boyle bir tile'in rasterio.merge.merge'e SESSIZCE (maskesiz) karismasi,
+    maskeli/gozlemsiz bolgelerin sayisal 0'a donmesine (bu duzeltmenin tam
+    olarak onlemeye calistigi hataya) yeniden yol acabilir.
+    """
+    for i, s in enumerate(srcs):
+        if s.nodata != expected_nodata:
+            raise PredictorRunnerError(
+                f"[{label}] tile {i} nodata etiketi beklenenle uyusmuyor "
+                f"(beklenen={expected_nodata}, bulunan={s.nodata}). Muhtemelen "
+                "bu duzeltmeden ONCE indirilmis eski bir tile dosyasi yeniden "
+                "kullaniliyor -- --force ile tum tile'lari yeniden export edin."
+            )
+
+
 def _export_tiled(
     image,
     out_path: Path,
@@ -456,6 +477,7 @@ def _export_tiled(
     tile_rows: int,
     tile_cols: int,
     tiles_dir: Path,
+    nodata: float | None = None,
 ) -> Path:
     """
     AOI'yi tile_rows x tile_cols dikdörtgen tile'a böler, her tile'ı ayrı ayrı
@@ -466,6 +488,17 @@ def _export_tiled(
 
     tiles_dir: outputs/experiments/<experiment_id>/data/_tiles/<label>/ --
         çağıran taraf (export_image_direct_or_tiled) hesaplar ve verir.
+
+    nodata: verilirse (or. MODIS mean/std icin STEP7_MODIS_NODATA_VALUE),
+        caller'in `image`'i export ONCESINDE AYNI degerle `.unmask(nodata)`
+        etmis olmasi BEKLENIR -- bu fonksiyon o degeri, her tile indirildikten
+        HEMEN SONRA (piksel verisini yeniden yazmadan, yalnizca GeoTIFF
+        etiketini guncelleyerek) VE nihai birlestirilmis dosyada GeoTIFF
+        `nodata` alanina damgalar; `rasterio.merge.merge`'e de ACIKCA
+        `nodata=` olarak gecilir (merge hedefi bu degerle BASLATILIR, boylece
+        hicbir tile'in kapsamadigi alanlar SAYISAL 0 DEGIL nodata kalir).
+        None ise (varsayilan, eski davranis BIREBIR korunur) hicbir nodata
+        etiketi/parametresi eklenmez.
     """
     import ee
     import geemap
@@ -497,6 +530,16 @@ def _export_tiled(
         )
 
         if _file_ok(tile_path) and not force:
+            if nodata is not None:
+                with rasterio.open(tile_path) as chk:
+                    if chk.nodata != nodata:
+                        raise PredictorRunnerError(
+                            f"[{label}] tile (r{r},c{c}) zaten var ama beklenen "
+                            f"nodata etiketini ({nodata}) TASIMIYOR (bulunan: "
+                            f"{chk.nodata}) -- muhtemelen bu duzeltmeden ONCE "
+                            f"indirilmis eski bir tile: {tile_path}. --force ile "
+                            "yeniden export edin."
+                        )
             log.info("[%s] tile (r%d,c%d) zaten var, atlanıyor: %s", label, r, c, tile_path)
             continue
 
@@ -517,6 +560,14 @@ def _export_tiled(
                 label, r, c, tile_bounds, tile_path,
                 detail=f"geemap hatası: {tile_error}" if tile_error else "geemap sessizce dosya üretmedi.",
             )
+        if nodata is not None:
+            # Piksel verisi ZATEN dogru (caller image'i `.unmask(nodata)`
+            # etti) -- yalnizca GeoTIFF `nodata` etiketini damgala (veriyi
+            # yeniden yazmadan), boylece maskeli/gozlemsiz bolgeler asagidaki
+            # merge'de (ve sonraki her okuyucuda) DOGRU sekilde nodata olarak
+            # taninir.
+            with rasterio.open(tile_path, "r+") as ds:
+                ds.nodata = nodata
         log.info(
             "[%s] tile (r%d,c%d) yazıldı: %s (%d bytes)",
             label, r, c, tile_path, tile_path.stat().st_size,
@@ -532,8 +583,11 @@ def _export_tiled(
         # bagimsiz indirilen tile'larin sessizce yanlis hizali birlesmesini
         # (kaydirilmis/duplike dikis pikselleri) ONLER.
         _assert_tile_transforms_compatible(srcs, label)
+        if nodata is not None:
+            _assert_tile_nodata_compatible(srcs, label, nodata)
 
-        merged_array, merged_transform = rasterio_merge(srcs)
+        merge_kwargs = {"nodata": nodata} if nodata is not None else {}
+        merged_array, merged_transform = rasterio_merge(srcs, **merge_kwargs)
         src0 = srcs[0]
         out_profile = src0.profile.copy()
         out_profile.update(
@@ -545,6 +599,8 @@ def _export_tiled(
                 "BIGTIFF": "IF_SAFER",
             }
         )
+        if nodata is not None:
+            out_profile["nodata"] = nodata
         out_path.parent.mkdir(parents=True, exist_ok=True)
         # ATOMIK YAZMA: dogrudan out_path'e DEGIL, once bir gecici dosyaya
         # yazilir; ancak TAM ve DOGRULANMIS bir dosya elde edildikten sonra
@@ -590,8 +646,16 @@ def export_image_direct_or_tiled(
     bytes_per_pixel: int = DEFAULT_ESTIMATE_BYTES_PER_PIXEL,
     band_count: int = 1,
     run_alignment_qa: bool = True,
+    nodata: float | None = None,
 ) -> dict:
     """
+    nodata: verilirse, `image`'in caller tarafindan ONCEDEN AYNI degerle
+        `.unmask(nodata)` edildigi VARSAYILIR. Hem direct hem tiled yolda,
+        indirilen GeoTIFF'in `nodata` etiketi bu degere damgalanir (piksel
+        verisi yeniden yazilmadan) ve tiled merge bu degeri ACIKCA kullanir
+        (bkz. _export_tiled). None ise (varsayilan) davranis eskisiyle
+        BIREBIR aynidir -- hicbir nodata etiketi eklenmez.
+
     Önce, bir ON-FILTRE olarak, tam AOI'nin tahmini indirme boyutunu
     (`_estimate_request_bytes`, GEE'ye dokunmadan) `DIRECT_EXPORT_SAFE_THRESHOLD_BYTES`
     ile karşılaştırır. Tahmin eşiği AŞARSA, doğrudan tiled export'a geçilir
@@ -652,6 +716,16 @@ def export_image_direct_or_tiled(
     import geemap
 
     if _file_ok(out_path) and not force:
+        if nodata is not None:
+            import rasterio
+            with rasterio.open(out_path) as chk:
+                if chk.nodata != nodata:
+                    raise PredictorRunnerError(
+                        f"[{label}] cikti zaten var ama beklenen nodata etiketini "
+                        f"({nodata}) TASIMIYOR (bulunan: {chk.nodata}) -- muhtemelen "
+                        f"bu duzeltmeden ONCE export edilmis eski bir dosya: "
+                        f"{out_path}. --force ile yeniden export edin."
+                    )
         log.info("[%s] zaten var, atlanıyor: %s", label, out_path)
         return {
             "path": out_path, "transport": "skipped_existing", "tile_grid": None,
@@ -710,6 +784,13 @@ def export_image_direct_or_tiled(
         if tmp_direct_path.exists():
             tmp_direct_path.unlink(missing_ok=True)
 
+    if direct_ok and nodata is not None:
+        # Piksel verisi ZATEN dogru (caller image'i `.unmask(nodata)` etti);
+        # yalnizca GeoTIFF `nodata` etiketini damgala.
+        import rasterio
+        with rasterio.open(out_path, "r+") as ds:
+            ds.nodata = nodata
+
     if direct_ok:
         log.info("[%s] direkt export başarılı: %s (%d bytes)", label, out_path, out_path.stat().st_size)
         alignment_qa = (
@@ -736,6 +817,7 @@ def export_image_direct_or_tiled(
             result_path = _export_tiled(
                 image, out_path, region, scale, crs, label, force,
                 tile_rows=rows, tile_cols=cols, tiles_dir=tiles_dir,
+                nodata=nodata,
             )
             log.info(
                 "[%s] Tiled fallback BAŞARILI: grid=%dx%d, tile_count=%d, "

@@ -1,196 +1,227 @@
 """
-run_label_gate_only.py
+check_experiment_registry.py
 
-Step0B: guvenli "gate-only" calistirici.
+Step0: pure, read-only deney (experiment) kayit defteri dogrulayicisi.
 
-Modelleme (Step7A-Step8E) oncesinde gerekli MINIMUM label/gate zincirini
-calistirir:
-    [opsiyonel] raw MCD64A1 BurnDate export (Step6'nin canonical export'u)
-    -> Step6B burned-landcover gate
+Bir experiment_id icin core/regions.py EXPERIMENTS kaydini okur, Step0
+metadata'sini yazdirir ve saf kayit-defteri (registry) tutarlilik
+kurallarini dogrular. Bu script:
 
-Step1-Step8'in geri kalanini KESINLIKLE CALISTIRMAZ.
-
-ONEMLI KAPSAM SINIRLAMASI (Step0B):
-    Step1-Step6 hala core/config.py'deki LEGACY sabitleri (REGION_NAME,
-    PREDICTOR_*_DATE, LABEL_*_DATE) kullanir; deney-farkinda (experiment-
-    aware) DEGILDIR. Bu yuzden bu script su an SADECE "kozan_2023" icin
-    gercekten calisir. "manavgat_2021" (veya baska herhangi bir deney) icin:
-        - Step0 ozetini basar,
-        - "Step1-Step6 henuz deney-farkinda degil, calistirilamiyor" der,
-        - TEMIZ sekilde cikar.
-    Bu script HICBIR ZAMAN, Manavgat (veya baska bir deney) etiketi altinda
-    sessizce Kozan verisini calistirmaz. Step1-Step6 deney-farkinda hale
-    getirildiginde, bu script'in yapisi degismeden manavgat_2021 destegi
-    ACILABILIR (bkz. RUNNABLE_EXPERIMENTS asagida).
+    - HICBIR Earth Engine cagrisi YAPMAZ (ee.Geometry insa etmez; region_key
+      cozunurlugu, core/regions.py'nin build_regions() donusunu STATIK
+      olarak (AST ile) okuyarak dogrulanir -- build_regions() cagirmak
+      ee.Initialize()/kimlik dogrulama gerektirir, bu yuzden hicbir zaman
+      cagirilmaz).
+    - run_label_gate_only / Step6A / Step6B / MCD64A1 export'unu CAGIRMAZ.
+    - core/pipeline_orchestrator.py'yi import ETMEZ (import etmek modul
+      seviyesinde bir logger/log-dizini yan etkisi tetikler); legacy
+      uyumluluk (kozan_2023) da ayni sekilde STATIK olarak dogrulanir.
+    - hicbir dizin/dosya OLUSTURMAZ; yalnizca stdout'a yazar (print).
+    - raster/GeoTIFF dosyalarini KONTROL ETMEZ/GEREKTIRMEZ.
 
 CLI:
-    python scripts/run_label_gate_only.py --experiment kozan_2023 --skip-export --force
-    python scripts/run_label_gate_only.py --experiment kozan_2023 --export-labels --force
-    python scripts/run_label_gate_only.py --experiment manavgat_2021 --dry-run
-
-Flags:
-    --dry-run        Hicbir sey CALISTIRMAZ; yalnizca Step0 ozetini basar.
-    --skip-export     Raw BurnDate export'u ATLA (varsayilan davranis);
-                      gate mevcut outputs/validation/labels/mcd64a1_raw.tif
-                      dosyasini kullanir.
-    --export-labels   Gate'ten ONCE raw BurnDate export'unu (GEE) calistir.
-    --force           Gate ciktilari zaten varsa uzerine yaz.
+    python scripts/check_experiment_registry.py --experiment kozan_2023
+    python scripts/check_experiment_registry.py --experiment manavgat_2021
+    python scripts/check_experiment_registry.py --experiment bejis_2022
+    python scripts/check_experiment_registry.py --experiment mugla_2021
+    python scripts/check_experiment_registry.py --experiment evia_2021
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import sys
+from datetime import datetime
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from core.io_utils import setup_logger
-from core.regions import get_active_experiment, get_experiment_output_root
+from core.regions import get_experiment, get_experiment_output_root
 
-log, log_file = setup_logger("run_label_gate_only")
-
-# Step1-Step6 deney-farkinda hale geldikce buraya yeni experiment_id'ler
-# eklenir. Su an SADECE kozan_2023.
-RUNNABLE_EXPERIMENTS = ("kozan_2023",)
+_REGIONS_PY = _PROJECT_ROOT / "core" / "regions.py"
+_ORCHESTRATOR_PY = _PROJECT_ROOT / "core" / "pipeline_orchestrator.py"
+_LEGACY_LABELS_DIR = (_PROJECT_ROOT / "outputs" / "validation" / "labels").resolve()
 
 
-class LabelGateRunnerError(SystemExit):
-    """Fail-fast error for this runner (diger step'lerle ayni konvansiyon)."""
+class RegistryCheckError(SystemExit):
+    """Fail-fast error for this read-only validator (diger step'lerle ayni konvansiyon)."""
 
 
-def _print_step0_summary(exp: dict, output_root: Path) -> None:
-    log.info("[Step0] Active experiment: %s", exp["experiment_id"])
-    log.info("[Step0] Display name: %s", exp["display_name"])
-    log.info("[Step0] Region: %s", exp["region_key"])
-    log.info("[Step0] Role: %s", exp["role"])
-    log.info(
-        "[Step0] Predictor window: %s -> %s",
-        exp["predictor_start_date"], exp["predictor_end_date"],
+# =============================================================================
+# Statik (import/execute ETMEYEN) kaynak-kodu okuma yardimcilari
+# =============================================================================
+def _static_region_keys() -> set[str]:
+    """`build_regions()` icindeki `return {...}` sozlugunun anahtarlarini,
+    fonksiyonu HICBIR ZAMAN CAGIRMADAN (AST ile) doner.
+
+    build_regions() cagrilirsa ee.Geometry.* insa edilir; bu, Earth Engine
+    kutuphanesinin ilk kullanimda kimlik dogrulama/ag baglantisi denemesine
+    (ee.Initialize gerektirir) yol acar -- bu yuzden BILEREK cagrilmaz.
+    """
+    tree = ast.parse(_REGIONS_PY.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "build_regions":
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Return) and isinstance(sub.value, ast.Dict):
+                    return {
+                        key.value
+                        for key in sub.value.keys
+                        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    }
+    raise RegistryCheckError(
+        "build_regions() icindeki return sozlugu statik olarak ayristirilamadi; "
+        "region_key dogrulamasi yapilamiyor."
     )
-    log.info(
-        "[Step0] Label window: %s -> %s",
-        exp["label_start_date"], exp["label_end_date"],
-    )
-    log.info("[Step0] Baseline years: %s", ", ".join(str(y) for y in exp["baseline_years"]) or "(yok)")
-    log.info("[Step0] Output root: %s", output_root)
 
 
-def main(
-    experiment_id: str = "kozan_2023",
-    dry_run: bool = False,
-    skip_export: bool = False,
-    export_labels: bool = False,
-    force: bool = False,
-) -> dict:
-    exp = get_active_experiment(experiment_id)
+def _static_legacy_experiment_id() -> str | None:
+    """`core/pipeline_orchestrator.py`'deki `LEGACY_EXPERIMENT_ID = "..."`
+    atamasini, modulu IMPORT ETMEDEN (AST ile) okur.
+
+    core.pipeline_orchestrator'i import etmek modul seviyesinde bir
+    setup_logger(...) yan etkisi (logs/ dizini + dosyasi) tetikler; bu
+    read-only kayit defteri dogrulayicisi hicbir dizin/dosya OLUSTURMAMALIDIR,
+    bu yuzden modul import edilmez, yalnizca kaynak metni okunur.
+    """
+    if not _ORCHESTRATOR_PY.exists():
+        return None
+    tree = ast.parse(_ORCHESTRATOR_PY.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Name)
+                    and target.id == "LEGACY_EXPERIMENT_ID"
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)
+                ):
+                    return node.value.value
+    return None
+
+
+# =============================================================================
+# Yazdirma
+# =============================================================================
+def _print_registry_summary(exp: dict, output_root: Path) -> None:
+    print(f"[Step0] experiment_id:  {exp['experiment_id']}")
+    print(f"[Step0] display_name:   {exp['display_name']}")
+    print(f"[Step0] region_key:     {exp['region_key']}")
+    print(f"[Step0] role:           {exp['role']}")
+    print(f"[Step0] predictor window: {exp['predictor_start_date']} -> {exp['predictor_end_date']}")
+    print(f"[Step0] label window:     {exp['label_start_date']} -> {exp['label_end_date']}")
+    print(f"[Step0] baseline years: {', '.join(str(y) for y in exp['baseline_years']) or '(yok)'}")
+    print(f"[Step0] enabled:        {exp['enabled']}")
+    print(f"[Step0] output_root (canonical): {output_root}")
+
+
+# =============================================================================
+# Dogrulamalar (hicbiri dosya/dizin OLUSTURMAZ, raster OKUMAZ)
+# =============================================================================
+def _validate_windows_and_baselines(exp: dict) -> None:
+    predictor_end = datetime.strptime(exp["predictor_end_date"], "%Y-%m-%d")
+    label_start = datetime.strptime(exp["label_start_date"], "%Y-%m-%d")
+    if not predictor_end < label_start:
+        raise RegistryCheckError(
+            f"'{exp['experiment_id']}': predictor_end_date ({exp['predictor_end_date']}) "
+            f"label_start_date'ten ({exp['label_start_date']}) ONCE degil."
+        )
+
+    event_year = label_start.year
+    for year in exp["baseline_years"]:
+        if year >= event_year:
+            raise RegistryCheckError(
+                f"'{exp['experiment_id']}': baseline yili {year}, olay yilindan "
+                f"({event_year}) ONCE degil."
+            )
+
+
+def _validate_region_key(exp: dict, valid_region_keys: set[str]) -> None:
+    if exp["region_key"] not in valid_region_keys:
+        raise RegistryCheckError(
+            f"'{exp['experiment_id']}': region_key ('{exp['region_key']}') "
+            f"build_regions() ciktisinda bulunamadi. Gecerli anahtarlar: "
+            f"{sorted(valid_region_keys)}."
+        )
+
+
+def _validate_namespacing(exp: dict, output_root: Path) -> None:
+    """Kozan-disi deneyler icin output_root'un outputs/experiments/<experiment_id>/
+    altinda kaldigini VE legacy paylasilan outputs/validation/labels/ dizini
+    ile CAKISMADIGINI dogrular. Hicbir dizin/dosya OLUSTURULMAZ/OKUNMAZ --
+    yalnizca Path string karsilastirmasi.
+    """
+    if exp["experiment_id"] == "kozan_2023":
+        return
+
+    experiments_root = (_PROJECT_ROOT / "outputs" / "experiments" / exp["experiment_id"]).resolve()
+    resolved_root = output_root.resolve()
+
+    if resolved_root != experiments_root and experiments_root not in resolved_root.parents:
+        raise RegistryCheckError(
+            f"'{exp['experiment_id']}': output_root ({resolved_root}) beklenen "
+            f"outputs/experiments/{exp['experiment_id']}/ deseninde degil."
+        )
+    if resolved_root == _LEGACY_LABELS_DIR or _LEGACY_LABELS_DIR in resolved_root.parents:
+        raise RegistryCheckError(
+            f"'{exp['experiment_id']}': output_root ({resolved_root}) Kozan'in "
+            "legacy paylasilan dizinine (outputs/validation/labels/) dusuyor."
+        )
+
+
+def _validate_legacy_compatibility() -> None:
+    legacy_id = _static_legacy_experiment_id()
+    if legacy_id != "kozan_2023":
+        raise RegistryCheckError(
+            "core/pipeline_orchestrator.py LEGACY_EXPERIMENT_ID artik 'kozan_2023' "
+            f"degil (bulunan: {legacy_id!r}); legacy uyumluluk bozulmus."
+        )
+
+
+def main(experiment_id: str = "kozan_2023") -> dict:
+    exp = get_experiment(experiment_id)
     output_root = get_experiment_output_root(experiment_id)
-    _print_step0_summary(exp, output_root)
 
-    if experiment_id not in RUNNABLE_EXPERIMENTS:
-        log.warning(
-            "'%s' deneyi henuz calistirilamiyor: Step1-Step6 hala legacy "
-            "kozan_2023 config sabitlerini (core/config.py REGION_NAME, "
-            "PREDICTOR_*_DATE, LABEL_*_DATE) kullaniyor, deney-farkinda "
-            "(experiment-aware) DEGIL. Bu script Kozan verisini bu deney "
-            "etiketiyle SESSIZCE CALISTIRMAZ -- temiz sekilde cikiyor. "
-            "Su an calistirilabilir deneyler: %s",
-            experiment_id, RUNNABLE_EXPERIMENTS,
-        )
-        return {
-            "experiment_id": experiment_id,
-            "ran": False,
-            "reason": "not_experiment_aware_yet",
-            "runnable_experiments": list(RUNNABLE_EXPERIMENTS),
-        }
+    _print_registry_summary(exp, output_root)
 
-    if dry_run:
-        log.info("[dry-run] Export/gate CALISTIRILMADI.")
-        return {"experiment_id": experiment_id, "ran": False, "reason": "dry_run"}
+    _validate_windows_and_baselines(exp)
+    _validate_region_key(exp, _static_region_keys())
+    _validate_namespacing(exp, output_root)
+    _validate_legacy_compatibility()
 
-    if skip_export and export_labels:
-        raise LabelGateRunnerError(
-            "--skip-export ve --export-labels birlikte verilemez (celiskili)."
-        )
-    do_export = export_labels and not skip_export
-
-    export_result = None
-    if do_export:
-        log.info("Raw MCD64A1 BurnDate export calistiriliyor (--export-labels)...")
-        try:
-            from src.step6_validate_fire_relation import export_raw_mcd64a1_labels
-        except Exception as exc:  # noqa: BLE001
-            raise LabelGateRunnerError(
-                f"src.step6_validate_fire_relation import edilemedi: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
-        export_result = export_raw_mcd64a1_labels(also_binary=True)
-        log.info("Raw BurnDate export tamamlandi: %s", export_result["raw_path"])
-    else:
-        log.info(
-            "Raw BurnDate export ATLANDI (--skip-export ya da varsayilan). "
-            "Gate mevcut outputs/validation/labels/mcd64a1_raw.tif dosyasini "
-            "kullanacak (yoksa gate net bir hata verecektir)."
-        )
-
-    log.info("Step6B burned-landcover gate calistiriliyor...")
-    try:
-        from src.step6b_burned_landcover_gate import main as run_gate
-    except Exception as exc:  # noqa: BLE001
-        raise LabelGateRunnerError(
-            f"src.step6b_burned_landcover_gate import edilemedi: "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
-    gate_result = run_gate(force=force)
-
-    log.info(
-        "TAMAMLANDI. Gate karari: %s (burned_count=%s). JSON: %s",
-        gate_result["decision"], gate_result["burned_count"], gate_result["json_path"],
+    print(
+        f"[Step0] '{experiment_id}' registry dogrulamasi BASARILI "
+        "(read-only; hicbir export/gate/predictor/model CALISTIRILMADI, "
+        "hicbir dosya/dizin OLUSTURULMADI)."
     )
 
     return {
         "experiment_id": experiment_id,
-        "ran": True,
-        "export_result": export_result,
-        "gate_result": gate_result,
+        "region_key": exp["region_key"],
+        "enabled": exp["enabled"],
+        "output_root": str(output_root),
+        "valid": True,
     }
 
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Step0B: modelleme oncesi minimum label/gate zincirini "
-        "(opsiyonel raw BurnDate export + Step6B burned-landcover gate) "
-        "calistirir. Step1-Step8'in geri kalanini CALISTIRMAZ. Su an "
-        f"sadece {RUNNABLE_EXPERIMENTS} gercekten calisir."
-    )
-    parser.add_argument("--experiment", type=str, default="kozan_2023")
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Hicbir sey calistirma; yalnizca Step0 ozetini bas.",
+        description="Step0: saf, read-only deney (experiment) kayit defteri "
+        "dogrulayicisi. Yalnizca core/regions.py EXPERIMENTS kaydini ve "
+        "region_key/legacy-uyumluluk tutarliligini dogrular. Export/gate/"
+        "predictor/model/bootstrap/report CALISTIRMAZ, hicbir dosya/dizin "
+        "OLUSTURMAZ, hicbir Earth Engine cagrisi YAPMAZ."
     )
     parser.add_argument(
-        "--skip-export", action="store_true",
-        help="Raw BurnDate export'unu atla (varsayilan davranis).",
-    )
-    parser.add_argument(
-        "--export-labels", action="store_true",
-        help="Gate'ten once raw BurnDate export'unu (GEE) calistir.",
-    )
-    parser.add_argument(
-        "--force", action="store_true",
-        help="Gate ciktilari zaten varsa uzerine yaz.",
+        "--experiment", type=str, default="kozan_2023",
+        help="core/regions.py EXPERIMENTS kaydindaki experiment_id (orn. kozan_2023, "
+        "manavgat_2021, bejis_2022, mugla_2021, evia_2021).",
     )
     return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = parse_args()
-    main(
-        experiment_id=args.experiment,
-        dry_run=args.dry_run,
-        skip_export=args.skip_export,
-        export_labels=args.export_labels,
-        force=args.force,
-    )
+    main(experiment_id=args.experiment)

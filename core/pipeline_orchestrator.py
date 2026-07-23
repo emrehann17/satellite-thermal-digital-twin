@@ -421,13 +421,22 @@ def run_transfer_stage(
     )
 
 
-def run_shift_audit_stage(source_id: str, target_id: str, dry_run: bool, force: bool) -> dict:
+def run_shift_audit_stage(
+    source_id: str, target_id: str, dry_run: bool, force: bool,
+    report_only: bool = False,
+) -> dict:
     """scripts/run_cross_region_shift_audit.py:main() -- Step9E (post-hoc,
-    Step9A-D'yi DEGISTIRMEZ, hicbir model YENIDEN EGITMEZ)."""
+    Step9A-D'yi DEGISTIRMEZ, hicbir model YENIDEN EGITMEZ).
+
+    report_only=True: Part A-F'yi YENIDEN HESAPLAMAZ; yalnizca mevcut
+    distribution_shift_audit.json'un safe_wording + Step9B provenance
+    alanlarini gunceller (bkz.
+    src/step9e_distribution_shift_audit.py:regenerate_report_only)."""
     from scripts.run_cross_region_shift_audit import main as run_cross_region_shift_audit
 
     return run_cross_region_shift_audit(
         source_id=source_id, target_id=target_id, dry_run=dry_run, force=force,
+        report_only=report_only,
     )
 
 

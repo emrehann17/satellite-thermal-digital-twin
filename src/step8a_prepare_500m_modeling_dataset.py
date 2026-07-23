@@ -220,6 +220,10 @@ class Step8AError(SystemExit):
 # write_pre_label_exclusion_manifest()). Always lives alongside
 # burned_landcover_gate.json in the same validation/labels output dir.
 PRE_LABEL_EXCLUSION_MANIFEST_FILENAME = "pre_label_excluded_cells.parquet"
+# Sidecar metadata JSON written alongside the parquet above (same directory);
+# used to cross-validate gate provenance (experiment_id) against Step8's own
+# context in read_pre_label_exclusion_manifest().
+PRE_LABEL_EXCLUSION_MANIFEST_METADATA_FILENAME = "pre_label_excluded_cells_metadata.json"
 
 
 # =============================================================================
@@ -959,7 +963,9 @@ def continuous_stats(values: np.ndarray, total_pixels: int) -> dict:
     }
 
 
-def read_pre_label_exclusion_manifest(manifest_path: Path) -> frozenset[str]:
+def read_pre_label_exclusion_manifest(
+    manifest_path: Path, experiment_id: str | None = None,
+) -> frozenset[str]:
     """
     Reads the canonical Step6B gate pre-label exclusion manifest (parquet;
     see src/step6b_burned_landcover_gate.py write_pre_label_exclusion_manifest())
@@ -969,6 +975,18 @@ def read_pre_label_exclusion_manifest(manifest_path: Path) -> frozenset[str]:
     inconsistent (no cell_id column, null cell_id, duplicate cell_id) --
     Step8A must never silently proceed with an empty/partial exclusion set
     when exclude_pre_label_burns=True is configured for the experiment.
+
+    If experiment_id is given, ALSO cross-validates gate provenance against
+    the Step8 context (generic; no per-experiment branch):
+        - the manifest's own sidecar metadata JSON (always written alongside
+          the parquet) must declare the SAME experiment_id;
+        - if the gate's provenance manifest (<experiment_id>_gate_manifest.json,
+          written by scripts/run_label_gate_only.py) is present next to it,
+          its scientific.experiment_id must also match, and it must carry a
+          non-null analysis_id.
+    A mismatch means Step8A is about to read gate outputs produced for a
+    DIFFERENT experiment (e.g. a stale/misrouted path) -- fail fast rather
+    than silently joining the wrong exclusion set.
     """
     if not manifest_path.exists():
         raise Step8AError(
@@ -1001,6 +1019,52 @@ def read_pre_label_exclusion_manifest(manifest_path: Path) -> frozenset[str]:
             f"Pre-label exclusion manifest ({manifest_path}) tekrarlanan "
             f"cell_id degerleri iceriyor: {dupes}."
         )
+
+    if experiment_id is not None:
+        metadata_path = manifest_path.parent / PRE_LABEL_EXCLUSION_MANIFEST_METADATA_FILENAME
+        if not metadata_path.exists():
+            raise Step8AError(
+                "Pre-label exclusion manifest provenance eksik: sidecar "
+                f"metadata dosyasi yok ({metadata_path}). Gate exclusion "
+                "manifest'i (parquet + metadata) yeniden uretin."
+            )
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise Step8AError(
+                f"Pre-label exclusion manifest metadata ({metadata_path}) "
+                f"okunamadi: {type(exc).__name__}: {exc}"
+            ) from exc
+        if metadata.get("experiment_id") != experiment_id:
+            raise Step8AError(
+                "Pre-label exclusion manifest experiment_id UYUSMUYOR: "
+                f"manifest='{metadata.get('experiment_id')}', "
+                f"Step8 context='{experiment_id}'. Step8A yanlis deneyin "
+                "gate ciktisini okuyor olabilir."
+            )
+
+        gate_manifest_path = manifest_path.parent / f"{experiment_id}_gate_manifest.json"
+        if gate_manifest_path.exists():
+            try:
+                gate_manifest = json.loads(gate_manifest_path.read_text(encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                raise Step8AError(
+                    f"Gate provenance manifest ({gate_manifest_path}) okunamadi: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            gate_experiment_id = gate_manifest.get("scientific", {}).get("experiment_id")
+            if gate_experiment_id != experiment_id:
+                raise Step8AError(
+                    "Gate provenance manifest experiment_id UYUSMUYOR: "
+                    f"manifest='{gate_experiment_id}', Step8 context='{experiment_id}' "
+                    f"({gate_manifest_path})."
+                )
+            if not gate_manifest.get("analysis_id"):
+                raise Step8AError(
+                    f"Gate provenance manifest ({gate_manifest_path}) analysis_id "
+                    "icermiyor/bos -- gate provenance eksik/tutarsiz."
+                )
+
     return frozenset(manifest_df["cell_id"].astype(str))
 
 
@@ -1376,6 +1440,22 @@ def build_dataset(
         source_mask_src.close()
 
     df = pd.DataFrame(rows)
+
+    # --- Leakage-safety fail-fast: a pre-label-excluded cell must NEVER be
+    # valid_for_modeling. This already holds by construction (valid_for_modeling
+    # = analysis_eligible AND predictor_valid, and analysis_eligible = NOT
+    # pre_label_burn_excluded -- see the per-row computation above), but is
+    # asserted explicitly here so a future refactor of that formula can never
+    # silently let an excluded cell back into the modeling population. ---
+    if len(df) and "pre_label_burn_excluded" in df.columns:
+        leaked = df[(df["pre_label_burn_excluded"] == True) & (df["valid_for_modeling"] == True)]  # noqa: E712
+        if len(leaked):
+            raise Step8AError(
+                "LEAKAGE-SAFETY ASSERTION FAILED: "
+                f"{len(leaked)} pre-label-excluded cell(s) are valid_for_modeling=True "
+                f"(cell_id(s): {leaked['cell_id'].tolist()[:20]}). A pre-label-excluded "
+                "cell must never be eligible for modeling."
+            )
 
     # --- Pre-label eligibility breakdown (raw / eligible / final modeling) ---
     # pre_label_burn_excluded/analysis_eligible/valid_for_modeling are always
@@ -2515,7 +2595,9 @@ def main(
     if exclude_pre_label_burns:
         manifest_path = ctx["gate_labels_dir"] / PRE_LABEL_EXCLUSION_MANIFEST_FILENAME
         pre_label_exclusion_manifest_path = str(manifest_path)
-        pre_label_excluded_cell_ids = read_pre_label_exclusion_manifest(manifest_path)
+        pre_label_excluded_cell_ids = read_pre_label_exclusion_manifest(
+            manifest_path, experiment_id=ctx["experiment_id"],
+        )
         log.info(
             "Pre-label exclusion AKTIF [%s]: %d hucre (manifest: %s) analiz "
             "evreninden dislanacak.", ctx["experiment_id"],

@@ -49,6 +49,7 @@ from core.config import (
     STEP7B_OUTPUT_FORMATS,
     STEP7B_INCLUDE_OPTIONAL_TVDI_FEATURES,
     STEP7B_INCLUDE_OPTIONAL_ANOMALY_FEATURES,
+    STEP7B_MODIS_SUSPICIOUS_ZERO_FRACTION,
 )
 from core.io_utils import setup_logger
 from core.paths import PROJECT_ROOT
@@ -63,6 +64,126 @@ log, log_file = setup_logger("step7b")
 NDVI_MIN, NDVI_MAX = -1.2, 1.2
 SLOPE_MIN, SLOPE_MAX = 0.0, 90.0
 ELEVATION_MIN, ELEVATION_MAX = -500.0, 9000.0
+
+# Bu iki isim, scripts/prepare_modis_for_step7.py'nin urettigi feature
+# adlariyla BIREBIR eslesir (bkz. build_feature_registry).
+MODIS_MEAN_FEATURE_NAME = "modis_lst_mean_celsius"
+MODIS_STD_FEATURE_NAME = "modis_lst_std_celsius"
+
+
+class Step7BModisValidationError(SystemExit):
+    """Fail-fast MODIS kaynak-raster dogrulama hatasi (hizalamadan ONCE)."""
+
+
+def _read_source_raster_stats(path: Path) -> dict:
+    """Bir kaynak (hizalanmamis) rasterin nodata/gecerlilik/deger ozetini
+    okur -- yalnizca metadata/dogrulama icin, hicbir dosya YAZMAZ."""
+    with rasterio.open(path) as src:
+        nodata = src.nodata
+        shape_hw = [src.height, src.width]
+        transform = src.transform
+        arr = src.read(1)
+
+    if nodata is None:
+        valid_mask = np.ones(arr.shape, dtype=bool)
+    elif isinstance(nodata, float) and np.isnan(nodata):
+        valid_mask = np.isfinite(arr)
+    else:
+        valid_mask = arr != nodata
+    valid_vals = arr[valid_mask]
+
+    return {
+        "path": str(path),
+        "source_nodata": None if nodata is None else float(nodata),
+        "source_valid_count": int(valid_mask.sum()),
+        "source_invalid_count": int((~valid_mask).sum()),
+        "exact_zero_count_among_valid": (
+            int((valid_vals == 0.0).sum()) if valid_vals.size else 0
+        ),
+        "source_min": float(valid_vals.min()) if valid_vals.size else None,
+        "source_max": float(valid_vals.max()) if valid_vals.size else None,
+        "source_mean": float(valid_vals.mean()) if valid_vals.size else None,
+        "source_median": float(np.median(valid_vals)) if valid_vals.size else None,
+        "shape_hw": shape_hw,
+        "transform": [transform.a, transform.b, transform.c, transform.d, transform.e, transform.f],
+    }
+
+
+def validate_modis_source_rasters(core_features: list[dict]) -> dict:
+    """
+    Deney-farkında (Kozan-dışı) çalıştırmalarda, MODIS mean/std kaynak
+    rasterlarını BİLİNEAR HİZALAMADAN ÖNCE doğrular. Herhangi bir kural
+    ihlal edilirse Step7BModisValidationError (SystemExit) fırlatır --
+    hizalama/örnekleme HİÇ ÇALIŞMAZ.
+
+    Kurallar:
+        1) nodata TANIMSIZ VE "geçerli" piksellerin şüpheli bir oranı tam
+           0.0 ise (bkz. STEP7B_MODIS_SUSPICIOUS_ZERO_FRACTION) -- bu, bir
+           deniz/gözlemsiz bölgenin sayısal 0.0 olarak dışa aktarıldığının
+           imzasıdır.
+        2) mean değerleri, mevcut kabul edilen fiziksel LST aralığının
+           (STEP7B_MIN_TARGET_CELSIUS, STEP7B_MAX_TARGET_CELSIUS -- Landsat
+           target için zaten kullanılan AYNI aralık) DIŞINDA.
+        3) std NEGATİF bir geçerli değer içeriyor.
+        4) mean ve std kaynak gridleri (shape/transform) FARKLI.
+
+    Döner: {feature_name: {...source stats..., "validation_status": "passed"}}
+    -- Step7B'nin downscaling_dataset_stats.json alignment_diagnostics'ine
+    isimle eşleştirilerek eklenir.
+    """
+    by_name = {f["name"]: Path(f["path"]) for f in core_features}
+    mean_path = by_name.get(MODIS_MEAN_FEATURE_NAME)
+    if mean_path is None:
+        return {}
+
+    mean_stats = _read_source_raster_stats(mean_path)
+    zero_fraction = (
+        mean_stats["exact_zero_count_among_valid"] / mean_stats["source_valid_count"]
+        if mean_stats["source_valid_count"] else 0.0
+    )
+    if mean_stats["source_nodata"] is None and zero_fraction > STEP7B_MODIS_SUSPICIOUS_ZERO_FRACTION:
+        raise Step7BModisValidationError(
+            f"MODIS mean girdisi ({mean_path}) HİÇBİR nodata tanımlamıyor VE "
+            f"'geçerli' piksellerinin %{zero_fraction * 100:.1f}'i tam 0.0 -- "
+            "bu, Step7B'nin reddetmesi gereken deniz/gözlemsiz bölge "
+            "sıfır-doldurma imzasıdır (0.0 fiziksel olarak geçerli bir "
+            "Celsius değeri olduğu için sessizce kabul edilemez). MODIS'i "
+            "açık bir nodata değeriyle yeniden export edin: "
+            "python scripts/prepare_modis_for_step7.py --export --force"
+        )
+
+    if mean_stats["source_valid_count"] and (
+        mean_stats["source_min"] < STEP7B_MIN_TARGET_CELSIUS
+        or mean_stats["source_max"] > STEP7B_MAX_TARGET_CELSIUS
+    ):
+        raise Step7BModisValidationError(
+            f"MODIS mean girdisi ({mean_path}) kabul edilen fiziksel LST "
+            f"aralığının [{STEP7B_MIN_TARGET_CELSIUS}, {STEP7B_MAX_TARGET_CELSIUS}] "
+            f"°C DIŞINDA geçerli piksel değerleri içeriyor "
+            f"(min={mean_stats['source_min']}, max={mean_stats['source_max']})."
+        )
+
+    diagnostics = {MODIS_MEAN_FEATURE_NAME: {**mean_stats, "validation_status": "passed"}}
+
+    std_path = by_name.get(MODIS_STD_FEATURE_NAME)
+    if std_path is not None:
+        std_stats = _read_source_raster_stats(std_path)
+        if std_stats["source_valid_count"] and std_stats["source_min"] is not None and std_stats["source_min"] < 0:
+            raise Step7BModisValidationError(
+                f"MODIS std girdisi ({std_path}) NEGATİF geçerli değer(ler) "
+                f"içeriyor (min={std_stats['source_min']}) -- standart sapma "
+                "negatif olamaz."
+            )
+        if std_stats["shape_hw"] != mean_stats["shape_hw"] or std_stats["transform"] != mean_stats["transform"]:
+            raise Step7BModisValidationError(
+                f"MODIS mean ({mean_path}) ve std ({std_path}) kaynak "
+                f"gridleri FARKLI (mean shape/transform="
+                f"{mean_stats['shape_hw']}/{mean_stats['transform']}, "
+                f"std shape/transform={std_stats['shape_hw']}/{std_stats['transform']})."
+            )
+        diagnostics[MODIS_STD_FEATURE_NAME] = {**std_stats, "validation_status": "passed"}
+
+    return diagnostics
 
 
 # =============================================================================
@@ -1060,6 +1181,14 @@ def main(
     alignment_diagnostics: list[dict] = []
     use_ctx_alignment = ctx is not None and not ctx.get("is_kozan")
     if use_ctx_alignment:
+        # --- MODIS kaynak-raster (hizalama ÖNCESİ) doğrulaması ---
+        # Yalnızca deney-farkında (Kozan-dışı) yolda: Kozan'ın legacy MODIS
+        # context ürünü (farklı bir üretim zinciri, korunan/frozen davranış)
+        # bu kontrole HİÇ TABİ TUTULMAZ. Herhangi bir kural ihlalinde
+        # Step7BModisValidationError (SystemExit) fırlatılır -- hizalama HİÇ
+        # ÇALIŞMAZ.
+        modis_source_diagnostics = validate_modis_source_rasters(core_features)
+
         log.info("Deney-farkında girdi hizalama başlıyor (aligned_inputs/)...")
         core_features, optional_features, alignment_diagnostics = align_features_to_reference(
             ctx, target_path, core_features, optional_features, force=force,
@@ -1090,6 +1219,11 @@ def main(
                     "muhtemelen yanlış AOI/grid kapsıyor (or. paylaşılan DEM "
                     "farklı bir bölgeyi kapsıyorsa).", diag["name"],
                 )
+            # MODIS kaynak-taraf teşhisini (nodata/geçerlilik/min-max-mean-
+            # medyan/validation_status), isimle eşleştirerek AYNI diagnostic
+            # kaydına (downscaling_dataset_stats.json'a yazılan) ekle.
+            if diag["name"] in modis_source_diagnostics:
+                diag["modis_source_validation"] = modis_source_diagnostics[diag["name"]]
 
     # Zorunlu feature eksikse uyar (NDVI/DEM)
     core_names = {f["name"] for f in core_features}

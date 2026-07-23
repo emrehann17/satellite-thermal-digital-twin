@@ -58,6 +58,14 @@ from core.paths import PROJECT_ROOT
 # bu araliga gercekten yayilmistir (Bodrum <-> Köyceğiz ~110 km).
 MUGLA_AOI_BBOX = (27.10, 36.60, 28.90, 37.45)
 
+# Kuzey Evia (Euboea), Yunanistan -- 2021 yaz yangini. Manavgat/Bejís/Muğla
+# gibi ayni-yil Akdeniz "mediterranean_transfer_wildfire" AOI'lerine bir
+# yenisi (bkz. EXPERIMENTS["evia_2021"]). Genis, yer-tabanli (place-based)
+# bir bolgesel dikdortgendir -- KESIN yangin perimetri DEGILDIR, MCD64A1
+# etiketlerine gore AYARLANMAMISTIR. Step6B burned-landcover gate ile
+# dogrulanmalidir, tipki digerleri gibi.
+NORTH_EVIA_AOI_BBOX = (23.12, 38.68, 23.52, 39.08)
+
 
 # =============================================================================
 # 1) Region geometrileri (mevcut + yeni placeholder'lar)
@@ -172,6 +180,18 @@ def build_regions() -> dict:
     mugla_aoi_candidate_bbox = ee.Geometry.BBox(*MUGLA_AOI_BBOX)
     mugla_aoi = mugla_aoi_candidate_bbox
 
+    # --- North Evia (Euboea) 2021 (Akdeniz transfer wildfire, Yunanistan) ---
+    # Manavgat/Bejís/Muğla ile karsilastirilabilir, ayni-yil (2021) bir baska
+    # Akdeniz dogal-bitki-ortusu yangin AOI'si. Genis, yer-tabanli (place-
+    # based) bolgesel bir dikdortgendir; module-seviyesi NORTH_EVIA_AOI_BBOX
+    # sabitinden (TEK KAYNAK) uretilir. KESIN yangin perimetri DEGILDIR --
+    # Copernicus burned-area perimetrine veya MCD64A1 etiketlerine gore
+    # KIRPILMAMISTIR/AYARLANMAMISTIR. Step6B burned-landcover gate ile
+    # dogrulanmali, gate sonrasi (gorulduyse) netlestirilebilir -- tipki
+    # Manavgat/Bejís/Muğla gibi.
+    north_evia_candidate_bbox = ee.Geometry.BBox(*NORTH_EVIA_AOI_BBOX)
+    north_evia = north_evia_candidate_bbox
+
     return {
         "dogu_akdeniz": dogu_akdeniz,
         "kozan_aoi": kozan_aoi,
@@ -182,6 +202,8 @@ def build_regions() -> dict:
         "bejis_aoi": bejis_aoi,
         "mugla_aoi": mugla_aoi,
         "mugla_aoi_candidate_bbox": mugla_aoi_candidate_bbox,
+        "north_evia": north_evia,
+        "north_evia_candidate_bbox": north_evia_candidate_bbox,
     }
 
 
@@ -285,6 +307,14 @@ EXPERIMENTS = {
         # BurnDate before evaluating natural-vegetation composition.
         "exclude_pre_label_burns": True,
         "pre_label_burn_window": ["2021-06-01", "2021-07-28"],
+        # Optional, purely-diagnostic secondary sub-window (generic field;
+        # any experiment may set it): reports how many pre-label-excluded
+        # cells fall specifically inside this narrower range. For Muğla this
+        # isolates the known Bördübet/Marmaris fire (~2021-06-21..25) within
+        # the wider pre-label window. Absent for every other experiment --
+        # scripts/run_label_gate_only.py reads this generically (never a
+        # hardcoded per-AOI literal) and passes None when unset.
+        "pre_label_diagnostic_window": ["2021-06-21", "2021-06-25"],
         "notes": (
             "Muğla 2021 (Marmaris/Bodrum/Milas/Köyceğiz). Same-country, "
             "same-year Mediterranean pine wildfire, added as the first/highest-"
@@ -298,6 +328,43 @@ EXPERIMENTS = {
             "universe. Gate result must be sent to the advisor; passing the gate "
             "does NOT authorize downstream predictor/Step7/Step8/Step9/Step10 "
             "execution (downstream_authorized=false)."
+        ),
+    },
+
+    "evia_2021": {
+        "enabled": True,
+        "region_key": "north_evia",
+        "display_name": "North Evia (Euboea), Greece",
+        "role": "mediterranean_transfer_wildfire",
+        "country": "Greece",
+        "predictor_start_date": "2021-06-05",
+        "predictor_end_date": "2021-08-02",
+        "label_start_date": "2021-08-03",
+        "label_end_date": "2021-09-30",
+        "baseline_years": [2017, 2018, 2019, 2020],
+        "output_namespace": "evia_2021",
+        # --- LEAKAGE-SAFE PRE-LABEL EXCLUSION (generic contract; same
+        # mechanism as mugla_2021, applied here via the SAME declarative
+        # fields -- no code branch added for Evia) -----------------------
+        # The canonical label raster is DOY-masked to the label window, so
+        # any cell that burned BEFORE label_start would show BurnDate=0
+        # (indistinguishable from genuinely-unburned) unless excluded via a
+        # SEPARATE pre-label BurnDate raster covering [predictor_start,
+        # label_start). exclude_pre_label_burns=True makes the generic
+        # gate/Step8A machinery export that raster, exclude affected ~500 m
+        # cells from the analysis universe, and record their identities in
+        # the canonical manifest Step8A reads -- exactly as already built
+        # for mugla_2021, now also applied to evia_2021.
+        "exclude_pre_label_burns": True,
+        "pre_label_burn_window": ["2021-06-05", "2021-08-02"],
+        "notes": (
+            "Same-year cross-country Mediterranean wildfire replication "
+            "relative to manavgat_2021; broad regional AOI selected from "
+            "geographic place coverage rather than an observed "
+            "burned-area perimeter. Pre-label leakage exclusion enabled "
+            "(exclude_pre_label_burns=True) over [predictor_start, "
+            "label_start) = 2021-06-05..2021-08-02, using the same generic "
+            "Gate -> Step8A contract already established for mugla_2021."
         ),
     },
 }

@@ -234,6 +234,167 @@ def _load_json_if_exists(path: Path) -> dict | None:
         return None
 
 
+class Step8EReportError(SystemExit):
+    """Fail-fast provenance error for the experiment-aware Step8E-equivalent
+    report (write_final_report). Report-generation only -- never raised by
+    Step8A-D themselves."""
+
+
+# Floating-point tolerance for the burned_rate == burned/valid identity
+# check below (madde 3) -- a pure sanity/regression guard, not a scientific
+# threshold.
+STEP8E_BURNED_RATE_TOLERANCE = 1e-9
+
+
+def _load_step8a_modeling_dataset(results: dict, ctx: dict):
+    """
+    Loads the ACTUAL Step8A modeling dataset (one row per 500 m cell, with
+    `valid_for_modeling` / `burned` / `invalid_reason` columns) -- prefers
+    the Parquet artifact already recorded in `results["step8a"]["parquet_path"]`
+    (see src/step8a_prepare_500m_modeling_dataset.py main() return value),
+    falls back to its CSV sibling, and finally to the canonical on-disk
+    location for this experiment (so `--report-only` regeneration works
+    without re-running Step8A). NEVER falls back to the raw stats JSON's
+    top-level burned/unburned counts (task: "Do not infer canonical modeled
+    counts from raw gate counts") -- those are pre-exclusion and are exactly
+    the source of the bug this fixes.
+    """
+    import pandas as pd
+
+    step8a_result = (results or {}).get("step8a") or {}
+    parquet_path = step8a_result.get("parquet_path")
+    csv_path = step8a_result.get("csv_path")
+
+    if parquet_path and Path(parquet_path).exists():
+        return pd.read_parquet(parquet_path)
+    if csv_path and Path(csv_path).exists():
+        return pd.read_csv(csv_path)
+
+    fallback_parquet = ctx["step8a_output_dir"] / "step8a_500m_modeling_dataset.parquet"
+    fallback_csv = ctx["step8a_output_dir"] / "step8a_500m_modeling_dataset.csv"
+    if fallback_parquet.exists():
+        return pd.read_parquet(fallback_parquet)
+    if fallback_csv.exists():
+        return pd.read_csv(fallback_csv)
+
+    raise Step8EReportError(
+        "Step8A modeling dataset (parquet/csv) bulunamadi -- Step8E-esdegeri "
+        "final rapor, modelleme sayimlarini ham gate/istatistik JSON'undan "
+        f"TAHMIN YURUTEMEZ. Beklenen: {fallback_parquet} veya {fallback_csv} "
+        "(ya da results['step8a']['parquet_path'/'csv_path'])."
+    )
+
+
+def compute_step8a_dataset_section(results: dict, ctx: dict) -> dict:
+    """
+    Builds the `step8a_dataset` report section from the ACTUAL Step8A
+    modeling dataset, filtered by `valid_for_modeling == True`.
+
+    Fixes a bug where `burned_cell_count`/`unburned_cell_count` were read
+    directly from step8a_dataset_stats.json's top-level fields (computed
+    BEFORE the 16-cell pre-label exclusion) while `valid_modeling_cells` was
+    already POST-exclusion -- producing an internally-inconsistent report
+    (2789 + 4955 = 7744 = total_500m_cells, not valid_modeling_cells=7728).
+    """
+    df = _load_step8a_modeling_dataset(results, ctx)
+
+    if "valid_for_modeling" not in df.columns:
+        raise Step8EReportError(
+            "Step8A modeling dataset 'valid_for_modeling' kolonunu icermiyor "
+            "-- modelleme sayimlari guvenle hesaplanamiyor."
+        )
+    if "burned" not in df.columns:
+        raise Step8EReportError(
+            "Step8A modeling dataset 'burned' kolonunu icermiyor -- burned/"
+            "unburned sayimlari hesaplanamiyor."
+        )
+
+    total_500m_cells = int(len(df))
+    valid_mask = df["valid_for_modeling"] == True  # noqa: E712
+    valid_df = df.loc[valid_mask]
+    valid_modeling_cells = int(len(valid_df))
+    excluded_modeling_cells = total_500m_cells - valid_modeling_cells
+
+    burned_cell_count = int((valid_df["burned"] == 1).sum())
+    unburned_cell_count = valid_modeling_cells - burned_cell_count
+    burned_rate = (burned_cell_count / valid_modeling_cells) if valid_modeling_cells else None
+
+    invalid_reason_counts: dict[str, int] = {}
+    exclusion_reason = None
+    if excluded_modeling_cells and "invalid_reason" in df.columns:
+        reason_counts = df.loc[~valid_mask, "invalid_reason"].value_counts(dropna=True)
+        invalid_reason_counts = {str(k): int(v) for k, v in reason_counts.items()}
+        if invalid_reason_counts:
+            exclusion_reason = max(invalid_reason_counts, key=invalid_reason_counts.get)
+
+    section = {
+        "cell_level": "500m_reconstructed_mcd64a1_cell",
+        "no_30m_label_claim": True,
+        "total_500m_cells": total_500m_cells,
+        "excluded_modeling_cells": excluded_modeling_cells,
+        "valid_modeling_cells": valid_modeling_cells,
+        "burned_cell_count": burned_cell_count,
+        "unburned_cell_count": unburned_cell_count,
+        "burned_rate": burned_rate,
+    }
+    if excluded_modeling_cells:
+        section["exclusion_reason"] = exclusion_reason
+    if invalid_reason_counts:
+        section["invalid_reason_counts"] = invalid_reason_counts
+
+    # --- Fail-fast internal consistency (task item 3) ---
+    if section["burned_cell_count"] + section["unburned_cell_count"] != section["valid_modeling_cells"]:
+        raise Step8EReportError(
+            "Step8E dataset tutarsizligi: burned "
+            f"({section['burned_cell_count']}) + unburned "
+            f"({section['unburned_cell_count']}) != valid_modeling_cells "
+            f"({section['valid_modeling_cells']})."
+        )
+    if section["valid_modeling_cells"] + section["excluded_modeling_cells"] != section["total_500m_cells"]:
+        raise Step8EReportError(
+            "Step8E dataset tutarsizligi: valid_modeling_cells "
+            f"({section['valid_modeling_cells']}) + excluded_modeling_cells "
+            f"({section['excluded_modeling_cells']}) != total_500m_cells "
+            f"({section['total_500m_cells']})."
+        )
+    if section["burned_rate"] is not None:
+        expected_rate = section["burned_cell_count"] / section["valid_modeling_cells"]
+        if abs(section["burned_rate"] - expected_rate) > STEP8E_BURNED_RATE_TOLERANCE:
+            raise Step8EReportError(
+                f"Step8E dataset tutarsizligi: burned_rate ({section['burned_rate']}) "
+                f"!= burned_cell_count/valid_modeling_cells ({expected_rate})."
+            )
+
+    return section
+
+
+def _cross_check_step8a_against_step8b(step8a_section: dict, step8b_metrics: dict) -> None:
+    """
+    Cross-checks the report's modeled burned/unburned counts against Step8B's
+    `all_valid` population counts (n_positives/n_negatives) -- Step8B trains
+    on exactly the same `valid_for_modeling == True` population, so these
+    MUST agree. A disagreement means Step8A and Step8B ran against different
+    dataset snapshots; fail loudly rather than silently publish a mixed
+    report (task item 3). Skipped (not an error) only when Step8B's
+    `all_valid` counts are entirely unavailable (e.g. Step8B has not been
+    run yet for this experiment).
+    """
+    pm = (step8b_metrics or {}).get("population_metrics", step8b_metrics) or {}
+    all_valid = pm.get("all_valid") or {}
+    n_pos, n_neg = all_valid.get("n_positives"), all_valid.get("n_negatives")
+    if n_pos is None or n_neg is None:
+        return
+
+    if step8a_section["burned_cell_count"] != n_pos or step8a_section["unburned_cell_count"] != n_neg:
+        raise Step8EReportError(
+            "Step8E/Step8B provenance MISMATCH: Step8A modeled burned/unburned "
+            f"({step8a_section['burned_cell_count']}/{step8a_section['unburned_cell_count']}) "
+            f"!= Step8B all_valid n_positives/n_negatives ({n_pos}/{n_neg}). "
+            "Refusing to write a mixed report -- re-run Step8A/8B against the "
+            "same dataset snapshot."
+        )
+
+
 def write_final_report(ctx: dict, results: dict) -> dict:
     """
     Manavgat icin kompakt Step8E-esdegeri final rapor. Kozan'in
@@ -251,7 +412,6 @@ def write_final_report(ctx: dict, results: dict) -> dict:
     gate = _load_json_if_exists(gate_path) or {}
 
     step7e_stats = _load_json_if_exists(ctx["step7e_output_dir"] / "fused_lst_stats.json") or {}
-    step8a_stats = _load_json_if_exists(ctx["step8a_output_dir"] / "step8a_dataset_stats.json") or {}
     step8b_metrics = _load_json_if_exists(
         ctx["step8b_output_dir"] / "step8b_model_comparison_metrics.json"
     ) or {}
@@ -261,6 +421,12 @@ def write_final_report(ctx: dict, results: dict) -> dict:
     step8d_metrics = _load_json_if_exists(
         ctx["step8d_output_dir"] / "step8d_ablation_metrics.json"
     ) or {}
+
+    # --- Step8A dataset counts: computed from the ACTUAL modeling dataset
+    # (valid_for_modeling == True), NOT from the raw pre-exclusion stats
+    # JSON fields (see compute_step8a_dataset_section docstring / task bug).
+    step8a_section = compute_step8a_dataset_section(results, ctx)
+    _cross_check_step8a_against_step8b(step8a_section, step8b_metrics)
 
     report = {
         "experiment_id": ctx["experiment_id"],
@@ -286,15 +452,7 @@ def write_final_report(ctx: dict, results: dict) -> dict:
                 if step7e_stats else None
             ),
         },
-        "step8a_dataset": {
-            "cell_level": "500m_reconstructed_mcd64a1_cell",
-            "no_30m_label_claim": True,
-            "total_500m_cells": step8a_stats.get("total_500m_cells"),
-            "valid_modeling_cells": step8a_stats.get("valid_modeling_cells"),
-            "burned_cell_count": step8a_stats.get("burned_cell_count"),
-            "unburned_cell_count": step8a_stats.get("unburned_cell_count"),
-            "burned_rate": step8a_stats.get("burned_rate"),
-        },
+        "step8a_dataset": step8a_section,
         "step8b_baseline_vs_fused_model": step8b_metrics.get("population_metrics", step8b_metrics),
         "step8c_bootstrap_uncertainty": step8c_metrics,
         "step8d_thermal_ablation": step8d_metrics.get("ablation_results", step8d_metrics),
@@ -353,11 +511,12 @@ def write_final_report(ctx: dict, results: dict) -> dict:
         "",
         "## Step8A dataset (500 m reconstructed MCD64A1 cells)",
         "",
-        f"- Total cells: {fmt(step8a_stats.get('total_500m_cells'))}",
-        f"- Valid modeling cells: {fmt(step8a_stats.get('valid_modeling_cells'))}",
-        f"- Burned: {fmt(step8a_stats.get('burned_cell_count'))} | "
-        f"Unburned: {fmt(step8a_stats.get('unburned_cell_count'))}",
-        f"- Burned rate: {fmt(step8a_stats.get('burned_rate'))}",
+        f"- Total cells retained for provenance: {fmt(step8a_section.get('total_500m_cells'))}",
+        f"- Excluded from modeling: {fmt(step8a_section.get('excluded_modeling_cells'))}",
+        f"- Valid modeling cells: {fmt(step8a_section.get('valid_modeling_cells'))}",
+        f"- Modeled burned: {fmt(step8a_section.get('burned_cell_count'))}",
+        f"- Modeled unburned: {fmt(step8a_section.get('unburned_cell_count'))}",
+        f"- Modeled burned rate: {fmt(step8a_section.get('burned_rate'))}",
         "",
         "## Baseline vs. baseline+fused-thermal model (Step8B)",
         "",
@@ -456,6 +615,7 @@ def main(
     dry_run: bool = False,
     force: bool = False,
     allow_no_step7: bool = False,
+    report_only: bool = False,
 ) -> dict:
     ctx = build_experiment_context(experiment_id)
     log_context_summary(ctx, log)
@@ -472,6 +632,31 @@ def main(
         return {
             "experiment_id": experiment_id, "ran": False, "reason": "dry_run",
             "input_status": input_status,
+        }
+
+    if report_only:
+        # Report-generation-only path (bug fix scope): regenerates ONLY the
+        # Step8E-equivalent final report from Step8A-D's ALREADY-COMPLETED,
+        # UNMODIFIED on-disk outputs. Never calls step8a/8b/8c/8d .main()/
+        # run_step8*() -- no rerun, no retraining, no new predictions/
+        # bootstrap samples.
+        if is_kozan:
+            raise Step8RunnerError(
+                "--report-only kozan_2023 için desteklenmiyor (legacy Step8E "
+                "kendi CLI'sini kullanır: python src/step8e_final_report.py --force)."
+            )
+        log.info(
+            "[%s] --report-only: SADECE final rapor yeniden üretiliyor; "
+            "Step8A/8B/8C/8D ÇALIŞTIRILMIYOR/DEĞİŞTİRİLMİYOR (zaten diskteki "
+            "tamamlanmış çıktılar okunur).", experiment_id,
+        )
+        report = write_final_report(ctx, results={})
+        log.info("=" * 60)
+        log.info("STEP8E (report-only) TAMAMLANDI [experiment=%s]", experiment_id)
+        log.info("=" * 60)
+        return {
+            "experiment_id": experiment_id, "ran": True, "report_only": True,
+            "results": {"step8e": report},
         }
 
     if not is_kozan:
@@ -523,6 +708,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--allow-no-step7", action="store_true",
         help="Step7 fused LST eksikse bile devam et (thermal feature seti azalır).",
     )
+    parser.add_argument(
+        "--report-only", action="store_true",
+        help="Yalnızca Step8E-eşdeğeri final raporu yeniden üretir; Step8A/8B/"
+        "8C/8D'yi ÇALIŞTIRMAZ/DEĞİŞTİRMEZ (zaten tamamlanmış diskteki "
+        "çıktıları okur). kozan_2023 için desteklenmez.",
+    )
     return parser.parse_args(argv)
 
 
@@ -533,4 +724,5 @@ if __name__ == "__main__":
         dry_run=args.dry_run,
         force=args.force,
         allow_no_step7=args.allow_no_step7,
+        report_only=args.report_only,
     )

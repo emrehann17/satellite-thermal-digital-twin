@@ -56,6 +56,7 @@ Flags:
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import subprocess
@@ -74,6 +75,7 @@ log, log_file = setup_logger("run_label_gate_only")
 
 BASE_DIR = _PROJECT_ROOT
 LEGACY_VALIDATION_LABEL_DIR = (BASE_DIR / "outputs" / "validation" / "labels").resolve()
+_REGIONS_PY = BASE_DIR / "core" / "regions.py"
 
 # Code/config files whose hashes go into the gate manifest / analysis_id.
 _PROVENANCE_FILES = [
@@ -84,12 +86,178 @@ _PROVENANCE_FILES = [
     "src/step6_validate_fire_relation.py",
     "src/step8a_prepare_500m_modeling_dataset.py",
 ]
-# Existing experiments' gate final reports that must NOT change (protection).
-_PROTECTED_GATE_REPORTS = [
-    "outputs/validation/labels/burned_landcover_gate.json",  # kozan legacy
-    "outputs/experiments/manavgat_2021/validation/labels/burned_landcover_gate.json",
-    "outputs/experiments/bejis_2022/validation/labels/burned_landcover_gate.json",
-]
+
+
+def _protected_gate_report_path(experiment_id: str) -> Path:
+    """Generic (non-hardcoded) gate-report path for any registered experiment_id."""
+    if experiment_id == "kozan_2023":
+        return LEGACY_VALIDATION_LABEL_DIR / "burned_landcover_gate.json"
+    return (
+        BASE_DIR / "outputs" / "experiments" / experiment_id
+        / "validation" / "labels" / "burned_landcover_gate.json"
+    )
+
+
+def _resolve_protected_gate_reports(current_experiment_id: str) -> list[str]:
+    """
+    Registry-driven replacement for a hardcoded protected-report list (the
+    previous static list named Kozan/Manavgat/Bejís but silently omitted
+    mugla_2021 once it completed, and would omit every future AOI too).
+
+    Walks every registered experiment (enabled or not) via the registry
+    itself, keeps only those whose gate report file actually EXISTS on disk
+    (never invents/regenerates a path for a report that hasn't been
+    produced yet), EXCLUDES the experiment currently being processed (a
+    report can never protect/attest itself -- self-referential provenance),
+    and returns paths in deterministic (sorted) order. Only existence is
+    checked here; hashing happens in the caller. Never writes to any of
+    these paths.
+    """
+    from core.regions import list_experiments
+
+    reports: list[str] = []
+    for exp_id in sorted(list_experiments(include_disabled=True).keys()):
+        if exp_id == current_experiment_id:
+            continue
+        path = _protected_gate_report_path(exp_id)
+        if path.exists():
+            reports.append(str(path.relative_to(BASE_DIR)))
+    return reports
+
+
+# =============================================================================
+# Static (non-executing) core/regions.py source readers
+# =============================================================================
+# build_gate_manifest() needs deterministic AOI provenance (bounds/hash) for
+# the manifest. Actually constructing an ee.Geometry (even ee.Geometry.BBox(),
+# with no .getInfo() call) requires Earth Engine to be initialized/
+# authenticated on first use -- verified directly: ee.Geometry.Point(...)
+# alone raises "Earth Engine client library not initialized". The manifest
+# must never trigger that merely to record AOI bounds, so bounds are read
+# straight out of core/regions.py's source text (AST), never executed.
+def _const_num(node: ast.expr) -> float | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+        return float(node.value)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        inner = _const_num(node.operand)
+        if inner is None:
+            return None
+        return -inner if isinstance(node.op, ast.USub) else inner
+    return None
+
+
+def _static_module_level_bbox_constants(tree: ast.Module) -> dict[str, tuple[float, float, float, float]]:
+    """Module-level `NAME = (a, b, c, d)` numeric-tuple constants (e.g.
+    MUGLA_AOI_BBOX, NORTH_EVIA_AOI_BBOX) used as `ee.Geometry.BBox(*NAME)`."""
+    constants: dict[str, tuple[float, float, float, float]] = {}
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Tuple) and len(node.value.elts) == 4
+        ):
+            nums = [_const_num(e) for e in node.value.elts]
+            if all(n is not None for n in nums):
+                constants[node.targets[0].id] = tuple(nums)  # type: ignore[assignment]
+    return constants
+
+
+def _static_region_bbox(region_key: str) -> tuple[float, float, float, float] | None:
+    """
+    Resolves (west, south, east, north) bounds for `region_key` by statically
+    parsing core/regions.py's build_regions() (AST) -- WITHOUT ever calling
+    it. Only resolves region keys whose AOI is built directly from a literal
+    `ee.Geometry.BBox(...)` call, following simple `name = other_name`
+    aliasing and `*MODULE_CONSTANT` unpacking (true for every non-Kozan
+    experiment currently registered). Returns None if it cannot be resolved
+    this way (e.g. Kozan's buffered-point AOI -- never needed here since this
+    is only called for non-Kozan experiments).
+    """
+    if not _REGIONS_PY.exists():
+        return None
+    tree = ast.parse(_REGIONS_PY.read_text(encoding="utf-8"))
+    module_constants = _static_module_level_bbox_constants(tree)
+
+    build_regions_fn = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "build_regions":
+            build_regions_fn = node
+            break
+    if build_regions_fn is None:
+        return None
+
+    local_assigns: dict[str, ast.expr] = {}
+    return_dict: ast.Dict | None = None
+    for node in ast.walk(build_regions_fn):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            local_assigns[node.targets[0].id] = node.value
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+            return_dict = node.value
+    if return_dict is None:
+        return None
+
+    target_var = None
+    for key_node, val_node in zip(return_dict.keys, return_dict.values):
+        if isinstance(key_node, ast.Constant) and key_node.value == region_key and isinstance(val_node, ast.Name):
+            target_var = val_node.id
+            break
+    if target_var is None:
+        return None
+
+    def _resolve(name: str, depth: int = 0) -> tuple[float, float, float, float] | None:
+        if depth > 5 or name not in local_assigns:
+            return None
+        expr = local_assigns[name]
+        if isinstance(expr, ast.Name):
+            return _resolve(expr.id, depth + 1)
+        if isinstance(expr, ast.Call):
+            func = expr.func
+            is_bbox_call = (
+                isinstance(func, ast.Attribute) and func.attr == "BBox"
+                and isinstance(func.value, ast.Attribute) and func.value.attr == "Geometry"
+            )
+            if not is_bbox_call:
+                return None
+            args = expr.args
+            if len(args) == 1 and isinstance(args[0], ast.Starred) and isinstance(args[0].value, ast.Name):
+                const = module_constants.get(args[0].value.id)
+                return tuple(const) if const else None
+            if len(args) == 4:
+                nums = [_const_num(a) for a in args]
+                if all(n is not None for n in nums):
+                    return tuple(nums)  # type: ignore[return-value]
+            return None
+        return None
+
+    return _resolve(target_var)
+
+
+def _static_region_aoi_provenance(region_key: str) -> dict | None:
+    """Deterministic AOI provenance for the gate manifest, built ENTIRELY
+    from static source-text bounds (see _static_region_bbox) -- no Earth
+    Engine call, no network access. Returns None if the region_key's AOI
+    cannot be resolved this way."""
+    bounds = _static_region_bbox(region_key)
+    if bounds is None:
+        return None
+    w, s, e, n = bounds
+    geometry_hash = hashlib.sha256(
+        json.dumps(
+            {"kind": "BBox", "crs": "EPSG:4326", "bounds": [w, s, e, n]},
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "region_key": region_key,
+        "kind": "bbox",
+        "geometry_type": "Polygon",
+        "crs": "EPSG:4326",
+        "order": "west,south,east,north",
+        "bounds": [w, s, e, n],
+        "geodesic": False,
+        "geometry_hash": geometry_hash,
+        "source": "static AST read of core/regions.py build_regions() (no Earth Engine call)",
+    }
 
 
 def _sha256_file(path: Path) -> str | None:
@@ -124,21 +292,18 @@ def _package_versions() -> dict:
 
 def build_gate_manifest(experiment_id: str, exp: dict, paths: dict, gate_result: dict) -> dict:
     """
-    Builds a provenance manifest + a content-addressed analysis_id for the
-    Muğla (or any experiment-aware) gate run. analysis_id is a sha256 over the
-    scientific configuration, AOI, exclusion rule, relevant code/config file
-    hashes, package versions and git SHA -- so a given gate result is
-    reproducibly tied to exactly what produced it.
+    Builds a provenance manifest + a content-addressed analysis_id for any
+    experiment-aware gate run. analysis_id is a sha256 over the scientific
+    configuration, AOI, exclusion rule, relevant code/config file hashes,
+    package versions and git SHA -- so a given gate result is reproducibly
+    tied to exactly what produced it.
     """
-    from core.regions import MUGLA_AOI_BBOX  # bbox is a pure tuple (no GEE)
-
-    aoi = None
-    if exp.get("region_key", "").startswith("mugla"):
-        aoi = {"kind": "bbox", "crs": "EPSG:4326",
-               "order": "lon_min,lat_min,lon_max,lat_max",
-               "coords": list(MUGLA_AOI_BBOX)}
+    aoi = _static_region_aoi_provenance(exp.get("region_key", ""))
     file_hashes = {rel: _sha256_file(BASE_DIR / rel) for rel in _PROVENANCE_FILES}
-    protected = {rel: _sha256_file(BASE_DIR / rel) for rel in _PROTECTED_GATE_REPORTS}
+    protected = {
+        rel: _sha256_file(BASE_DIR / rel)
+        for rel in _resolve_protected_gate_reports(experiment_id)
+    }
 
     scientific = {
         "experiment_id": experiment_id,
@@ -168,6 +333,24 @@ def build_gate_manifest(experiment_id: str, exp: dict, paths: dict, gate_result:
     ).hexdigest()
 
     gate = gate_result.get("gate_result", gate_result) if isinstance(gate_result, dict) else {}
+
+    # --- Pre-label exclusion provenance (generic; empty/None when the
+    # experiment does not enable exclude_pre_label_burns) ---
+    manifest_result = gate.get("manifest_result") or {}
+    pre_label_raw_path = paths.get("pre_label_raw_path")
+    exclusion_artifact_path = manifest_result.get("parquet_path")
+    pre_label_provenance = {
+        "pre_label_burn_excluded_count": manifest_result.get("excluded_cell_count", 0),
+        "pre_label_raster_path": str(pre_label_raw_path) if pre_label_raw_path else None,
+        "pre_label_raster_sha256": (
+            _sha256_file(Path(pre_label_raw_path)) if pre_label_raw_path else None
+        ),
+        "exclusion_manifest_parquet_path": exclusion_artifact_path,
+        "exclusion_manifest_parquet_sha256": (
+            _sha256_file(Path(exclusion_artifact_path)) if exclusion_artifact_path else None
+        ),
+    }
+
     return {
         "manifest_kind": "experiment_gate_provenance",
         "analysis_id": analysis_id,
@@ -175,6 +358,7 @@ def build_gate_manifest(experiment_id: str, exp: dict, paths: dict, gate_result:
         "downstream_authorized": False,
         "downstream_status": "blocked_pending_advisor_review",
         "scientific": scientific,
+        "pre_label_provenance": pre_label_provenance,
         "code_file_hashes": file_hashes,
         "protected_gate_report_hashes": protected,
         "package_versions": _package_versions(),
@@ -427,12 +611,17 @@ def main(
                     f"BurnDate rasteri yok ({pre_label_raw}). Once --export-labels "
                     "ile calistirin (pre-label export'u da uretilir)."
                 )
+            # Optional per-experiment diagnostic sub-window (e.g. Muğla's
+            # Bördübet fire check); generic registry field, absent (None)
+            # for every experiment that doesn't declare one -- never a
+            # hardcoded per-AOI literal here.
+            diagnostic_window = exp.get("pre_label_diagnostic_window")
             gate_kwargs.update(
                 exclude_pre_label_burns=True,
                 pre_label_raster_arg=str(pre_label_raw),
                 predictor_start=exp["predictor_start_date"],
                 predictor_end=exp["predictor_end_date"],
-                bordubet_check_window=("2021-06-21", "2021-06-25"),
+                bordubet_check_window=(tuple(diagnostic_window) if diagnostic_window else None),
                 experiment_id=experiment_id,
             )
         gate_result = run_gate(**gate_kwargs)
