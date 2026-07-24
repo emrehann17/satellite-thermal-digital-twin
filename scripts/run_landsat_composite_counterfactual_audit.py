@@ -106,15 +106,21 @@ def _write_scene_manifest_csv(path: Path, metadata: dict) -> None:
         writer.writerows(rows)
 
 
-def _run_live(ctx: dict, force: bool, cleanup_tiles: bool) -> dict:
+def _run_live(ctx: dict, force: bool, cleanup_tiles: bool, resume: bool = False) -> dict:
     """Execute the full diagnostic: export, canonical gate, boundary audit,
-    provenance, and a status-gated summary."""
+    provenance, and a status-gated summary.
+
+    ``resume`` (mutually exclusive with ``force``) keeps the existing diagnostic
+    namespace, re-validates every already-present final GeoTIFF, reuses only the
+    ones that pass validation, quarantines invalid ones, and re-exports whatever
+    is missing. A ``raster_inventory.partial.json`` checkpoint is written
+    atomically after every completed or validated raster.
+    """
     import ee  # noqa: F401
     import rasterio  # noqa: F401
 
     from core.config import EXPORT_CRS, GEE_PROJECT
     from core.gee_utils import init_gee
-    from scripts.run_predictors_only import export_image_direct_or_tiled
 
     experiment_id = ctx["experiment_id"]
     root = audit.diagnostic_output_root(experiment_id)
@@ -122,14 +128,25 @@ def _run_live(ctx: dict, force: bool, cleanup_tiles: bool) -> dict:
     doc_plan = audit.plan_document_outputs()
     audit.assert_diagnostic_namespace_safe(audit.plan_all_output_paths(ctx), experiment_id)
 
-    # --- FORCE SEMANTICS: clear ONLY the diagnostic namespace (incl. tiles) ---
+    if force and resume:
+        raise AuditRunnerError("--force and --resume are mutually exclusive.")
+
+    # --- FORCE vs RESUME namespace semantics ---
     if root.exists() and any(root.iterdir()):
-        if not force:
-            raise AuditRunnerError(
-                f"Diagnostic output already exists; pass --force to overwrite: {root}"
+        if force:
+            removed = audit.clear_diagnostic_namespace(experiment_id)
+            log.info("[--force] cleared diagnostic namespace: %s", removed)
+        elif resume:
+            log.info(
+                "[--resume] keeping existing diagnostic namespace; every existing "
+                "final raster will be re-validated (checkpoint text is not trusted): %s",
+                root,
             )
-        removed = audit.clear_diagnostic_namespace(experiment_id)
-        log.info("[--force] cleared diagnostic namespace: %s", removed)
+        else:
+            raise AuditRunnerError(
+                f"Diagnostic output already exists; pass --resume to continue or "
+                f"--force to overwrite: {root}"
+            )
     root.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -151,41 +168,41 @@ def _run_live(ctx: dict, force: bool, cleanup_tiles: bool) -> dict:
     _write_json(root / doc_plan["source_scene_metadata"], scene_metadata)
     _write_scene_manifest_csv(root / doc_plan["scene_manifest_csv"], scene_metadata)
 
-    # --- 2. export every diagnostic raster with an explicit nodata sentinel ---
+    # --- 2. export/resume every diagnostic raster with a verifiable nodata tag ---
+    checkpoint_path = root / "raster_inventory.partial.json"
+    if resume and checkpoint_path.exists():
+        try:
+            prior = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            log.info("[--resume] prior checkpoint found with %d record(s); it is "
+                     "advisory only and every raster is still re-validated.",
+                     len(prior.get("rasters", [])))
+        except (OSError, json.JSONDecodeError):
+            log.warning("[--resume] prior checkpoint unreadable; ignoring it.")
+
     images = audit.build_ee_images(ctx, region)
+    run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     raster_inventory = []
     inventory_by_name = {}
+    reference_signature = None
     for name, image in images.items():
-        rel = raster_plan[name]
-        out_path = root / rel
-        tiles_dir = root / "_tiles" / name
-        # Unmask to the sentinel so masked/AOI-exterior pixels carry a verifiable
-        # nodata tag through direct AND tiled export/merge (never physical zero).
-        exported = image.unmask(audit.NODATA_SENTINEL)
-        result = export_image_direct_or_tiled(
-            exported, out_path, region, EXPORT_SCALE, EXPORT_CRS, name, force=True,
-            tiles_dir=tiles_dir, cleanup_tiles=cleanup_tiles, band_count=1,
-            run_alignment_qa=True, nodata=audit.NODATA_SENTINEL,
+        row, reference_signature = _export_or_resume_raster(
+            name, image, ctx, root, raster_plan, region, EXPORT_CRS,
+            force=force, resume=resume, cleanup_tiles=cleanup_tiles,
+            reference_signature=reference_signature, run_stamp=run_stamp,
         )
-        nodata_check = audit.validate_nodata_mask(result["path"])
-        # FAIL FAST: an unverifiable nodata mask means masked/AOI-exterior pixels
-        # could be read as physical values -- refuse to continue.
-        _require_nodata_ok(nodata_check, name)
-        row = {
-            "name": name,
-            "path": str(result["path"]),
-            "transport": result["transport"],
-            "tile_grid": result.get("tile_grid"),
-            "tile_count": result.get("tile_count"),
-            "estimated_bytes": result.get("estimated_bytes"),
-            "direct_skipped_preflight": result.get("direct_skipped_preflight"),
-            "alignment_qa": result.get("alignment_qa"),
-            "nodata_status": nodata_check["status"],
-        }
         raster_inventory.append(row)
         inventory_by_name[name] = row
-        log.info("[%s] exported via %s (nodata=%s) -> %s",
-                 name, result["transport"], nodata_check["status"], out_path)
+        # CHECKPOINT after EVERY completed/validated raster (atomic write).
+        _write_checkpoint(checkpoint_path, experiment_id, raster_inventory)
+
+    # All required rasters must be present AND validated before anything downstream.
+    missing = [name for name in raster_plan if not (root / raster_plan[name]).exists()]
+    if missing:
+        raise AuditRunnerError(
+            f"Cannot proceed to derived/reproduction/boundary stages: "
+            f"{len(missing)} required raster(s) still missing after export/resume: "
+            f"{missing[:5]}{'...' if len(missing) > 5 else ''}"
+        )
 
     # --- 3. derived comparison (Step5 policy) per chain ---
     derived = {}
@@ -244,6 +261,14 @@ def _run_live(ctx: dict, force: bool, cleanup_tiles: bool) -> dict:
 
     produced = _collect_output_files(root)
     manifest = audit.build_file_manifest(produced, output_dir=root)
+    # Distinguish newly exported rasters from validated-and-reused ones.
+    exported_names = [r["name"] for r in raster_inventory if r.get("status") == "exported"]
+    resumed_names = [r["name"] for r in raster_inventory if r.get("status") == "resumed_existing"]
+    manifest["raster_status"] = {r["name"]: r.get("status") for r in raster_inventory}
+    manifest["raster_status_summary"] = {
+        "exported": exported_names,
+        "resumed_existing": resumed_names,
+    }
     _write_json(root / doc_plan["manifest"], manifest)
 
     return {
@@ -251,10 +276,108 @@ def _run_live(ctx: dict, force: bool, cleanup_tiles: bool) -> dict:
         "ran": True,
         "output_root": str(root),
         "raster_count": len(raster_inventory),
+        "rasters_exported": len(exported_names),
+        "rasters_resumed": len(resumed_names),
         "map_count": len(maps),
         "canonical_reproduction": reproduction["status"],
         "final_status": summary["final_status"],
     }
+
+
+def _export_or_resume_raster(
+    name, image, ctx, root, raster_plan, region, export_crs,
+    *, force, resume, cleanup_tiles, reference_signature, run_stamp, base_dir=None,
+):
+    """Export one diagnostic raster, or validate-and-reuse an existing one.
+
+    Returns ``(inventory_row, reference_signature)``. Never overwrites an
+    existing final raster silently: an invalid one is MOVED to the in-namespace
+    quarantine directory and then re-exported. Canonical outputs are never
+    touched (every path stays under the diagnostic root).
+    """
+    from scripts.run_predictors_only import export_image_direct_or_tiled
+
+    if base_dir is None:
+        base_dir = audit.PROJECT_ROOT
+    experiment_id = ctx["experiment_id"]
+    out_path = root / raster_plan[name]
+    now = datetime.now(timezone.utc).isoformat()
+    tiles_dir = root / "_tiles" / name
+
+    # --- RESUME: validate an already-present final raster before reusing it ---
+    if resume and out_path.exists():
+        verdict = audit.validate_existing_diagnostic_raster(
+            out_path, expected_crs=export_crs, reference_signature=reference_signature,
+        )
+        if verdict["valid"]:
+            if reference_signature is None:
+                reference_signature = verdict["signature"]
+            nodata_check = audit.validate_nodata_mask(out_path)
+            log.info("[%s] resumed_existing (validated) -> %s", name, out_path)
+            row = {
+                "name": name, "path": str(out_path), "status": "resumed_existing",
+                "transport": "resumed_existing", "tile_grid": None, "tile_count": None,
+                "estimated_bytes": None, "direct_skipped_preflight": None,
+                "alignment_qa": None, "nodata_status": nodata_check["status"],
+                "nodata_validation": nodata_check, "timestamp": now,
+            }
+            return row, reference_signature
+        # Invalid: quarantine (MOVE, never delete) then re-export from clean tiles.
+        dest = audit.quarantine_invalid_raster(experiment_id, out_path, base_dir=base_dir)
+        log.warning("[%s] existing raster invalid (%s); quarantined -> %s",
+                    name, verdict["reason"], dest)
+
+    # --- EXPORT (missing raster, quarantined-then-reexport, or --force run) ---
+    # In resume mode, export into a CLEAN per-product temporary tile directory so
+    # existing intermediate tiles are preserved untouched and an incomplete tile
+    # set is never mistaken for a completed raster.
+    if resume:
+        tiles_dir = root / "_tiles_resume" / run_stamp / name
+    helper_force = bool(force)  # resume/clean-dir starts empty; force re-does tiles
+
+    exported = image.unmask(audit.NODATA_SENTINEL)
+    result = export_image_direct_or_tiled(
+        exported, out_path, region, EXPORT_SCALE, export_crs, name, force=helper_force,
+        tiles_dir=tiles_dir, cleanup_tiles=cleanup_tiles, band_count=1,
+        run_alignment_qa=True, nodata=audit.NODATA_SENTINEL,
+    )
+    nodata_check = audit.validate_nodata_mask(result["path"])
+    # FAIL FAST: an unverifiable nodata mask means masked/AOI-exterior pixels
+    # could be read as physical values -- refuse to continue.
+    _require_nodata_ok(nodata_check, name)
+    signature = audit.grid_signature(result["path"])
+    if reference_signature is None:
+        reference_signature = signature
+    elif not audit._signatures_match(reference_signature, signature):
+        raise AuditRunnerError(
+            f"[{name}] freshly exported raster grid does not match the accepted "
+            f"diagnostic reference grid (grid_mismatch)."
+        )
+    log.info("[%s] exported via %s (nodata=%s) -> %s",
+             name, result["transport"], nodata_check["status"], out_path)
+    row = {
+        "name": name, "path": str(result["path"]), "status": "exported",
+        "transport": result["transport"], "tile_grid": result.get("tile_grid"),
+        "tile_count": result.get("tile_count"),
+        "estimated_bytes": result.get("estimated_bytes"),
+        "direct_skipped_preflight": result.get("direct_skipped_preflight"),
+        "alignment_qa": result.get("alignment_qa"),
+        "nodata_status": nodata_check["status"], "nodata_validation": nodata_check,
+        "timestamp": now,
+    }
+    return row, reference_signature
+
+
+def _write_checkpoint(checkpoint_path: Path, experiment_id: str, raster_inventory: list[dict]) -> None:
+    """Atomically persist the running raster inventory after each raster."""
+    payload = {
+        "audit": audit.DIAGNOSTIC_NAMESPACE,
+        "experiment_id": experiment_id,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "raster_count": len(raster_inventory),
+        "rasters": raster_inventory,
+    }
+    audit.write_json_atomic(checkpoint_path, payload)
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
@@ -276,6 +399,7 @@ def _inventory_rows(raster_inventory: list[dict]) -> list[dict]:
         rows.append({
             "name": row["name"],
             "path": row["path"],
+            "status": row.get("status"),  # exported | resumed_existing
             "transport": row["transport"],
             "tile_grid": json.dumps(row.get("tile_grid")),
             "tile_count": row.get("tile_count"),
@@ -645,7 +769,11 @@ def main(
     run: bool = False,
     force: bool = False,
     cleanup_tiles: bool = False,
+    resume: bool = False,
 ) -> dict:
+    if force and resume:
+        raise AuditRunnerError("--force and --resume are mutually exclusive.")
+
     ctx = build_experiment_context(experiment_id)
     log_context_summary(ctx, log)
 
@@ -666,7 +794,7 @@ def main(
             "plan": plan,
         }
 
-    return _run_live(ctx, force=force, cleanup_tiles=cleanup_tiles)
+    return _run_live(ctx, force=force, cleanup_tiles=cleanup_tiles, resume=resume)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -687,9 +815,17 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--run", action="store_true",
         help="Explicit opt-in to perform the live GEE export + diagnostic.",
     )
-    parser.add_argument(
+    # --force and --resume are mutually exclusive (argparse-enforced).
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--force", action="store_true",
         help="Overwrite existing DIAGNOSTIC outputs only (never canonical).",
+    )
+    mode.add_argument(
+        "--resume", action="store_true",
+        help="Keep the existing diagnostic namespace; re-validate every present "
+             "final raster, reuse valid ones, quarantine invalid ones, and "
+             "export only what is missing. Never deletes the namespace.",
     )
     parser.add_argument(
         "--cleanup-tiles", action="store_true",
@@ -706,5 +842,6 @@ if __name__ == "__main__":
         run=args.run,
         force=args.force,
         cleanup_tiles=args.cleanup_tiles,
+        resume=args.resume,
     )
     print(json.dumps(result, indent=2, default=str))

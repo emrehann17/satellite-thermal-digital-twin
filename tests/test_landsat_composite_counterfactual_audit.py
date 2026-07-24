@@ -842,3 +842,267 @@ def test_canonical_reproduction_in_document_plan():
     ctx = _ctx()
     all_paths = [str(p) for p in audit.plan_all_output_paths(ctx)]
     assert any(p.endswith("canonical_reproduction.json") for p in all_paths)
+
+
+# =============================================================================
+# RESUME / CHECKPOINT SUPPORT
+# =============================================================================
+def _sentinel_raster(path, *, value=5.0, **kwargs):
+    """A valid diagnostic raster: nodata tag == NODATA_SENTINEL, one valid pixel."""
+    kwargs.setdefault("nodata", audit.NODATA_SENTINEL)
+    return _write_raster(path, value=value, **kwargs)
+
+
+class _DummyImage:
+    def unmask(self, _value):
+        return self
+
+
+def _make_fake_export(value=7.0):
+    """Fake export helper that writes a valid sentinel raster to out_path."""
+    def _fake(image, out_path, region, scale, crs, name, *, force, tiles_dir,
+              cleanup_tiles, band_count, run_alignment_qa, nodata):
+        p = Path(out_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        _write_raster(p, value=value, nodata=nodata, crs="EPSG:4326")
+        return {"path": p, "transport": "direct", "tile_grid": None,
+                "tile_count": None, "estimated_bytes": 100,
+                "direct_skipped_preflight": False, "alignment_qa": {"crs": "EPSG:4326"}}
+    return _fake
+
+
+# --- module-level raster validation ---
+def test_validate_existing_valid_raster_ok(tmp_path):
+    p = _sentinel_raster(tmp_path / "r.tif", value=5.0)
+    v = audit.validate_existing_diagnostic_raster(p, expected_crs="EPSG:4326")
+    assert v["valid"] is True and v["reason"] == "ok"
+    assert v["signature"]["width"] == 8 and v["nodata_status"] == "ok"
+
+
+def test_validate_existing_wrong_nodata_not_reused(tmp_path):
+    p = _write_raster(tmp_path / "r.tif", value=5.0, nodata=0.0)  # wrong tag
+    v = audit.validate_existing_diagnostic_raster(p, expected_crs="EPSG:4326")
+    assert v["valid"] is False and v["reason"].startswith("nodata_")
+
+
+def test_validate_existing_crs_mismatch(tmp_path):
+    p = _sentinel_raster(tmp_path / "r.tif", crs="EPSG:3857")
+    v = audit.validate_existing_diagnostic_raster(p, expected_crs="EPSG:4326")
+    assert v["valid"] is False and "crs" in v["reason"]
+
+
+def test_validate_existing_grid_mismatch_vs_reference(tmp_path):
+    ref = audit.grid_signature(_sentinel_raster(tmp_path / "ref.tif"))
+    other = _sentinel_raster(tmp_path / "o.tif", height=9)  # different grid
+    v = audit.validate_existing_diagnostic_raster(
+        other, expected_crs="EPSG:4326", reference_signature=ref)
+    assert v["valid"] is False and v["reason"] == "grid_mismatch_vs_reference"
+
+
+def test_validate_existing_no_valid_pixels(tmp_path):
+    # every pixel is the sentinel -> masked everywhere -> no valid pixel.
+    p = _write_raster(tmp_path / "r.tif", value=audit.NODATA_SENTINEL,
+                      nodata=audit.NODATA_SENTINEL)
+    v = audit.validate_existing_diagnostic_raster(p, expected_crs="EPSG:4326")
+    assert v["valid"] is False and v["reason"] == "no_valid_pixels"
+
+
+def test_validate_existing_corrupt_geotiff(tmp_path):
+    p = tmp_path / "bad.tif"
+    p.write_bytes(b"this is not a geotiff")
+    v = audit.validate_existing_diagnostic_raster(p, expected_crs="EPSG:4326")
+    assert v["valid"] is False and v["reason"].startswith("unreadable")
+
+
+def test_quarantine_moves_never_deletes(tmp_path):
+    exp = "manavgat_2021"
+    root = audit.diagnostic_output_root(exp, tmp_path)
+    (root / "rasters").mkdir(parents=True)
+    bad = root / "rasters" / "x.tif"
+    bad.write_text("bad", encoding="utf-8")
+    dest = audit.quarantine_invalid_raster(exp, bad, base_dir=tmp_path)
+    assert not bad.exists()                       # moved out of the way
+    assert Path(dest).exists()                    # but preserved, not deleted
+    assert audit.QUARANTINE_DIRNAME in dest
+    assert str(root.resolve()) in str(Path(dest).resolve())  # stays in namespace
+
+
+def test_write_json_atomic_no_temp_leftover(tmp_path):
+    p = tmp_path / "cp.json"
+    audit.write_json_atomic(p, {"a": 1, "b": [2, 3]})
+    assert json.loads(p.read_text(encoding="utf-8")) == {"a": 1, "b": [2, 3]}
+    assert not (tmp_path / ".cp.json.tmp").exists()
+
+
+# --- runner-level export/resume behavior ---
+def _resume_fixture(tmp_path, name="current_lst_scene_weighted_median"):
+    exp = "manavgat_2021"
+    root = audit.diagnostic_output_root(exp, tmp_path)
+    raster_plan = {name: "rasters/x.tif"}
+    out = root / raster_plan[name]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    return exp, root, raster_plan, name, out
+
+
+def test_resume_skips_valid_existing(tmp_path, monkeypatch):
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+    import scripts.run_predictors_only as rp
+
+    monkeypatch.setattr(rp, "export_image_direct_or_tiled",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("valid raster must not be re-exported")))
+    exp, root, raster_plan, name, out = _resume_fixture(tmp_path)
+    _sentinel_raster(out, value=5.0)
+
+    row, ref = runner._export_or_resume_raster(
+        name, _DummyImage(), {"experiment_id": exp}, root, raster_plan, None,
+        "EPSG:4326", force=False, resume=True, cleanup_tiles=False,
+        reference_signature=None, run_stamp="ts", base_dir=tmp_path,
+    )
+    assert row["status"] == "resumed_existing"
+    assert row["transport"] == "resumed_existing"
+    assert ref is not None and ref["width"] == 8
+    assert out.exists()  # untouched
+
+
+def test_resume_quarantines_and_reexports_corrupt(tmp_path, monkeypatch):
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+    import scripts.run_predictors_only as rp
+
+    monkeypatch.setattr(rp, "export_image_direct_or_tiled", _make_fake_export(value=7.0))
+    exp, root, raster_plan, name, out = _resume_fixture(tmp_path)
+    out.write_bytes(b"corrupt not a geotiff")
+
+    row, ref = runner._export_or_resume_raster(
+        name, _DummyImage(), {"experiment_id": exp}, root, raster_plan, None,
+        "EPSG:4326", force=False, resume=True, cleanup_tiles=False,
+        reference_signature=None, run_stamp="ts", base_dir=tmp_path,
+    )
+    assert row["status"] == "exported"          # corrupt was NOT reused
+    assert out.exists()                         # re-exported cleanly
+    quarantine = root / audit.QUARANTINE_DIRNAME
+    assert quarantine.exists() and any(quarantine.iterdir())  # corrupt preserved
+
+
+def test_resume_wrong_nodata_not_reused(tmp_path, monkeypatch):
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+    import scripts.run_predictors_only as rp
+
+    monkeypatch.setattr(rp, "export_image_direct_or_tiled", _make_fake_export())
+    exp, root, raster_plan, name, out = _resume_fixture(tmp_path)
+    _write_raster(out, value=5.0, nodata=0.0)   # wrong nodata tag
+
+    row, _ = runner._export_or_resume_raster(
+        name, _DummyImage(), {"experiment_id": exp}, root, raster_plan, None,
+        "EPSG:4326", force=False, resume=True, cleanup_tiles=False,
+        reference_signature=None, run_stamp="ts", base_dir=tmp_path,
+    )
+    assert row["status"] == "exported"
+    assert any((root / audit.QUARANTINE_DIRNAME).iterdir())
+
+
+def test_resume_grid_mismatch_not_reused(tmp_path, monkeypatch):
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+    import scripts.run_predictors_only as rp
+
+    monkeypatch.setattr(rp, "export_image_direct_or_tiled", _make_fake_export())
+    exp, root, raster_plan, name, out = _resume_fixture(tmp_path)
+    reference = audit.grid_signature(_sentinel_raster(tmp_path / "ref.tif"))  # 8x8
+    _sentinel_raster(out, height=9)             # mismatched grid
+
+    row, _ = runner._export_or_resume_raster(
+        name, _DummyImage(), {"experiment_id": exp}, root, raster_plan, None,
+        "EPSG:4326", force=False, resume=True, cleanup_tiles=False,
+        reference_signature=reference, run_stamp="ts", base_dir=tmp_path,
+    )
+    assert row["status"] == "exported"          # mismatched grid re-exported
+    assert any((root / audit.QUARANTINE_DIRNAME).iterdir())
+
+
+def test_checkpoint_alone_cannot_bypass_validation(tmp_path, monkeypatch):
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+    import scripts.run_predictors_only as rp
+
+    monkeypatch.setattr(rp, "export_image_direct_or_tiled", _make_fake_export())
+    exp, root, raster_plan, name, out = _resume_fixture(tmp_path)
+    out.write_bytes(b"corrupt")                 # checkpoint will claim it is done
+    checkpoint = root / "raster_inventory.partial.json"
+    audit.write_json_atomic(checkpoint, {"rasters": [
+        {"name": name, "status": "resumed_existing", "path": str(out)}]})
+
+    row, _ = runner._export_or_resume_raster(
+        name, _DummyImage(), {"experiment_id": exp}, root, raster_plan, None,
+        "EPSG:4326", force=False, resume=True, cleanup_tiles=False,
+        reference_signature=None, run_stamp="ts", base_dir=tmp_path,
+    )
+    # Despite a checkpoint marking it done, the real file was revalidated,
+    # found corrupt, quarantined, and re-exported.
+    assert row["status"] == "exported"
+    assert any((root / audit.QUARANTINE_DIRNAME).iterdir())
+
+
+def test_write_checkpoint_atomic(tmp_path):
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+
+    cp = tmp_path / "raster_inventory.partial.json"
+    runner._write_checkpoint(cp, "manavgat_2021", [
+        {"name": "a", "path": "/a.tif", "status": "exported"}])
+    data = json.loads(cp.read_text(encoding="utf-8"))
+    assert data["raster_count"] == 1
+    assert data["rasters"][0]["name"] == "a"
+    assert not (tmp_path / ".raster_inventory.partial.json.tmp").exists()
+
+
+def test_resume_and_force_conflict_main():
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+
+    with pytest.raises(runner.AuditRunnerError):
+        runner.main("manavgat_2021", run=True, force=True, resume=True)
+
+
+def test_resume_and_force_conflict_argparse():
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+
+    with pytest.raises(SystemExit):
+        runner.parse_args(["--experiment", "manavgat_2021", "--force", "--resume"])
+
+
+def test_resume_never_deletes_namespace(tmp_path, monkeypatch):
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+    import core.gee_utils as gee_utils
+
+    exp = "manavgat_2021"
+    fake_root = audit.diagnostic_output_root(exp, tmp_path)
+    fake_root.mkdir(parents=True)
+    (fake_root / "sentinel.txt").write_text("keep me", encoding="utf-8")
+
+    # Redirect the diagnostic root into tmp for the whole run.
+    monkeypatch.setattr(audit, "diagnostic_output_root",
+                        lambda e, base_dir=None: fake_root)
+    # Any deletion of the namespace must fail the test loudly.
+    monkeypatch.setattr(audit, "clear_diagnostic_namespace",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("resume must never clear the namespace")))
+
+    class _Stop(Exception):
+        pass
+
+    monkeypatch.setattr(gee_utils, "init_gee",
+                        lambda *a, **k: (_ for _ in ()).throw(_Stop()))
+
+    ctx = runner.build_experiment_context(exp)
+    with pytest.raises(runner.AuditRunnerError):
+        runner._run_live(ctx, force=False, cleanup_tiles=False, resume=True)
+
+    assert (fake_root / "sentinel.txt").exists()  # namespace preserved intact
+
+
+def test_resume_dry_run_writes_nothing():
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+
+    diag_root = audit.diagnostic_output_root("manavgat_2021")
+    existed_before = diag_root.exists()
+    result = runner.main("manavgat_2021", dry_run=True, resume=True)
+    assert result["ran"] is False and result["reason"] == "dry_run"
+    if not existed_before:
+        assert not diag_root.exists()

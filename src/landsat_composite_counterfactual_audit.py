@@ -2098,6 +2098,111 @@ def clear_diagnostic_namespace(experiment_id: str, base_dir: Path = PROJECT_ROOT
 
 
 # =============================================================================
+# RESUME / CHECKPOINT SUPPORT (non-destructive; validate-before-skip)
+# =============================================================================
+QUARANTINE_DIRNAME = "_interrupted_or_invalid"
+
+
+def validate_existing_diagnostic_raster(
+    path,
+    *,
+    expected_crs: str,
+    expected_nodata: float = NODATA_SENTINEL,
+    reference_signature: dict | None = None,
+    band: int = 1,
+) -> dict:
+    """Validate an already-present diagnostic raster before it may be reused.
+
+    A raster is reusable ONLY when every check passes:
+      * it opens as a readable GeoTIFF;
+      * width, height and band count are all non-zero;
+      * CRS equals ``expected_crs``;
+      * the GeoTIFF nodata tag equals ``expected_nodata`` (NODATA_SENTINEL);
+      * at least one valid / non-nodata pixel exists;
+      * when ``reference_signature`` is provided, its grid signature (CRS,
+        width, height, transform, bounds) matches EXACTLY (no resampling).
+
+    Returns ``{"valid": bool, "reason": str, "signature": dict|None,
+    "nodata_status": str}``. Never raises on a corrupt file -- an unreadable
+    raster is reported as ``valid=False`` so the caller can quarantine it.
+    """
+    import numpy as np
+    import rasterio
+
+    path = Path(path)
+    if not path.exists():
+        return {"valid": False, "reason": "missing", "signature": None, "nodata_status": None}
+    try:
+        with rasterio.open(path) as src:
+            width, height, count = int(src.width), int(src.height), int(src.count)
+            crs = str(src.crs)
+            nodata = src.nodata
+            if width <= 0 or height <= 0 or count <= 0:
+                return {"valid": False, "reason": "empty_dimensions_or_bands",
+                        "signature": None, "nodata_status": None}
+    except Exception as exc:  # noqa: BLE001  (corrupt/unreadable file)
+        return {"valid": False, "reason": f"unreadable_geotiff: {type(exc).__name__}",
+                "signature": None, "nodata_status": None}
+
+    signature = grid_signature(path)
+    if crs.upper() != str(expected_crs).upper():
+        return {"valid": False, "reason": f"crs_mismatch: {crs} != {expected_crs}",
+                "signature": signature, "nodata_status": None}
+    nodata_check = validate_nodata_mask(path, expected_nodata=expected_nodata, band=band)
+    if nodata_check["status"] != "ok":
+        return {"valid": False, "reason": f"nodata_{nodata_check['status']}",
+                "signature": signature, "nodata_status": nodata_check["status"]}
+    values = read_masked_array(path, band)
+    if int(np.isfinite(values).sum()) == 0:
+        return {"valid": False, "reason": "no_valid_pixels",
+                "signature": signature, "nodata_status": nodata_check["status"]}
+    if reference_signature is not None and not _signatures_match(reference_signature, signature):
+        return {"valid": False, "reason": "grid_mismatch_vs_reference",
+                "signature": signature, "nodata_status": nodata_check["status"]}
+    return {"valid": True, "reason": "ok", "signature": signature,
+            "nodata_status": nodata_check["status"]}
+
+
+def quarantine_invalid_raster(
+    experiment_id: str,
+    path,
+    *,
+    base_dir: Path = PROJECT_ROOT,
+    timestamp: str | None = None,
+) -> str:
+    """Move an invalid diagnostic raster into ``<root>/_interrupted_or_invalid/``.
+
+    The file is MOVED (never deleted) under a timestamped name inside the exact
+    diagnostic namespace. Namespace-safety is asserted for both the source and
+    the destination, so nothing outside the diagnostic root is ever touched.
+    """
+    import shutil
+
+    path = Path(path)
+    root = diagnostic_output_root(experiment_id, base_dir)
+    quarantine_dir = root / QUARANTINE_DIRNAME
+    # Both the source raster and the quarantine target must stay in-namespace.
+    assert_diagnostic_namespace_safe([path, quarantine_dir], experiment_id, base_dir)
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    stamp = timestamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    dest = quarantine_dir / f"{path.stem}.{stamp}{path.suffix}"
+    shutil.move(str(path), str(dest))
+    return str(dest)
+
+
+def write_json_atomic(path, payload) -> Path:
+    """Atomically write JSON: write to a temp file then os.replace into place."""
+    import os
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.tmp"
+    tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    os.replace(str(tmp), str(path))
+    return path
+
+
+# =============================================================================
 # DERIVED COMPARISON (Step5 policy, diagnostic-only, reuses canonical math)
 # =============================================================================
 def compute_derived_comparison(
