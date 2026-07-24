@@ -204,73 +204,15 @@ def _run_live(ctx: dict, force: bool, cleanup_tiles: bool, resume: bool = False)
             f"{missing[:5]}{'...' if len(missing) > 5 else ''}"
         )
 
-    # --- 3. derived comparison (Step5 policy) per chain ---
-    derived = {}
-    for chain in audit.CHAINS:
-        baseline_paths = sorted(
-            root / raster_plan[name]
-            for name in raster_plan
-            if name.startswith("baseline_lst_") and name.endswith(f"_{chain}_median")
-        )
-        current_median = root / raster_plan[f"current_lst_{chain}_median"]
-        current_count = root / raster_plan[
-            f"current_lst_{'scene_valid_count' if chain == audit.CHAIN_SCENE_WEIGHTED else 'unique_date_valid_count'}"
-        ]
-        derived[chain] = audit.compute_derived_comparison(
-            chain,
-            baseline_year_median_paths=baseline_paths,
-            current_median_celsius_path=current_median,
-            current_count_path=current_count,
-            out_dir=(root / "derived" / chain),
-        )
-
-    # --- 4. CANONICAL REPRODUCTION GATE (before interpreting date_balanced) ---
-    reproduction = audit.run_canonical_reproduction_gate(ctx, root, raster_plan)
-    _write_json(root / doc_plan["canonical_reproduction"], reproduction)
-    log.info("Canonical reproduction gate: %s", reproduction["status"])
-
-    # --- 5. provenance (kept as its own status; never faked into evidence) ---
-    provenance = _run_provenance(ctx, root)
-    provenance_state = audit.map_provenance_status(provenance)
-
-    # --- 6. boundary audit across required boundary types + products ---
-    boundary_rows, paired_rows, verdicts = _boundary_audit(
-        root, raster_plan, inventory_by_name, provenance_state, doc_plan,
-    )
-    _write_csv(root / doc_plan["boundary_metrics"], boundary_rows)
-    _write_csv(root / doc_plan["paired_boundary_comparison"], paired_rows)
-
-    # --- 7. raster inventory + PNG maps ---
-    _write_csv(root / doc_plan["raster_inventory"], _inventory_rows(raster_inventory))
-    maps = _render_all_maps(root, raster_plan)
-
-    # --- 8. status-gated summary + manifest + run log ---
-    summary = _build_summary(
-        ctx, scene_metadata, derived, verdicts, provenance, provenance_state, reproduction,
-    )
-    _write_json(root / doc_plan["counterfactual_summary_json"], summary)
-    (root / doc_plan["counterfactual_summary_md"]).write_text(
-        _summary_markdown(summary), encoding="utf-8"
-    )
-    (root / doc_plan["run_log"]).write_text(
-        f"run_at={datetime.now(timezone.utc).isoformat()}\nlog_file={log_file}\n"
-        f"canonical_reproduction={reproduction['status']}\n"
-        f"provenance={provenance_state}\n",
-        encoding="utf-8",
+    # --- 3-8. bounded-memory local finalization (derived, gate, provenance,
+    #         windowed boundary audit, maps, summary, manifest, run log) ---
+    local = _local_finalization(
+        ctx, root, raster_plan, doc_plan, scene_metadata,
+        raster_inventory, inventory_by_name, mode="live",
     )
 
-    produced = _collect_output_files(root)
-    manifest = audit.build_file_manifest(produced, output_dir=root)
-    # Distinguish newly exported rasters from validated-and-reused ones.
     exported_names = [r["name"] for r in raster_inventory if r.get("status") == "exported"]
     resumed_names = [r["name"] for r in raster_inventory if r.get("status") == "resumed_existing"]
-    manifest["raster_status"] = {r["name"]: r.get("status") for r in raster_inventory}
-    manifest["raster_status_summary"] = {
-        "exported": exported_names,
-        "resumed_existing": resumed_names,
-    }
-    _write_json(root / doc_plan["manifest"], manifest)
-
     return {
         "experiment_id": experiment_id,
         "ran": True,
@@ -278,9 +220,9 @@ def _run_live(ctx: dict, force: bool, cleanup_tiles: bool, resume: bool = False)
         "raster_count": len(raster_inventory),
         "rasters_exported": len(exported_names),
         "rasters_resumed": len(resumed_names),
-        "map_count": len(maps),
-        "canonical_reproduction": reproduction["status"],
-        "final_status": summary["final_status"],
+        "map_count": local["map_count"],
+        "canonical_reproduction": local["reproduction_status"],
+        "final_status": local["final_status"],
     }
 
 
@@ -501,61 +443,85 @@ def _resolve_provenance_units(root: Path, raster_plan: dict, provenance_state: s
     return units or None
 
 
-def _boundary_audit(root: Path, raster_plan: dict, inventory_by_name: dict,
-                    provenance_state: str, doc_plan: dict):
-    """Run the paired boundary audit for every required product + boundary type."""
-    # Shared support-edge geometry from current-LST support rasters.
-    swc = audit.read_masked_array(root / raster_plan["current_lst_scene_valid_count"])
-    dbc = audit.read_masked_array(root / raster_plan["current_lst_unique_date_valid_count"])
-    mult = audit.read_masked_array(root / raster_plan["current_lst_same_day_multiplicity"])
-    edge_masks = audit.build_edge_masks(swc, dbc, mult)
+def _support_paths(root: Path, raster_plan: dict) -> dict:
+    """Recorded current-LST support-count raster paths (never read whole here)."""
+    return {
+        "scene_count_edge": root / raster_plan["current_lst_scene_valid_count"],
+        "unique_date_count_edge": root / raster_plan["current_lst_unique_date_valid_count"],
+        "same_day_multiplicity_edge": root / raster_plan["current_lst_same_day_multiplicity"],
+    }
 
-    # Export-tile negative control availability (from recorded export grid).
+
+def _resolve_tile_seam_specs(root: Path, raster_plan: dict, inventory_by_name: dict):
+    """Approximate export-tile seam specs (negative control), or None."""
     sw_inv = inventory_by_name.get("current_lst_scene_weighted_median", {})
     db_inv = inventory_by_name.get("current_lst_date_balanced_median", {})
     tile_avail = audit.export_tile_control_availability(sw_inv, db_inv)
-    tile_units = None
-    if tile_avail.get("available"):
-        sig = audit.grid_signature(root / raster_plan["current_lst_scene_weighted_median"])
-        tile_units = audit.export_tile_boundary_edge_masks(
-            sig["width"], sig["height"], tile_avail["tile_grid"],
-        )
+    if not tile_avail.get("available"):
+        return None
+    sig = audit.grid_signature(root / raster_plan["current_lst_scene_weighted_median"])
+    specs = audit.export_tile_seam_specs(sig["width"], sig["height"], tile_avail["tile_grid"])
+    return specs or None
 
-    # Verified provenance boundary_id units (rasterized onto the exact grid).
-    provenance_units = _resolve_provenance_units(root, raster_plan, provenance_state)
 
-    boundary_rows: list[dict] = []
-    paired_rows: list[dict] = []
-    all_verdicts: dict = {}
-    for product in _AUDIT_PRODUCTS:
-        paths = _product_chain_paths(root, raster_plan, product)
-        # GRID CONTRACT: product rasters must share the support-raster grid.
-        audit.assert_same_grid([
-            root / raster_plan["current_lst_scene_valid_count"],
-            paths["scene_weighted"], paths["date_balanced"],
-        ])
-        sw = audit.read_masked_array(paths["scene_weighted"])
-        db = audit.read_masked_array(paths["date_balanced"])
-        result = audit.audit_product_boundaries(
-            product, sw, db, edge_masks,
-            tile_units=tile_units, provenance_status=provenance_state,
-            provenance_units=provenance_units,
-        )
-        boundary_rows.extend(result["metric_rows"])
-        all_verdicts[product] = result["verdicts"]
-        for boundary_type, verdict in result["verdicts"].items():
-            paired_rows.append({
-                "product": product,
-                "boundary_type": boundary_type,
-                "status": verdict.get("status"),
-                "unit_type": verdict.get("unit_type"),
-                "n_units": verdict.get("n_units"),
-                "n_pairs": verdict.get("n_pairs"),
-                "point_estimate": verdict.get("point_estimate"),
-                "interval_low": verdict.get("interval_low"),
-                "interval_high": verdict.get("interval_high"),
-            })
-    return boundary_rows, paired_rows, all_verdicts
+def _resolve_provenance_code_spec(root: Path, raster_plan: dict, provenance_state: str,
+                                  tmp_dir: Path):
+    """Build the ONE disk-backed int32 provenance code raster (bounded), or None.
+
+    Replaces the old full-mask-per-boundary_id rasterization: verified boundaries
+    are burned once into a windowed code memmap under ``_analysis_tmp``.
+    """
+    import rasterio
+
+    if provenance_state != "provenance_available":
+        return None
+    geojson_path = root / "scene_boundaries.geojson"
+    if not geojson_path.exists():
+        return None
+    geojson = json.loads(geojson_path.read_text(encoding="utf-8"))
+    with rasterio.open(root / raster_plan["current_lst_scene_weighted_median"]) as src:
+        transform, width, height = src.transform, src.width, src.height
+    return audit.build_provenance_code_memmap(geojson, transform, width, height, tmp_dir)
+
+
+def _paired_rows_from_verdicts(product: str, verdicts: dict) -> list[dict]:
+    rows = []
+    for boundary_type, verdict in verdicts.items():
+        rows.append({
+            "product": product,
+            "boundary_type": boundary_type,
+            "status": verdict.get("status"),
+            "unit_type": verdict.get("unit_type"),
+            "n_units": verdict.get("n_units"),
+            "n_pairs": verdict.get("n_pairs"),
+            "point_estimate": verdict.get("point_estimate"),
+            "interval_low": verdict.get("interval_low"),
+            "interval_high": verdict.get("interval_high"),
+        })
+    return rows
+
+
+def _audit_one_product(root: Path, raster_plan: dict, product: str, support_paths: dict,
+                       tile_seam_specs, provenance_state: str, provenance_code_spec,
+                       tmp_dir: Path, resource_log: list | None):
+    """Bounded-memory windowed boundary audit for ONE product.
+
+    Returns ``(metric_rows, paired_rows, verdicts)``. Never reads whole product
+    rasters into RAM; every boundary type is streamed one at a time.
+    """
+    paths = _product_chain_paths(root, raster_plan, product)
+    # GRID CONTRACT: product rasters must share the support-raster grid.
+    audit.assert_same_grid([
+        support_paths["scene_count_edge"], paths["scene_weighted"], paths["date_balanced"],
+    ])
+    result = audit.audit_product_boundaries_windowed(
+        product, paths["scene_weighted"], paths["date_balanced"], support_paths,
+        tmp_dir=tmp_dir, tile_seam_specs=tile_seam_specs,
+        provenance_status=provenance_state, provenance_code_spec=provenance_code_spec,
+        resource_log=resource_log,
+    )
+    verdicts = result["verdicts"]
+    return result["metric_rows"], _paired_rows_from_verdicts(product, verdicts), verdicts
 
 
 def _render_all_maps(root: Path, raster_plan: dict) -> list[str]:
@@ -589,8 +555,16 @@ def _run_provenance(ctx: dict, root: Path) -> dict:
         prov_ctx["output_root"] = root
         prov_ctx["data_root"] = root
         config = source_scene_provenance_config(ctx["experiment_id"])
+        # METADATA CORRECTION ONLY: rewrite the composite masking-rule text so no
+        # generated provenance field repeats the false "QA_PIXEL + QA_RADSAT"
+        # claim. Raster computation is untouched and QA_RADSAT is never added.
+        config = audit.correct_composite_masking_rules(config)
         result = build_provenance(prov_ctx, config)
         summary = dict(result["summary"])
+        # Qualify EXACTLY what the metadata-derived source path/row evidence is.
+        summary["source_boundary_evidence_qualification"] = (
+            audit.provenance_evidence_qualification(summary.get("mode", "metadata_only"))
+        )
         summary["footprints_geojson"] = result["footprints"]
         summary["boundaries_geojson"] = result["boundaries"]
         (root / "scene_footprints.geojson").write_text(
@@ -649,19 +623,19 @@ def _build_summary(
 
     final_status = compute_final_status(gated, reproduction_status)
 
-    limitations = []
-    if not verified_source_present:
-        limitations.append(
-            "No verified source-scene/path-row boundary evidence was sampled "
-            "(provenance was not available or no boundary_id adjacency masks "
-            "intersected the grid). Support-count-edge results are a proxy and "
-            "do NOT establish verified path/row-boundary behaviour."
-        )
-    if reproduction_status != "pass":
-        limitations.append(
-            "Canonical reproduction did not pass; date_balanced results are not "
-            "interpretable and no supported_reduction is emitted."
-        )
+    export_tile_negative_control = {
+        product: gated[product].get("export_tile_boundary")
+        for product in gated
+    }
+    provenance_mode = (provenance or {}).get("mode", "metadata_only")
+    limitations = audit.build_report_limitations(
+        experiment_id=ctx["experiment_id"],
+        verified_source_evidence=verified_source_evidence,
+        export_tile_negative_control=export_tile_negative_control,
+        reproduction_status=reproduction_status,
+        verified_source_present=verified_source_present,
+        provenance_mode=provenance_mode,
+    )
 
     return {
         "audit": audit.DIAGNOSTIC_NAMESPACE,
@@ -676,6 +650,13 @@ def _build_summary(
         ),
         "canonical_reproduction": {
             "status": reproduction_status,
+            "canonical_gate_version": reproduction.get("canonical_gate_version"),
+            "decisive_gate": reproduction.get("decisive_gate"),
+            "raw_encoding": reproduction.get("raw_encoding"),
+            "semantic_checks": reproduction.get("semantic_checks", reproduction.get("checks")),
+            "threshold_boundary": reproduction.get("threshold_boundary"),
+            "warnings": reproduction.get("warnings"),
+            "reduction_tolerance_note": reproduction.get("reduction_tolerance_note"),
             "checks": reproduction.get("checks"),
         },
         "qa_mask": audit.qa_mask_provenance(),
@@ -693,14 +674,17 @@ def _build_summary(
         "provenance": {
             "state": provenance_state,
             "summary": provenance,
+            # Kept True: verified geometric boundary evidence WAS sampled. The
+            # qualification states exactly what was verified (metadata-derived
+            # source-footprint/path-row boundaries, not pixel-level provenance).
             "is_verified_source_boundary_evidence": verified_source_present,
+            "source_boundary_evidence_qualification": (
+                audit.provenance_evidence_qualification(provenance_mode)
+            ),
         },
         "support_count_boundary_evidence": support_count_evidence,
         "verified_source_path_row_evidence": verified_source_evidence,
-        "export_tile_negative_control": {
-            product: gated[product].get("export_tile_boundary")
-            for product in gated
-        },
+        "export_tile_negative_control": export_tile_negative_control,
         "paired_boundary_verdicts": gated,
         "limitations": limitations,
         "claim_boundary": (
@@ -721,12 +705,29 @@ def _summary_markdown(summary: dict) -> str:
         f"# Landsat composite counterfactual audit -- {summary['experiment_id']}",
         "",
         f"- **Final status: {summary['final_status']}**",
-        f"- Canonical reproduction gate: **{summary['canonical_reproduction']['status']}**",
+        f"- Canonical reproduction gate: **{summary['canonical_reproduction']['status']}** "
+        f"(decisive gate: {summary['canonical_reproduction'].get('decisive_gate')}, "
+        f"schema {summary['canonical_reproduction'].get('canonical_gate_version')})",
+        (
+            "- Raw GeoTIFF encoding differs (canonical serializes masked pixels as "
+            "DN 0 with no nodata tag; diagnostic uses a -9999 sentinel) but is "
+            "semantically equivalent after the production Step5 conversion; the raw "
+            "files are NOT bitwise identical."
+            if (summary['canonical_reproduction'].get('raw_encoding') or {}).get('status')
+            == 'difference_semantically_equivalent'
+            else "- Raw GeoTIFF encodings agree."
+        ),
+        (
+            "- The 5e-5 Celsius derived-reduction tolerance is a float32 NUMERICAL "
+            "reproducibility tolerance, not a scientific effect-size threshold."
+        ),
         f"- QA masking actually applied: **{summary['qa_mask']['qa_source']}** "
-        f"(QA_RADSAT applied: {summary['qa_mask']['qa_radsat_applied']})",
+        f"({audit.QA_MASKING_RULE_TEXT})",
         f"- Provenance state: **{summary['provenance']['state']}** "
         f"(verified source-boundary evidence: "
-        f"{summary['provenance']['is_verified_source_boundary_evidence']})",
+        f"{summary['provenance']['is_verified_source_boundary_evidence']}; "
+        "metadata-derived source-footprint/path-row boundary evidence, not "
+        "pixel-level selected-scene provenance)",
         "",
         "## Support-count boundary verdicts (current LST)",
         "",
@@ -741,6 +742,10 @@ def _summary_markdown(summary: dict) -> str:
         "",
         "`reduction = absolute_jump_scene_weighted - absolute_jump_date_balanced` "
         "(positive => date-balanced compositing reduces the jump).",
+        "",
+    ]
+    lines += audit.limitations_markdown(summary.get("limitations", []))
+    lines += [
         "",
         "## Claim boundary",
         "",
@@ -758,9 +763,483 @@ def _summary_markdown(summary: dict) -> str:
 def _collect_output_files(root: Path) -> list[Path]:
     files = []
     for path in sorted(root.rglob("*")):
-        if path.is_file() and "_tiles" not in path.parts and path.name != "manifest.json":
+        if (path.is_file() and "_tiles" not in path.parts
+                and audit.ANALYSIS_TMP_DIRNAME not in path.parts
+                and path.name != "manifest.json"):
             files.append(path)
     return files
+
+
+# =============================================================================
+# LOCAL ANALYSIS CHECKPOINT + FLUSHING RESOURCE LOG (bounded-memory finalize)
+# =============================================================================
+class _FlushingResourceLog(list):
+    """A list whose ``append`` also flushes each record to disk + the logger.
+
+    Passed into the windowed audit as ``resource_log`` so the CURRENTLY RUNNING
+    stage is written to ``analysis_run.log`` (and echoed to the console) BEFORE a
+    potential crash -- making it obvious which product/boundary was active.
+    """
+
+    def __init__(self, path):
+        super().__init__()
+        self._path = Path(path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    def append(self, record) -> None:  # noqa: D401
+        super().append(record)
+        try:
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, default=str) + "\n")
+        except OSError:
+            pass
+        log.info("[resource] %s", json.dumps(record, default=str))
+
+
+# Stages whose results are produced by the canonical-reproduction gate logic and
+# must be INVALIDATED (recomputed) whenever the gate schema/version changes --
+# without rerunning Earth Engine. Every other stage (raster exports, derived
+# products, boundary metrics/maps, provenance) is algorithm-versioned
+# independently and is still reused across a gate-version bump.
+_GATE_VERSIONED_STAGES = frozenset({"reproduction", "report"})
+
+# Stages whose CACHED result carries generated report/provenance text (limitations
+# wording, QA masking-rule correction, provenance qualification) and must be
+# INVALIDATED whenever the report schema/version changes -- so a --finalize-only
+# refresh regenerates only these reports while reusing every valid boundary,
+# raster, derived, and map calculation. No Earth Engine work is triggered.
+_REPORT_VERSIONED_STAGES = frozenset({"provenance", "report"})
+
+
+class _AnalysisCheckpoint:
+    """Atomic local-analysis checkpoint, SEPARATE from raster_inventory.partial.json.
+
+    Stores per-stage results inline plus the files/inputs each stage depends on.
+    A stage is only reused when its referenced files still exist and match their
+    recorded byte sizes -- checkpoint text alone is never trusted.
+
+    A ``canonical_gate_version`` is recorded alongside the stages. When the stored
+    gate version differs from the current ``audit.CANONICAL_GATE_VERSION``, the
+    gate-versioned stages (canonical reproduction + final report) are invalidated
+    so they are recomputed under the corrected gate, while valid raster exports
+    and boundary results are reused. No Earth Engine work is triggered.
+    """
+
+    def __init__(self, root: Path, experiment_id: str):
+        self.root = Path(root)
+        self.experiment_id = experiment_id
+        data = audit.read_analysis_checkpoint(self.root)
+        self.stages = data.get("stages", {}) if isinstance(data, dict) else {}
+        self.stored_gate_version = (
+            data.get("canonical_gate_version") if isinstance(data, dict) else None
+        )
+        self.stored_report_version = (
+            data.get("report_schema_version") if isinstance(data, dict) else None
+        )
+
+    def _gate_version_stale(self, key: str) -> bool:
+        return (
+            key in _GATE_VERSIONED_STAGES
+            and self.stored_gate_version != audit.CANONICAL_GATE_VERSION
+        )
+
+    def _report_version_stale(self, key: str) -> bool:
+        return (
+            key in _REPORT_VERSIONED_STAGES
+            and self.stored_report_version != audit.REPORT_SCHEMA_VERSION
+        )
+
+    def reusable(self, key: str):
+        entry = self.stages.get(key)
+        if not entry or not entry.get("done"):
+            return None
+        # A gate schema/version change invalidates only the canonical-gate stages;
+        # a report schema/version change invalidates only the report/provenance
+        # stages. Boundary/raster/derived/map stages are reused unchanged.
+        if self._gate_version_stale(key) or self._report_version_stale(key):
+            return None
+        if not audit.files_present_and_signed(entry.get("files")):
+            return None
+        if not audit.files_present_and_signed(entry.get("inputs")):
+            return None
+        return entry.get("result")
+
+    def mark(self, key: str, *, result=None, files=None, inputs=None) -> None:
+        self.stages[key] = {
+            "done": True,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "files": files or [],
+            "inputs": inputs or [],
+            "result": result,
+        }
+        # Persisting under the CURRENT gate + report versions also upgrades the
+        # recorded versions, so later runs see the stages as current.
+        self.stored_gate_version = audit.CANONICAL_GATE_VERSION
+        self.stored_report_version = audit.REPORT_SCHEMA_VERSION
+        audit.write_analysis_checkpoint(self.root, {
+            "audit": audit.DIAGNOSTIC_NAMESPACE,
+            "experiment_id": self.experiment_id,
+            "checkpoint_kind": "local_analysis",
+            "canonical_gate_version": audit.CANONICAL_GATE_VERSION,
+            "report_schema_version": audit.REPORT_SCHEMA_VERSION,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "stages": self.stages,
+        })
+
+
+def _file_ref(path: Path) -> dict:
+    path = Path(path)
+    try:
+        return {"path": str(path), "bytes": int(path.stat().st_size)}
+    except OSError:
+        return {"path": str(path), "bytes": -1}
+
+
+def _derived_baseline_paths(root: Path, raster_plan: dict, chain: str) -> list[Path]:
+    return sorted(
+        root / raster_plan[name]
+        for name in raster_plan
+        if name.startswith("baseline_lst_") and name.endswith(f"_{chain}_median")
+    )
+
+
+def _derived_output_files(root: Path, chain: str) -> list[Path]:
+    out_dir = root / "derived" / chain
+    return [out_dir / n for n in (
+        "baseline_lst_mean_celsius.tif", "baseline_lst_std_celsius.tif",
+        "baseline_valid_year_count.tif", "current_minus_baseline_celsius.tif",
+        "anomaly_zscore.tif",
+    )]
+
+
+def _derived_stats_from_files(chain: str, out_dir: Path) -> dict:
+    """Recompute the derived summary stats from EXISTING derived tifs (read-only).
+
+    Lets finalize reuse valid derived products without overwriting them.
+    """
+    import numpy as np
+
+    def _stat(path):
+        arr = audit.read_masked_array(path, 1)
+        finite = arr[np.isfinite(arr)]
+        return {"valid_pixels": int(finite.size),
+                "mean": float(np.mean(finite)) if finite.size else None}
+
+    out_dir = Path(out_dir)
+    return {
+        "chain": chain,
+        "policy": audit.step5_policy_snapshot(),
+        "written": {p.name: str(p) for p in _derived_output_files(out_dir.parent, chain)},
+        "baseline_mean": _stat(out_dir / "baseline_lst_mean_celsius.tif"),
+        "baseline_std": _stat(out_dir / "baseline_lst_std_celsius.tif"),
+        "difference": _stat(out_dir / "current_minus_baseline_celsius.tif"),
+        "anomaly_zscore": _stat(out_dir / "anomaly_zscore.tif"),
+    }
+
+
+def _local_finalization(ctx, root, raster_plan, doc_plan, scene_metadata,
+                        raster_inventory, inventory_by_name, *, mode: str) -> dict:
+    """Bounded-memory local post-export finalization shared by live + finalize.
+
+    Runs the Step5-policy derived comparison, canonical reproduction gate,
+    provenance, the WINDOWED boundary audit, PNG maps, and the status-gated
+    summary/manifest/run-log -- all with a validate-before-skip local analysis
+    checkpoint and a flushing resource log. A failed canonical reproduction gate
+    suppresses supported_reduction but never aborts finalization. Temporary
+    analysis scratch is cleaned only on success.
+    """
+    experiment_id = ctx["experiment_id"]
+    tmp_dir = root / audit.ANALYSIS_TMP_DIRNAME
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    resource_log = _FlushingResourceLog(root / "analysis_run.log")
+    checkpoint = _AnalysisCheckpoint(root, experiment_id)
+    support_paths = _support_paths(root, raster_plan)
+
+    resource_log.append(audit.stage_resource_record(
+        "local_finalization", phase="begin", tmp_dir=tmp_dir, mode=mode))
+
+    # --- 3. derived comparison (Step5 policy) per chain (reuse when valid) ---
+    derived = {}
+    for chain in audit.CHAINS:
+        key = f"derived:{chain}"
+        cached = checkpoint.reusable(key)
+        out_files = _derived_output_files(root, chain)
+        if cached is not None:
+            derived[chain] = cached
+            continue
+        if all(p.exists() for p in out_files):
+            # Existing valid derived products: recompute stats read-only (no overwrite).
+            derived[chain] = _derived_stats_from_files(chain, root / "derived" / chain)
+        else:
+            current_count = root / raster_plan[
+                f"current_lst_{'scene_valid_count' if chain == audit.CHAIN_SCENE_WEIGHTED else 'unique_date_valid_count'}"
+            ]
+            derived[chain] = audit.compute_derived_comparison(
+                chain,
+                baseline_year_median_paths=_derived_baseline_paths(root, raster_plan, chain),
+                current_median_celsius_path=root / raster_plan[f"current_lst_{chain}_median"],
+                current_count_path=current_count,
+                out_dir=(root / "derived" / chain),
+            )
+        checkpoint.mark(key, result=derived[chain],
+                        files=[_file_ref(p) for p in out_files])
+        resource_log.append(audit.stage_resource_record(
+            "derived", phase="end", tmp_dir=tmp_dir, chain=chain))
+
+    # --- 4. CANONICAL REPRODUCTION GATE (never relaxed; gates support claims) ---
+    repro_cached = checkpoint.reusable("reproduction")
+    if repro_cached is not None:
+        reproduction = repro_cached
+    else:
+        reproduction = audit.run_canonical_reproduction_gate(ctx, root, raster_plan)
+        _write_json(root / doc_plan["canonical_reproduction"], reproduction)
+        checkpoint.mark("reproduction", result=reproduction,
+                        files=[_file_ref(root / doc_plan["canonical_reproduction"])])
+    log.info("Canonical reproduction gate: %s", reproduction["status"])
+    if reproduction["status"] == "canonical_reproduction_failed":
+        log.info("Canonical reproduction FAILED -> scientific support claims will be "
+                 "suppressed, but local finalization continues (non-aborting).")
+
+    # --- 5. provenance (its own status; from existing local metadata) ---
+    prov_cached = checkpoint.reusable("provenance")
+    if prov_cached is not None:
+        provenance = prov_cached
+    else:
+        provenance = _run_provenance(ctx, root)
+        checkpoint.mark("provenance", result=provenance, files=[
+            _file_ref(root / "scene_footprints.geojson"),
+            _file_ref(root / "scene_boundaries.geojson"),
+        ])
+    provenance_state = audit.map_provenance_status(provenance)
+    resource_log.append(audit.stage_resource_record(
+        "provenance", phase="end", tmp_dir=tmp_dir, state=provenance_state))
+
+    # --- 6. WINDOWED boundary audit across required products (checkpointed) ---
+    tile_seam_specs = _resolve_tile_seam_specs(root, raster_plan, inventory_by_name)
+    provenance_code_spec = None
+    boundary_rows: list[dict] = []
+    paired_rows: list[dict] = []
+    verdicts: dict = {}
+    for product in _AUDIT_PRODUCTS:
+        key = f"boundary:{product}"
+        paths = _product_chain_paths(root, raster_plan, product)
+        inputs = [_file_ref(paths["scene_weighted"]), _file_ref(paths["date_balanced"]),
+                  _file_ref(support_paths["scene_count_edge"]),
+                  _file_ref(support_paths["unique_date_count_edge"]),
+                  _file_ref(support_paths["same_day_multiplicity_edge"])]
+        cached = checkpoint.reusable(key)
+        if cached is not None:
+            boundary_rows.extend(cached["metric_rows"])
+            paired_rows.extend(cached["paired_rows"])
+            verdicts[product] = cached["verdicts"]
+            continue
+        # Build the ONE provenance code raster lazily (shared across products).
+        if provenance_code_spec is None and provenance_state == "provenance_available":
+            provenance_code_spec = _resolve_provenance_code_spec(
+                root, raster_plan, provenance_state, tmp_dir)
+        metric_rows, prod_paired, prod_verdicts = _audit_one_product(
+            root, raster_plan, product, support_paths, tile_seam_specs,
+            provenance_state, provenance_code_spec, tmp_dir, resource_log,
+        )
+        boundary_rows.extend(metric_rows)
+        paired_rows.extend(prod_paired)
+        verdicts[product] = prod_verdicts
+        checkpoint.mark(key, inputs=inputs, result={
+            "metric_rows": metric_rows, "paired_rows": prod_paired,
+            "verdicts": prod_verdicts,
+        })
+    _write_csv(root / doc_plan["boundary_metrics"], boundary_rows)
+    _write_csv(root / doc_plan["paired_boundary_comparison"], paired_rows)
+
+    # --- 7. raster inventory + PNG maps (per-pair checkpointed) ---
+    _write_csv(root / doc_plan["raster_inventory"], _inventory_rows(raster_inventory))
+    maps: list[str] = []
+    for name in raster_plan:
+        if not name.endswith("_scene_weighted_median"):
+            continue
+        pair = name[: -len("_scene_weighted_median")]
+        db_name = f"{pair}_date_balanced_median"
+        if db_name not in raster_plan:
+            continue
+        key = f"maps:{pair}"
+        cached = checkpoint.reusable(key)
+        if cached is not None:
+            maps.extend(cached["pngs"])
+            continue
+        pngs = audit.render_pair_maps(
+            root / raster_plan[name], root / raster_plan[db_name],
+            root / "maps", pair_name=pair,
+        )
+        maps.extend(pngs)
+        checkpoint.mark(key, result={"pngs": pngs},
+                        files=[_file_ref(p) for p in pngs])
+
+    # --- 8. status-gated summary + manifest + run log (final report stage) ---
+    summary = _build_summary(
+        ctx, scene_metadata, derived, verdicts, provenance, provenance_state, reproduction,
+    )
+    _write_json(root / doc_plan["counterfactual_summary_json"], summary)
+    (root / doc_plan["counterfactual_summary_md"]).write_text(
+        _summary_markdown(summary), encoding="utf-8"
+    )
+    resource_log.append(audit.stage_resource_record(
+        "local_finalization", phase="end", tmp_dir=tmp_dir, mode=mode,
+        final_status=summary["final_status"]))
+    (root / doc_plan["run_log"]).write_text(
+        f"run_at={datetime.now(timezone.utc).isoformat()}\nlog_file={log_file}\n"
+        f"mode={mode}\n"
+        f"canonical_reproduction={reproduction['status']}\n"
+        f"provenance={provenance_state}\n"
+        f"final_status={summary['final_status']}\n"
+        f"analysis_resource_log={root / 'analysis_run.log'}\n"
+        f"peak_rss_mib={audit.process_rss_mib()}\n",
+        encoding="utf-8",
+    )
+
+    produced = _collect_output_files(root)
+    manifest = audit.build_file_manifest(produced, output_dir=root)
+    exported_names = [r["name"] for r in raster_inventory if r.get("status") == "exported"]
+    resumed_names = [r["name"] for r in raster_inventory
+                     if r.get("status") in ("resumed_existing", "finalize_reused")]
+    manifest["raster_status"] = {r["name"]: r.get("status") for r in raster_inventory}
+    manifest["raster_status_summary"] = {
+        "exported": exported_names, "resumed_existing": resumed_names,
+    }
+    # Final status carries the decisive gate schema/version so a consumer can tell
+    # which canonical-reproduction gate produced it.
+    manifest["canonical_gate_version"] = audit.CANONICAL_GATE_VERSION
+    manifest["final_status"] = summary["final_status"]
+    manifest["canonical_reproduction_status"] = reproduction["status"]
+    _write_json(root / doc_plan["manifest"], manifest)
+
+    checkpoint.mark("report", files=[
+        _file_ref(root / doc_plan["counterfactual_summary_json"]),
+        _file_ref(root / doc_plan["manifest"]),
+    ])
+
+    # Clean the temporary analysis scratch only after a fully successful pass.
+    removed = audit.clean_analysis_tmp(root)
+    if removed:
+        log.info("Cleaned analysis scratch: %s", removed)
+
+    return {
+        "final_status": summary["final_status"],
+        "reproduction_status": reproduction["status"],
+        "provenance_state": provenance_state,
+        "map_count": len(maps),
+    }
+
+
+def _validate_required_rasters_for_finalize(root: Path, raster_plan: dict, export_crs: str):
+    """Validate the required GEE-exported rasters exist and are reusable.
+
+    Returns ``(inventory_rows, inventory_by_name)`` on success. Raises
+    AuditRunnerError with an explicit list if any required exported raster is
+    missing or invalid. Derived (locally rebuilt) products are NOT required here.
+    """
+    exported_names = [n for n in raster_plan if raster_plan[n].startswith("rasters/")]
+    problems = []
+    rows = []
+    inventory_by_name = {}
+    reference_signature = None
+    # Reuse the resume checkpoint's transport/tile_grid metadata when present.
+    partial = {}
+    partial_path = root / "raster_inventory.partial.json"
+    if partial_path.exists():
+        try:
+            data = json.loads(partial_path.read_text(encoding="utf-8"))
+            partial = {r.get("name"): r for r in data.get("rasters", [])}
+        except (OSError, json.JSONDecodeError):
+            partial = {}
+
+    for name in exported_names:
+        out_path = root / raster_plan[name]
+        verdict = audit.validate_existing_diagnostic_raster(
+            out_path, expected_crs=export_crs, reference_signature=reference_signature,
+        )
+        if not verdict["valid"]:
+            problems.append(f"{name}: {verdict['reason']} ({out_path})")
+            continue
+        if reference_signature is None:
+            reference_signature = verdict["signature"]
+        prior = partial.get(name, {})
+        row = {
+            "name": name, "path": str(out_path), "status": "finalize_reused",
+            "transport": prior.get("transport", "finalize_reused"),
+            "tile_grid": prior.get("tile_grid"), "tile_count": prior.get("tile_count"),
+            "estimated_bytes": prior.get("estimated_bytes"),
+            "direct_skipped_preflight": prior.get("direct_skipped_preflight"),
+            "alignment_qa": prior.get("alignment_qa"),
+            "nodata_status": verdict.get("nodata_status"),
+        }
+        rows.append(row)
+        inventory_by_name[name] = row
+
+    if problems:
+        raise AuditRunnerError(
+            "[--finalize-only] cannot proceed: "
+            f"{len(problems)} required exported raster(s) missing or invalid:\n  - "
+            + "\n  - ".join(problems)
+        )
+    return rows, inventory_by_name
+
+
+def _run_finalize(ctx: dict) -> dict:
+    """Local-only finalization: NO Earth Engine of any kind.
+
+    Uses the existing diagnostic directory, validates all required exported
+    rasters, reuses the existing source_scene_metadata.json, rebuilds derived
+    products when needed, runs canonical reproduction, provenance, the
+    low-memory boundary audit, renders maps, and writes summaries/CSVs/manifest/
+    run log. Never imports/initializes Earth Engine and never deletes the
+    diagnostic namespace.
+    """
+    from core.config import EXPORT_CRS
+
+    experiment_id = ctx["experiment_id"]
+    root = audit.diagnostic_output_root(experiment_id)
+    raster_plan = audit.plan_raster_outputs(ctx)
+    doc_plan = audit.plan_document_outputs()
+    audit.assert_diagnostic_namespace_safe(audit.plan_all_output_paths(ctx), experiment_id)
+
+    if not root.exists():
+        raise AuditRunnerError(
+            f"[--finalize-only] diagnostic namespace does not exist: {root}. "
+            "Run the export phase first."
+        )
+
+    # Reuse the EXISTING explicit source-scene metadata (never re-query EE).
+    scene_meta_path = root / doc_plan["source_scene_metadata"]
+    if not scene_meta_path.exists():
+        raise AuditRunnerError(
+            f"[--finalize-only] required {scene_meta_path.name} is missing; "
+            "cannot finalize without the existing source-scene metadata."
+        )
+    scene_metadata = json.loads(scene_meta_path.read_text(encoding="utf-8"))
+
+    # Refresh the deterministic (EE-free) audit config document.
+    _write_json(root / doc_plan["audit_config"], audit.build_audit_config(ctx))
+
+    # Validate every required exported raster BEFORE any downstream stage.
+    raster_inventory, inventory_by_name = _validate_required_rasters_for_finalize(
+        root, raster_plan, EXPORT_CRS)
+    log.info("[--finalize-only] validated %d required exported rasters.",
+             len(raster_inventory))
+
+    local = _local_finalization(
+        ctx, root, raster_plan, doc_plan, scene_metadata,
+        raster_inventory, inventory_by_name, mode="finalize_only",
+    )
+    return {
+        "experiment_id": experiment_id,
+        "ran": True,
+        "mode": "finalize_only",
+        "output_root": str(root),
+        "raster_count": len(raster_inventory),
+        "map_count": local["map_count"],
+        "canonical_reproduction": local["reproduction_status"],
+        "final_status": local["final_status"],
+    }
 
 
 def main(
@@ -770,12 +1249,31 @@ def main(
     force: bool = False,
     cleanup_tiles: bool = False,
     resume: bool = False,
+    finalize_only: bool = False,
 ) -> dict:
     if force and resume:
         raise AuditRunnerError("--force and --resume are mutually exclusive.")
 
+    # --finalize-only is a pure local post-export mode: it must never combine
+    # with any Earth-Engine / export / namespace-mutating flag.
+    if finalize_only:
+        incompatible = [flag for flag, on in (
+            ("--run", run), ("--force", force), ("--resume", resume),
+            ("--cleanup-tiles", cleanup_tiles),
+        ) if on]
+        if incompatible:
+            raise AuditRunnerError(
+                "--finalize-only is incompatible with: "
+                f"{', '.join(incompatible)}. It performs NO Earth Engine work and "
+                "only finalizes existing local exports."
+            )
+
     ctx = build_experiment_context(experiment_id)
     log_context_summary(ctx, log)
+
+    if finalize_only:
+        log.info("[--finalize-only] local post-export finalization; NO Earth Engine.")
+        return _run_finalize(ctx)
 
     plan = _plan(ctx)
 
@@ -831,6 +1329,14 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--cleanup-tiles", action="store_true",
         help="Delete intermediate diagnostic tile exports after merge.",
     )
+    parser.add_argument(
+        "--finalize-only", action="store_true",
+        help="Local post-export finalization ONLY: no Earth Engine import/init/"
+             "query/export/download. Validates existing exported rasters, rebuilds "
+             "derived products when needed, runs the bounded-memory boundary audit, "
+             "renders maps, and writes summaries/manifest. Incompatible with --run, "
+             "--force, --resume, and --cleanup-tiles; never deletes the namespace.",
+    )
     return parser.parse_args(argv)
 
 
@@ -843,5 +1349,6 @@ if __name__ == "__main__":
         force=args.force,
         cleanup_tiles=args.cleanup_tiles,
         resume=args.resume,
+        finalize_only=args.finalize_only,
     )
     print(json.dumps(result, indent=2, default=str))
