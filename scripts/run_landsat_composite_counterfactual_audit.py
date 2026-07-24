@@ -168,6 +168,9 @@ def _run_live(ctx: dict, force: bool, cleanup_tiles: bool) -> dict:
             run_alignment_qa=True, nodata=audit.NODATA_SENTINEL,
         )
         nodata_check = audit.validate_nodata_mask(result["path"])
+        # FAIL FAST: an unverifiable nodata mask means masked/AOI-exterior pixels
+        # could be read as physical values -- refuse to continue.
+        _require_nodata_ok(nodata_check, name)
         row = {
             "name": name,
             "path": str(result["path"]),
@@ -206,7 +209,7 @@ def _run_live(ctx: dict, force: bool, cleanup_tiles: bool) -> dict:
 
     # --- 4. CANONICAL REPRODUCTION GATE (before interpreting date_balanced) ---
     reproduction = audit.run_canonical_reproduction_gate(ctx, root, raster_plan)
-    _write_json(root / "canonical_reproduction.json", reproduction)
+    _write_json(root / doc_plan["canonical_reproduction"], reproduction)
     log.info("Canonical reproduction gate: %s", reproduction["status"])
 
     # --- 5. provenance (kept as its own status; never faked into evidence) ---
@@ -215,7 +218,7 @@ def _run_live(ctx: dict, force: bool, cleanup_tiles: bool) -> dict:
 
     # --- 6. boundary audit across required boundary types + products ---
     boundary_rows, paired_rows, verdicts = _boundary_audit(
-        root, raster_plan, inventory_by_name, provenance_state,
+        root, raster_plan, inventory_by_name, provenance_state, doc_plan,
     )
     _write_csv(root / doc_plan["boundary_metrics"], boundary_rows)
     _write_csv(root / doc_plan["paired_boundary_comparison"], paired_rows)
@@ -284,9 +287,56 @@ def _inventory_rows(raster_inventory: list[dict]) -> list[dict]:
     return rows
 
 
+def _require_nodata_ok(nodata_check: dict, name: str) -> None:
+    """Fail fast when a freshly exported raster's nodata mask is not verifiable."""
+    if nodata_check.get("status") != "ok":
+        raise AuditRunnerError(
+            f"[{name}] nodata validation failed (status="
+            f"{nodata_check.get('status')}); refusing to continue -- masked/AOI "
+            f"exterior pixels are not verifiably tagged with NODATA_SENTINEL. "
+            f"Detail: {nodata_check}"
+        )
+
+
 # Products carried through the paired boundary audit. Support edges are defined
 # once (from current-LST support rasters) and applied identically to all three.
 _AUDIT_PRODUCTS = ("current_lst", "current_minus_baseline", "anomaly_zscore")
+
+# The predeclared support edge used for the final-status decision.
+_FINAL_STATUS_EDGE = "scene_count_edge"
+
+
+def compute_final_status(gated: dict, reproduction_status: str) -> str:
+    """Predeclared final-claim gate.
+
+    ``supported_reduction`` is emitted ONLY when ALL hold:
+      * canonical reproduction passed;
+      * current LST shows supported_reduction on the predeclared support edge;
+      * current-minus-baseline AND anomaly z-score are DIRECTIONALLY CONSISTENT
+        (also supported_reduction on the predeclared support edge).
+    Any mix of supported_reduction and supported_increase across products is
+    ``contradictory_uncertain``. Export-tile controls are a negative control and
+    are never consulted here (they can never create positive evidence).
+    """
+    if reproduction_status != "pass":
+        return "canonical_reproduction_failed"
+
+    def stat(product):
+        return gated.get(product, {}).get(_FINAL_STATUS_EDGE, {}).get("status")
+
+    cur = stat("current_lst")
+    diff = stat("current_minus_baseline")
+    z = stat("anomaly_zscore")
+    trio = [cur, diff, z]
+    if "supported_increase" in trio and "supported_reduction" in trio:
+        return "contradictory_uncertain"
+    if cur == diff == z == "supported_reduction":
+        return "supported_reduction"
+    if all(s == "supported_increase" for s in trio):
+        return "supported_increase"
+    if all(s == "insufficient_evidence" for s in trio):
+        return "insufficient_evidence"
+    return "uncertain"
 
 
 def _product_chain_paths(root: Path, raster_plan: dict, product: str) -> dict:
@@ -305,7 +355,30 @@ def _product_chain_paths(root: Path, raster_plan: dict, product: str) -> dict:
     }
 
 
-def _boundary_audit(root: Path, raster_plan: dict, inventory_by_name: dict, provenance_state: str):
+def _resolve_provenance_units(root: Path, raster_plan: dict, provenance_state: str) -> dict | None:
+    """Rasterize verified scene_boundaries.geojson onto the exact product grid.
+
+    Only when provenance is available AND the geojson has verified boundary
+    features do we produce ``{boundary_id: edge_mask}`` units (preserving
+    boundary_id). Otherwise returns None so the audit reports
+    insufficient_boundary_metadata explicitly.
+    """
+    import rasterio
+
+    if provenance_state != "provenance_available":
+        return None
+    geojson_path = root / "scene_boundaries.geojson"
+    if not geojson_path.exists():
+        return None
+    geojson = json.loads(geojson_path.read_text(encoding="utf-8"))
+    with rasterio.open(root / raster_plan["current_lst_scene_weighted_median"]) as src:
+        transform, width, height = src.transform, src.width, src.height
+    units = audit.rasterize_provenance_boundaries(geojson, transform, width, height)
+    return units or None
+
+
+def _boundary_audit(root: Path, raster_plan: dict, inventory_by_name: dict,
+                    provenance_state: str, doc_plan: dict):
     """Run the paired boundary audit for every required product + boundary type."""
     # Shared support-edge geometry from current-LST support rasters.
     swc = audit.read_masked_array(root / raster_plan["current_lst_scene_valid_count"])
@@ -324,6 +397,9 @@ def _boundary_audit(root: Path, raster_plan: dict, inventory_by_name: dict, prov
             sig["width"], sig["height"], tile_avail["tile_grid"],
         )
 
+    # Verified provenance boundary_id units (rasterized onto the exact grid).
+    provenance_units = _resolve_provenance_units(root, raster_plan, provenance_state)
+
     boundary_rows: list[dict] = []
     paired_rows: list[dict] = []
     all_verdicts: dict = {}
@@ -339,6 +415,7 @@ def _boundary_audit(root: Path, raster_plan: dict, inventory_by_name: dict, prov
         result = audit.audit_product_boundaries(
             product, sw, db, edge_masks,
             tile_units=tile_units, provenance_status=provenance_state,
+            provenance_units=provenance_units,
         )
         boundary_rows.extend(result["metric_rows"])
         all_verdicts[product] = result["verdicts"]
@@ -440,24 +517,39 @@ def _build_summary(
         product: gated[product].get("source_scene_path_row")
         for product in gated
     }
+    # Verified only when a boundary_id unit was actually sampled for a product.
+    verified_source_present = any(
+        (v or {}).get("is_verified_source_boundary_evidence") is True
+        for v in verified_source_evidence.values()
+    )
 
+    final_status = compute_final_status(gated, reproduction_status)
+
+    limitations = []
+    if not verified_source_present:
+        limitations.append(
+            "No verified source-scene/path-row boundary evidence was sampled "
+            "(provenance was not available or no boundary_id adjacency masks "
+            "intersected the grid). Support-count-edge results are a proxy and "
+            "do NOT establish verified path/row-boundary behaviour."
+        )
     if reproduction_status != "pass":
-        final_status = "canonical_reproduction_failed"
-    else:
-        # Emit supported_reduction ONLY if the current-LST support edges support it.
-        current = gated.get("current_lst", {})
-        statuses = [current.get(bt, {}).get("status") for bt in support_count_types]
-        if "supported_reduction" in statuses and "supported_increase" not in statuses:
-            final_status = "supported_reduction"
-        elif all(s == "insufficient_evidence" for s in statuses if s):
-            final_status = "insufficient_evidence"
-        else:
-            final_status = "uncertain"
+        limitations.append(
+            "Canonical reproduction did not pass; date_balanced results are not "
+            "interpretable and no supported_reduction is emitted."
+        )
 
     return {
         "audit": audit.DIAGNOSTIC_NAMESPACE,
         "experiment_id": ctx["experiment_id"],
         "final_status": final_status,
+        "final_status_rule": (
+            "supported_reduction requires canonical_reproduction==pass AND "
+            "directionally consistent supported_reduction on the predeclared "
+            f"'{_FINAL_STATUS_EDGE}' for current_lst, current_minus_baseline, "
+            "and anomaly_zscore; export-tile controls are excluded and can "
+            "never create positive evidence"
+        ),
         "canonical_reproduction": {
             "status": reproduction_status,
             "checks": reproduction.get("checks"),
@@ -477,17 +569,23 @@ def _build_summary(
         "provenance": {
             "state": provenance_state,
             "summary": provenance,
-            "is_verified_source_boundary_evidence": provenance_state == "provenance_available",
+            "is_verified_source_boundary_evidence": verified_source_present,
         },
         "support_count_boundary_evidence": support_count_evidence,
         "verified_source_path_row_evidence": verified_source_evidence,
+        "export_tile_negative_control": {
+            product: gated[product].get("export_tile_boundary")
+            for product in gated
+        },
         "paired_boundary_verdicts": gated,
+        "limitations": limitations,
         "claim_boundary": (
             "A supported_reduction status is evidence that daily compositing "
             "lowers support-edge jumps in THIS AOI; it is NOT proof that "
             "same-date duplication is the sole cause, nor a mandate to change "
             "the canonical production reducer. Support-count-edge evidence is "
-            "distinct from verified source-scene/path-row boundary evidence."
+            "distinct from verified source-scene/path-row boundary evidence, "
+            "and export-tile controls are a negative control only."
         ),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }

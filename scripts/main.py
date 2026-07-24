@@ -296,7 +296,12 @@ def cmd_step8_big_block_robustness(args: argparse.Namespace) -> int:
 
 def cmd_concept_shift(args: argparse.Namespace) -> int:
     try:
-        if args.integration_only:
+        if args.report_revision:
+            result = orch.run_concept_shift_report_revision_stage(
+                source_id=args.source, target_id=args.target,
+                dry_run=args.dry_run, force=args.force,
+            )
+        elif args.integration_only:
             result = orch.run_concept_shift_integration_stage(
                 source_id=args.source, target_id=args.target,
                 dry_run=args.dry_run, force=args.force,
@@ -312,7 +317,28 @@ def cmd_concept_shift(args: argparse.Namespace) -> int:
         return _fail("concept-shift", exc)
     if args.dry_run:
         print(json.dumps(result, indent=2, default=str))
-    log.info("[concept-shift] tamamlandı (integration_only=%s): ran=%s", args.integration_only, result.get("ran"))
+    log.info(
+        "[concept-shift] tamamlandı (report_revision=%s, integration_only=%s): ran=%s",
+        args.report_revision, args.integration_only, result.get("ran"),
+    )
+    return 0
+
+
+def cmd_concept_shift_compare(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_concept_shift_compare_stage(
+            experiments=args.experiments, dry_run=args.dry_run, force=args.force,
+        )
+    except SystemExit as exc:
+        return _fail("concept-shift-compare", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("concept-shift-compare", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info(
+        "[concept-shift-compare] tamamlandı: ran=%s resolved=%s",
+        result.get("ran"), result.get("resolved_experiment_ids"),
+    )
     return 0
 
 
@@ -329,6 +355,48 @@ def cmd_transfer_synthesis(args: argparse.Namespace) -> int:
     if args.dry_run:
         print(json.dumps(result, indent=2, default=str))
     log.info("[transfer-synthesis] tamamlandı: ran=%s canonical_set_id=%s", result.get("ran"), result.get("canonical_set_id"))
+    return 0
+
+
+def cmd_burned_pattern_audit(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_burned_pattern_audit_stage(
+            experiments=args.experiments,
+            all_enabled=args.all_enabled,
+            dry_run=args.dry_run,
+            force=args.force,
+        )
+    except SystemExit as exc:
+        return _fail("burned-pattern-audit", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("burned-pattern-audit", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info(
+        "[burned-pattern-audit] tamamlandı: ran=%s resolved=%s",
+        result.get("ran"), result.get("resolved_experiment_ids"),
+    )
+    return 0
+
+
+def cmd_domain_classifier_audit(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_domain_classifier_audit_stage(
+            experiments=args.experiments,
+            all_enabled=args.all_enabled,
+            dry_run=args.dry_run,
+            force=args.force,
+        )
+    except SystemExit as exc:
+        return _fail("domain-classifier-audit", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("domain-classifier-audit", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info(
+        "[domain-classifier-audit] tamamlandı: ran=%s resolved=%s",
+        result.get("ran"), result.get("resolved_experiment_ids"),
+    )
     return 0
 
 
@@ -398,7 +466,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=EPILOG_EXAMPLES,
     )
-    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,step10,step8-robustness,large-block-robustness,step8-big-block-robustness,concept-shift,legacy}")
+    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,step10,step8-robustness,large-block-robustness,step8-big-block-robustness,concept-shift,concept-shift-compare,transfer-synthesis,burned-pattern-audit,domain-classifier-audit,legacy}")
 
     # --- experiment ---
     p_exp = subparsers.add_parser(
@@ -668,9 +736,56 @@ def build_parser() -> argparse.ArgumentParser:
             "<source>__<target>/."
         ),
     )
+    p_concept.add_argument(
+        "--report-revision", action="store_true",
+        help=(
+            "REPORT-ONLY: revise the existing canonical Step9G v1 final "
+            "report IN PLACE (step9g_final_report.json/.md) to correct two "
+            "semantic issues -- integrated_interpretation repeating one "
+            "generic sentence for every row, and "
+            "thermal_features_consistent_with_step9e wrongly able to "
+            "include elevation_mean -- without recomputing any numerical "
+            "result. analysis_id is preserved verbatim. Mutually exclusive "
+            "in effect with --integration-only (which corrects a different, "
+            "separate Step9E/9F/10 integration namespace)."
+        ),
+    )
     p_concept.add_argument("--force", action="store_true", help="İlgili çıktılar zaten varsa üzerine yaz (orijinal frozen Step9G sayısal çıktıları HARİÇ -- onlar değişmez).")
     p_concept.add_argument("--dry-run", action="store_true", help="Hiçbir AUC/bootstrap hesaplama, hiçbir dosya yazma; yalnızca planı bas.")
     p_concept.set_defaults(func=cmd_concept_shift)
+
+    # --- concept-shift-compare ---
+    p_concept_compare = subparsers.add_parser(
+        "concept-shift-compare",
+        help="Generic, REPORT-ONLY multi-experiment Step9G univariate-AUC comparison.",
+        description=(
+            "Scientific purpose: synthesize a side-by-side comparison table "
+            "from already-frozen canonical Step9G univariate feature-AUC "
+            "direction-reversal pair reports (outputs/diagnostics/"
+            "step9g_univariate_feature_auc_direction_reversal/<pair_id>/"
+            "step9g_final_report.json), for a caller-supplied explicit set "
+            "of experiment IDs (--experiments). REPORT-ONLY -- never reruns "
+            "concept-shift, never recomputes an AUC/CI/bootstrap draw/"
+            "reversal classification. Requires the discovered reports to use "
+            "population burnable_tree_shrub_grass, the fixed 9-feature set, "
+            "10-cell (~5 km) spatial blocks, and the frozen bootstrap "
+            "configuration; cross-validates repeated region-feature results "
+            "across reports at 1e-12 tolerance and fails clearly on "
+            "disagreement. No experiment ID, AOI name, or pair is "
+            "hard-coded: everything is derived from --experiments. Writes "
+            "JSON/2 CSV/Markdown/manifest under outputs/diagnostics/"
+            "step9g_univariate_feature_auc_direction_reversal/comparison/"
+            "<sorted_experiment_ids_joined>/. Delegates to "
+            "src/step9g_multi_aoi_comparison/."
+        ),
+    )
+    p_concept_compare.add_argument(
+        "--experiments", nargs="+", required=True,
+        help="Explicit experiment_id list (core/regions.py registry entries), e.g. --experiments <experiment_id_1> <experiment_id_2> <experiment_id_3>.",
+    )
+    p_concept_compare.add_argument("--force", action="store_true", help="Overwrite an existing comparison output produced by a different analysis_id.")
+    p_concept_compare.add_argument("--dry-run", action="store_true", help="Resolve experiments, discover pair reports, and validate contracts; no file write, no recomputation.")
+    p_concept_compare.set_defaults(func=cmd_concept_shift_compare)
 
     # --- transfer-synthesis ---
     p_transfer_synthesis = subparsers.add_parser(
@@ -701,6 +816,85 @@ def build_parser() -> argparse.ArgumentParser:
     p_transfer_synthesis.add_argument("--force", action="store_true", help="Çıktı dizini zaten doluysa üzerine yaz.")
     p_transfer_synthesis.add_argument("--dry-run", action="store_true", help="Hiçbir dosya yazma; yalnızca çözümlenen plan/girdileri (ve varsa eksik/çelişkili girdileri) bas.")
     p_transfer_synthesis.set_defaults(func=cmd_transfer_synthesis)
+
+    # --- burned-pattern-audit ---
+    p_burned_pattern = subparsers.add_parser(
+        "burned-pattern-audit",
+        help="Generic multi-experiment burned-area spatial-structure and descriptive comparison audit.",
+        description=(
+            "Scientific purpose: for each resolved experiment, descriptively "
+            "reports the number of 8-neighbour spatially connected "
+            "burned-cell components, the component/patch cell-count size "
+            "distribution, burned-cell elevation distribution, and "
+            "burned-cell land-cover composition (reusing the canonical ESA "
+            "WorldCover mapping and the existing burnable_tree_shrub_grass "
+            "sensitivity-population mask). Connected components are a "
+            "spatial fragmentation proxy, NOT a count of independent "
+            "wildfire events. Read-only against Step8A; never fits a model, "
+            "computes transfer performance, or reruns Step9/Step9G/Step10. "
+            "No experiment ID is hard-coded: --experiments takes an "
+            "arbitrary explicit list, --all-enabled resolves every enabled, "
+            "non-legacy experiment_id from the core/regions.py registry "
+            "with a canonical Step8A dataset. Delegates to "
+            "scripts/run_burned_pattern_audit.py / src/burned_pattern_audit.py."
+        ),
+    )
+    p_burned_pattern_selection = p_burned_pattern.add_mutually_exclusive_group(required=True)
+    p_burned_pattern_selection.add_argument(
+        "--experiments", nargs="+", default=None,
+        help="Explicit experiment_id list (core/regions.py registry entries), e.g. --experiments <experiment_id_1> <experiment_id_2>.",
+    )
+    p_burned_pattern_selection.add_argument(
+        "--all-enabled", action="store_true",
+        help="Resolve every enabled, non-legacy core/regions.py experiment_id that has a canonical Step8A dataset.",
+    )
+    p_burned_pattern.add_argument("--force", action="store_true", help="Overwrite existing outputs already produced by a different analysis_id.")
+    p_burned_pattern.add_argument("--dry-run", action="store_true", help="Resolve experiments/inputs and print the plan; no component computation, no files written.")
+    p_burned_pattern.set_defaults(func=cmd_burned_pattern_audit)
+
+    # --- domain-classifier-audit ---
+    p_domain_classifier = subparsers.add_parser(
+        "domain-classifier-audit",
+        help="Generic multi-experiment pairwise domain-classifier (covariate-separability) diagnostic.",
+        description=(
+            "Scientific purpose: for every unordered pair among the "
+            "resolved experiments, measure how well the two regions can be "
+            "distinguished using predictor features alone (never burned "
+            "labels, transfer predictions, coordinates, or experiment "
+            "identity). The classifier target is region/domain identity, "
+            "not burned-area risk. Population: burnable_tree_shrub_grass "
+            "(includes both burned and unburned eligible cells; burned "
+            "status is used only for input-accounting). Reuses the "
+            "canonical Step9 baseline+thermal feature contract, the "
+            "spatial-block construction and estimator already used "
+            "elsewhere in this repo (RandomForestClassifier, "
+            "class_weight=balanced), and canonical eligibility (pre-label "
+            "exclusions apply, e.g. mugla_2021). No historical/legacy "
+            "domain-classifier result exists anywhere in this repository "
+            "(confirmed by exhaustive audit); legacy_comparable_domain_auc "
+            "is therefore always null and legacy_method_available is "
+            "always false -- spatial_block_domain_auc is the sole primary "
+            "result. Does NOT establish causality. No experiment ID is "
+            "hard-coded: --experiments takes an arbitrary explicit list, "
+            "--all-enabled resolves every enabled, non-legacy "
+            "experiment_id with a canonical Step8A dataset. All unordered "
+            "pairs are generated automatically. Delegates to "
+            "scripts/run_domain_classifier_audit.py / "
+            "src/domain_classifier_audit.py."
+        ),
+    )
+    p_domain_classifier_selection = p_domain_classifier.add_mutually_exclusive_group(required=True)
+    p_domain_classifier_selection.add_argument(
+        "--experiments", nargs="+", default=None,
+        help="Explicit experiment_id list (core/regions.py registry entries); all unordered pairs are generated automatically.",
+    )
+    p_domain_classifier_selection.add_argument(
+        "--all-enabled", action="store_true",
+        help="Resolve every enabled, non-legacy core/regions.py experiment_id that has a canonical Step8A dataset.",
+    )
+    p_domain_classifier.add_argument("--force", action="store_true", help="Overwrite existing outputs already produced by a different analysis_id.")
+    p_domain_classifier.add_argument("--dry-run", action="store_true", help="Resolve experiments/pairs and print the plan; no model fitting, no files written.")
+    p_domain_classifier.set_defaults(func=cmd_domain_classifier_audit)
 
     # --- legacy ---
     p_legacy = subparsers.add_parser(

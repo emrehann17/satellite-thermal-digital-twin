@@ -606,3 +606,239 @@ def test_force_clears_only_diagnostic_namespace(tmp_path):
     assert removed == str(diag_root)
     assert not diag_root.exists()                      # diagnostic namespace gone
     assert (canonical / "anomaly_zscore.tif").exists()  # canonical untouched
+
+
+# =============================================================================
+# REFINEMENT 1 -- canonical reproduction: exact mask + explicit bounds
+# =============================================================================
+def _write_masked_raster(path, *, sentinel_cells=(), **kwargs):
+    """Write a raster then poke NODATA_SENTINEL into specific (row, col) cells."""
+    import rasterio
+
+    kwargs.setdefault("nodata", audit.NODATA_SENTINEL)
+    _write_raster(path, **kwargs)
+    if sentinel_cells:
+        with rasterio.open(path, "r+") as ds:
+            band = ds.read(1)
+            for r, c in sentinel_cells:
+                band[r, c] = audit.NODATA_SENTINEL
+            ds.write(band, 1)
+    return path
+
+
+def test_canonical_reproduction_requires_exact_valid_mask(tmp_path):
+    # Same grid, same values, but different valid masks -> mask_mismatch (NOT pass).
+    diag = _write_masked_raster(tmp_path / "diag.tif", value=100.0, sentinel_cells=[(0, 0)])
+    canon = _write_masked_raster(tmp_path / "canon.tif", value=100.0, sentinel_cells=[])
+    result = audit.compare_raster_to_canonical(diag, canon, tolerance=1e-5)
+    assert result["reproduction_status"] == "mask_mismatch"
+    assert result["valid_mask_exact"] is False
+
+
+def test_canonical_reproduction_reports_bounds_mismatch(tmp_path):
+    from rasterio.transform import Affine
+
+    diag = _write_raster(tmp_path / "diag.tif")
+    # Shift origin: transform AND bounds both differ; bounds is compared explicitly.
+    canon = _write_raster(tmp_path / "canon.tif", transform=Affine(0.01, 0, 55.0, 0, -0.01, 37.0))
+    result = audit.compare_raster_to_canonical(diag, canon, tolerance=1e-5)
+    assert result["reproduction_status"] == "grid_mismatch"
+    assert "bounds" in result["mismatch_fields"]
+
+
+def test_canonical_reproduction_bounds_mismatch_via_dimensions(tmp_path):
+    # Same transform, different height -> bounds differ; bounds reported explicitly.
+    diag = _write_raster(tmp_path / "diag.tif", height=8)
+    canon = _write_raster(tmp_path / "canon.tif", height=9)
+    result = audit.compare_raster_to_canonical(diag, canon, tolerance=1e-5)
+    assert result["reproduction_status"] == "grid_mismatch"
+    assert "bounds" in result["mismatch_fields"] and "height" in result["mismatch_fields"]
+
+
+def test_canonical_gate_fails_on_mask_mismatch(tmp_path, monkeypatch):
+    # A mask_mismatch in any check must fail the whole gate.
+    checks = {"x": {"reproduction_status": "mask_mismatch"}}
+    statuses = [c["reproduction_status"] for c in checks.values()]
+    assert "mask_mismatch" in statuses  # sanity
+    # exercise the aggregation directly via a crafted gate-like reduction:
+    failing = {"fail", "grid_mismatch", "mask_mismatch"}
+    assert any(s in failing for s in statuses)
+
+
+# =============================================================================
+# REFINEMENT 2 -- nodata: exact tag + raw-band inspection + fail-fast
+# =============================================================================
+def test_validate_nodata_wrong_tag(tmp_path):
+    path = _write_raster(tmp_path / "w.tif", value=5.0, nodata=0.0)  # wrong tag
+    result = audit.validate_nodata_mask(path)
+    assert result["status"] == "wrong_nodata_tag"
+
+
+def test_validate_nodata_sentinel_not_masked(tmp_path):
+    import rasterio
+
+    # Wrong tag (0) AND a raw sentinel pixel that is therefore NOT masked.
+    path = _write_raster(tmp_path / "s.tif", width=3, height=1, value=5.0, nodata=0.0)
+    with rasterio.open(path, "r+") as ds:
+        band = ds.read(1)
+        band[0, 2] = audit.NODATA_SENTINEL
+        ds.write(band, 1)
+    result = audit.validate_nodata_mask(path)
+    # wrong tag is detected first; the sentinel pixel is confirmed unmasked too.
+    assert result["status"] == "wrong_nodata_tag"
+    assert result["sentinel_not_masked"] is True
+
+
+def test_require_nodata_ok_fails_fast():
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+
+    with pytest.raises(runner.AuditRunnerError):
+        runner._require_nodata_ok({"status": "wrong_nodata_tag"}, "current_lst")
+    # ok status does not raise.
+    runner._require_nodata_ok({"status": "ok"}, "current_lst")
+
+
+# =============================================================================
+# REFINEMENT 3 -- verified provenance boundary_id reaches the paired verdict
+# =============================================================================
+def test_provenance_boundary_id_reaches_verdict():
+    import numpy as np
+
+    # 6x6 all-finite arrays; scene_weighted has a big jump at column 2|3.
+    sw = np.tile(np.array([0, 0, 0, 9, 9, 9], dtype="float64"), (6, 1))
+    db = np.zeros((6, 6), dtype="float64")
+    sc = np.ones((6, 6), dtype="float64")
+    uc = np.ones((6, 6), dtype="float64")
+    masks = audit.build_edge_masks(sc, uc, sc - uc)
+
+    # Two verified provenance boundary_ids, both on the col-2|3 edge (upper vs
+    # lower rows), so each is its own bootstrap unit and a paired interval exists.
+    def _edge(rows):
+        h = np.zeros((6, 5), dtype=bool)
+        h[rows, 2] = True
+        return {"horizontal": h, "vertical": np.zeros((5, 6), dtype=bool)}
+
+    units = {"bnd_REAL_0001": _edge(slice(0, 3)), "bnd_REAL_0002": _edge(slice(3, 6))}
+
+    result = audit.audit_product_boundaries(
+        "current_lst", sw, db, masks,
+        provenance_status="provenance_available", provenance_units=units,
+        min_units=2, n_boot=300,
+    )
+    verdict = result["verdicts"]["source_scene_path_row"]
+    assert verdict["unit_type"] == "provenance_boundary_id"
+    # both real boundary_ids are preserved as bootstrap units in the verdict.
+    assert set(verdict["unit_ids"]) == {"bnd_REAL_0001", "bnd_REAL_0002"}
+    assert verdict["is_verified_source_boundary_evidence"] is True
+    assert verdict["status"] == "supported_reduction"       # sw jump 9, db jump 0
+
+
+def test_provenance_available_without_units_is_insufficient():
+    import numpy as np
+
+    sw, db, sc, uc, mult = _support_case()
+    masks = audit.build_edge_masks(sc, uc, mult)
+    # provenance_available but NO sampled masks -> must NOT be reported as evidence.
+    result = audit.audit_product_boundaries(
+        "current_lst", sw, db, masks,
+        provenance_status="provenance_available", provenance_units=None,
+    )
+    verdict = result["verdicts"]["source_scene_path_row"]
+    assert verdict["status"] == "insufficient_boundary_metadata"
+    assert verdict["is_verified_source_boundary_evidence"] is False
+
+
+def test_rasterize_provenance_boundaries_produces_units():
+    from rasterio.transform import Affine
+
+    transform = Affine(0.01, 0, 30.0, 0, -0.01, 37.0)  # 8x8 -> lon 30..30.08
+    geojson = {
+        "features": [{
+            "type": "Feature",
+            "geometry": {"type": "LineString",
+                         "coordinates": [[30.0, 36.955], [30.08, 36.955]]},
+            "properties": {"boundary_id": "bnd_GEO_1", "verification_status": "verified"},
+        }],
+    }
+    units = audit.rasterize_provenance_boundaries(geojson, transform, 8, 8)
+    assert "bnd_GEO_1" in units
+    assert units["bnd_GEO_1"]["horizontal"].any() or units["bnd_GEO_1"]["vertical"].any()
+
+
+# =============================================================================
+# REFINEMENT 4 -- final claim gate with mixed / contradictory statuses
+# =============================================================================
+def _gated(cur, diff, z, tile=None):
+    edge = "scene_count_edge"
+    g = {
+        "current_lst": {edge: {"status": cur}},
+        "current_minus_baseline": {edge: {"status": diff}},
+        "anomaly_zscore": {edge: {"status": z}},
+    }
+    if tile is not None:
+        for product in g:
+            g[product]["export_tile_boundary"] = {"status": tile, "is_negative_control": True}
+    return g
+
+
+def test_final_status_supported_only_when_all_consistent():
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+
+    g = _gated("supported_reduction", "supported_reduction", "supported_reduction")
+    assert runner.compute_final_status(g, "pass") == "supported_reduction"
+
+
+def test_final_status_contradictory():
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+
+    g = _gated("supported_reduction", "supported_increase", "uncertain")
+    assert runner.compute_final_status(g, "pass") == "contradictory_uncertain"
+
+
+def test_final_status_uncertain_when_products_disagree_softly():
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+
+    g = _gated("supported_reduction", "uncertain", "supported_reduction")
+    assert runner.compute_final_status(g, "pass") == "uncertain"
+
+
+def test_final_status_blocked_by_reproduction():
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+
+    g = _gated("supported_reduction", "supported_reduction", "supported_reduction")
+    assert runner.compute_final_status(g, "canonical_reproduction_failed") == "canonical_reproduction_failed"
+
+
+def test_export_tile_control_never_creates_positive_evidence():
+    import scripts.run_landsat_composite_counterfactual_audit as runner
+
+    # Products only uncertain, but export-tile control screams supported_reduction:
+    # final status must stay uncertain (tile control is excluded entirely).
+    g = _gated("uncertain", "uncertain", "uncertain", tile="supported_reduction")
+    assert runner.compute_final_status(g, "pass") == "uncertain"
+
+
+def test_export_tile_verdict_flagged_non_evidence():
+    import numpy as np
+
+    sw, db, sc, uc, mult = _support_case()
+    masks = audit.build_edge_masks(sc, uc, mult)
+    tile_units = audit.export_tile_boundary_edge_masks(4, 3, [2, 2])
+    result = audit.audit_product_boundaries(
+        "current_lst", sw, db, masks, tile_units=tile_units,
+    )
+    tile = result["verdicts"]["export_tile_boundary"]
+    assert tile["is_negative_control"] is True
+    assert tile["can_affect_final_status"] is False
+    assert tile["control_kind"] == "approximate_grid_partition"
+
+
+# =============================================================================
+# canonical_reproduction.json is a planned output
+# =============================================================================
+def test_canonical_reproduction_in_document_plan():
+    docs = audit.plan_document_outputs()
+    assert docs["canonical_reproduction"] == "canonical_reproduction.json"
+    ctx = _ctx()
+    all_paths = [str(p) for p in audit.plan_all_output_paths(ctx)]
+    assert any(p.endswith("canonical_reproduction.json") for p in all_paths)

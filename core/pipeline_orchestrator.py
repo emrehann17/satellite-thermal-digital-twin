@@ -571,6 +571,43 @@ def run_concept_shift_integration_stage(
     )
 
 
+def run_concept_shift_report_revision_stage(
+    source_id: str, target_id: str, dry_run: bool, force: bool,
+) -> dict:
+    """Dispatch the Step9G v1 final-report REPORT-ONLY semantic revision
+    (report schema v2). Never recomputes AUC/CI/bootstrap/reversal_status;
+    revises step9g_final_report.json/.md IN PLACE at the same canonical
+    path, preserving analysis_id. Distinct from
+    run_concept_shift_integration_stage (which corrects Step9E/9F/10
+    integration in a separate namespace) -- this corrects
+    integrated_interpretation wording and the
+    thermal_features_consistent_with_step9e feature-set bug."""
+    from src.step9g_report_revision import revise_report
+
+    return revise_report(
+        source_id=source_id, target_id=target_id,
+        dry_run=dry_run, force=force,
+    )
+
+
+def run_concept_shift_compare_stage(experiments: list[str], dry_run: bool, force: bool) -> dict:
+    """Dispatch the generic, REPORT-ONLY multi-experiment Step9G
+    univariate-AUC comparison for a caller-supplied explicit set of
+    experiment IDs. Reads only already-frozen Step9G v1 pair reports (never
+    reruns concept-shift, never recomputes an AUC/CI/bootstrap draw/
+    reversal classification). No experiment ID, AOI name, or pair is
+    hard-coded anywhere in this dispatch or in the underlying package."""
+    from src.step9g_multi_aoi_comparison.build import run_comparison
+
+    try:
+        return run_comparison(experiments, dry_run=dry_run, force=force)
+    except ValueError as exc:
+        # ConsistencyError / ScientificContractError are plain ValueError
+        # subclasses; ComparisonError is already a SystemExit and propagates
+        # unchanged.
+        raise SystemExit(str(exc)) from exc
+
+
 def run_multi_aoi_transfer_synthesis_stage(
     aois: list[str], dry_run: bool, force: bool, output_root: Optional[str] = None,
 ) -> dict:
@@ -652,6 +689,37 @@ def run_multi_aoi_transfer_synthesis_stage(
         "manifest_path": str(out_dir / "multi_aoi_manifest.json"),
         "input_families_resolved": manifest["input_families_resolved"],
     }
+
+
+def run_burned_pattern_audit_stage(
+    experiments: Optional[list[str]], all_enabled: bool, dry_run: bool, force: bool,
+) -> dict:
+    """Dispatch the generic multi-experiment burned-area spatial-structure
+    and descriptive comparison audit (connected components, patch-size
+    distribution, elevation, land-cover composition). Read-only against
+    Step8A; no AOI name is hard-coded anywhere in this dispatch or in the
+    underlying module -- experiment IDs are resolved through
+    core.regions/core.pipeline_orchestrator.LEGACY_EXPERIMENT_ID only."""
+    from scripts.run_burned_pattern_audit import main as run_burned_pattern_audit
+
+    return run_burned_pattern_audit(
+        experiments=experiments, all_enabled=all_enabled, dry_run=dry_run, force=force,
+    )
+
+
+def run_domain_classifier_audit_stage(
+    experiments: Optional[list[str]], all_enabled: bool, dry_run: bool, force: bool,
+) -> dict:
+    """Dispatch the generic multi-experiment pairwise domain-classifier
+    (covariate-separability) diagnostic. Read-only against Step8A; all
+    unordered pairs among the resolved experiments are generated
+    automatically. No AOI name is hard-coded anywhere in this dispatch or
+    in the underlying module."""
+    from scripts.run_domain_classifier_audit import main as run_domain_classifier_audit
+
+    return run_domain_classifier_audit(
+        experiments=experiments, all_enabled=all_enabled, dry_run=dry_run, force=force,
+    )
 
 
 # =============================================================================

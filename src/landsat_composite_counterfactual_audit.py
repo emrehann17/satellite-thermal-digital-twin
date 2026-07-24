@@ -691,6 +691,7 @@ def plan_document_outputs() -> "OrderedDict[str, str]":
             ("raster_inventory", "raster_inventory.csv"),
             ("boundary_metrics", "boundary_metrics.csv"),
             ("paired_boundary_comparison", "paired_boundary_comparison.csv"),
+            ("canonical_reproduction", "canonical_reproduction.json"),
             ("counterfactual_summary_json", "counterfactual_summary.json"),
             ("counterfactual_summary_md", "counterfactual_summary.md"),
             ("manifest", "manifest.json"),
@@ -1482,7 +1483,7 @@ def audit_product_boundaries(
     *,
     tile_units: dict | None = None,
     provenance_status: str = "insufficient_boundary_metadata",
-    provenance_edge_mask: dict | None = None,
+    provenance_units: dict | None = None,
     control_seed: int = 20240717,
     block_size: int = 128,
     min_units: int = 8,
@@ -1493,12 +1494,19 @@ def audit_product_boundaries(
 
     Support edges (scene-count / unique-date / same-day-multiplicity) come from
     ``edge_masks``; matched controls exclude the union support edge and use the
-    SAME orientation and count-matched length. Export-tile boundaries (if
-    ``tile_units`` given) are the negative control, one bootstrap unit per real
-    seam. Verified source-scene/path-row boundaries are only evaluated when
-    ``provenance_status == 'provenance_available'`` and a rasterized
-    ``provenance_edge_mask`` is supplied; otherwise they are reported as
-    non-evidence, never fabricated.
+    SAME orientation and count-matched length.
+
+    ``export_tile_boundary`` is a NEGATIVE control derived from an APPROXIMATE
+    grid partition (see :func:`export_tile_boundary_edge_masks`); it is flagged
+    ``can_affect_final_status=False`` and can never create positive evidence.
+
+    Verified ``source_scene_path_row`` boundaries are only reported as evidence
+    when ``provenance_status == 'provenance_available'`` AND actual rasterized
+    boundary adjacency masks (``provenance_units``: ``{boundary_id: edge_mask}``)
+    are supplied and sampled. Each ``boundary_id`` is preserved as its own
+    bootstrap unit. If masks are not sampled the verdict is explicitly
+    ``insufficient_boundary_metadata`` -- never fabricated, and never reported as
+    ``provenance_available`` without sampling.
     """
     metric_rows: list[dict] = []
     verdicts: "OrderedDict" = OrderedDict()
@@ -1517,7 +1525,7 @@ def audit_product_boundaries(
                 **boundary_chain_metrics(sample, control, chain),
             })
 
-    # --- support-edge boundary types ---
+    # --- predeclared support-edge boundary types ---
     for boundary_type in ("scene_count_edge", "unique_date_count_edge", "same_day_multiplicity_edge"):
         sample = sample_paired_edges(sw_values, db_values, edge_masks[boundary_type])
         _emit(boundary_type, sample)
@@ -1526,7 +1534,7 @@ def audit_product_boundaries(
             min_units=min_units, n_boot=n_boot, ci=ci, seed=control_seed,
         )
 
-    # --- export-tile negative control ---
+    # --- export-tile NEGATIVE control (approximate partition; never evidence) ---
     if tile_units:
         unit_reductions: dict[str, list] = {}
         pooled = sample_paired_edges(
@@ -1537,37 +1545,92 @@ def audit_product_boundaries(
         for uid, mask in tile_units.items():
             seg = sample_paired_edges(sw_values, db_values, mask)
             unit_reductions[uid] = seg["reduction"]
-        verdicts["export_tile_boundary"] = classify_paired_units(
-            unit_reductions, unit_type="export_tile_segment",
+        tile_verdict = classify_paired_units(
+            unit_reductions, unit_type="export_tile_partition_segment",
             min_units=min_units, n_boot=n_boot, ci=ci, seed=control_seed,
         )
     else:
-        verdicts["export_tile_boundary"] = {
+        tile_verdict = {
             "status": "unavailable",
-            "unit_type": "export_tile_segment",
+            "unit_type": "export_tile_partition_segment",
             "reason": "product exported directly or paired grids differ",
         }
+    tile_verdict["is_negative_control"] = True
+    tile_verdict["control_kind"] = "approximate_grid_partition"
+    tile_verdict["can_affect_final_status"] = False
+    verdicts["export_tile_boundary"] = tile_verdict
 
     # --- verified source-scene / path-row boundary ---
-    if provenance_status == "provenance_available" and provenance_edge_mask:
-        sample = sample_paired_edges(sw_values, db_values, provenance_edge_mask)
-        _emit("source_scene_path_row", sample)
-        verdicts["source_scene_path_row"] = paired_reduction_by_blocks(
-            sample, unit_type="provenance_boundary", block_size=block_size,
+    sampled = (
+        provenance_status == "provenance_available"
+        and isinstance(provenance_units, dict)
+        and len(provenance_units) > 0
+    )
+    if sampled:
+        union_prov = {o: _union_tile_mask(provenance_units, o) for o in ORIENTATIONS}
+        pooled = sample_paired_edges(sw_values, db_values, union_prov)
+        _emit("source_scene_path_row", pooled)
+        unit_reductions = {}
+        for boundary_id, mask in provenance_units.items():
+            seg = sample_paired_edges(sw_values, db_values, mask)
+            unit_reductions[boundary_id] = seg["reduction"]
+        verdict = classify_paired_units(
+            unit_reductions, unit_type="provenance_boundary_id",
             min_units=min_units, n_boot=n_boot, ci=ci, seed=control_seed,
         )
+        # Evidence only when at least one boundary_id actually produced pairs.
+        verdict["is_verified_source_boundary_evidence"] = verdict["n_units"] > 0
+        verdicts["source_scene_path_row"] = verdict
     else:
         verdicts["source_scene_path_row"] = {
-            "status": provenance_status,
-            "unit_type": "provenance_boundary",
+            "status": "insufficient_boundary_metadata",
+            "unit_type": "provenance_boundary_id",
             "is_verified_source_boundary_evidence": False,
+            "provenance_status": provenance_status,
             "reason": (
                 "verified source-scene/path-row boundaries require "
-                "provenance_available and a rasterized provenance edge mask"
+                "provenance_available AND rasterized boundary adjacency masks "
+                "actually sampled; not reported as provenance_available without "
+                "sampling"
             ),
         }
 
     return {"product": product, "metric_rows": metric_rows, "verdicts": verdicts}
+
+
+def rasterize_provenance_boundaries(geojson: dict, transform, width: int, height: int) -> dict:
+    """Rasterize verified ``scene_boundaries.geojson`` onto the EXACT raster grid.
+
+    Each verified boundary feature (a shared source-footprint edge LineString in
+    EPSG:4326) is burned onto the (``transform``, ``height`` x ``width``) grid
+    and converted to adjacency-edge masks, preserving its ``boundary_id`` as the
+    unit key: ``{boundary_id: {"horizontal": mask, "vertical": mask}}``. Only
+    ``verification_status == 'verified'`` features are used. No resampling is
+    performed; geometry is burned directly onto the product grid.
+    """
+    import numpy as np
+    from rasterio.features import rasterize
+
+    units: dict[str, dict] = {}
+    for feature in geojson.get("features", []):
+        props = feature.get("properties", {})
+        if props.get("verification_status") not in (None, "verified"):
+            continue
+        boundary_id = props.get("boundary_id") or props.get("source_boundary_id")
+        geometry = feature.get("geometry")
+        if not boundary_id or geometry is None:
+            continue
+        burned = rasterize(
+            [(geometry, 1)], out_shape=(height, width), transform=transform,
+            fill=0, all_touched=True, dtype="uint8",
+        ).astype(bool)
+        if not burned.any():
+            continue
+        # An adjacency edge is 'on the boundary' if either incident pixel burned.
+        h = burned[:, :-1] | burned[:, 1:]
+        v = burned[:-1, :] | burned[1:, :]
+        units[str(boundary_id)] = {"horizontal": h, "vertical": v}
+    return units
 
 
 def _union_tile_mask(tile_units: dict, orientation: str):
@@ -1658,46 +1721,71 @@ def read_masked_array(path, band: int = 1):
 
 
 def validate_nodata_mask(path, *, expected_nodata=NODATA_SENTINEL, band: int = 1) -> dict:
-    """Post-export check that a raster carries a verifiable nodata mask and that
-    masked pixels equal the sentinel (not silently zero).
+    """Post-export check that a raster carries a verifiable nodata mask.
+
+    Requirements for ``status == 'ok'`` (all must hold):
+      * the GeoTIFF ``nodata`` tag is present AND equals ``expected_nodata``;
+      * the RAW (unmasked) band is inspected separately -- every pixel whose raw
+        value equals the sentinel is actually masked (so the sentinel is never
+        read back as physical data);
+      * no masked pixel reads as physical numeric zero.
+
+    Otherwise the status is ``missing_nodata_tag`` / ``wrong_nodata_tag`` /
+    ``sentinel_not_masked`` / ``masked_read_as_zero``.
     """
     import numpy as np
     import rasterio
 
     with rasterio.open(path) as src:
         nodata = src.nodata
-        arr = src.read(band, masked=True)
-        mask = np.ma.getmaskarray(arr)
-        raw = np.asarray(arr.filled(expected_nodata))
+        raw = np.asarray(src.read(band), dtype="float64")      # RAW, unmasked
+        mask = src.read_masks(band) == 0                       # True where masked
     masked_count = int(mask.sum())
-    # Masked cells must not read as physical 0 through the nodata tag.
-    masked_as_zero = bool(masked_count and np.any(raw[mask] == 0.0) and expected_nodata != 0.0)
-    has_tag = nodata is not None
-    status = "ok"
-    if not has_tag:
+    sentinel_pixels = raw == float(expected_nodata)
+    sentinel_count = int(sentinel_pixels.sum())
+    # Every raw-sentinel pixel must be masked (tag actually took effect).
+    sentinel_not_masked = bool(np.any(sentinel_pixels & ~mask))
+    # No masked pixel may read as physical 0 in the raw band.
+    masked_as_zero = bool(masked_count and np.any((raw == 0.0) & mask) and expected_nodata != 0.0)
+
+    if nodata is None:
         status = "missing_nodata_tag"
+    elif float(nodata) != float(expected_nodata):
+        status = "wrong_nodata_tag"
+    elif sentinel_not_masked:
+        status = "sentinel_not_masked"
     elif masked_as_zero:
         status = "masked_read_as_zero"
+    else:
+        status = "ok"
     return {
         "path": str(path),
         "nodata_tag": None if nodata is None else float(nodata),
         "expected_nodata": float(expected_nodata),
         "masked_pixel_count": masked_count,
+        "sentinel_pixel_count": sentinel_count,
+        "sentinel_not_masked": sentinel_not_masked,
         "masked_read_as_zero": masked_as_zero,
         "status": status,
     }
 
 
 # =============================================================================
-# EXPORT-TILE NEGATIVE CONTROL (from the ACTUAL recorded export grid)
+# EXPORT-TILE NEGATIVE CONTROL (APPROXIMATE grid partition)
 # =============================================================================
 def export_tile_boundary_edge_masks(width: int, height: int, tile_grid) -> dict:
-    """Adjacency-edge masks along the recorded export tile-grid seams.
+    """APPROXIMATE tile-partition adjacency-edge masks (negative control only).
 
     ``tile_grid`` is ``[rows, cols]`` as recorded by
-    ``export_image_direct_or_tiled``. Returns a per-boundary-segment dict
-    ``{unit_id: {"horizontal": mask, "vertical": mask}}`` so each real tile seam
-    is one bootstrap unit. Returns ``{}`` when there is no interior seam.
+    ``export_image_direct_or_tiled``. The exact per-tile pixel offsets are NOT
+    recoverable from the merged raster, so seam positions are APPROXIMATED as an
+    even ``round(width * col / cols)`` / ``round(height * row / rows)`` partition
+    -- this is an approximate partition control, NOT the exact retained tile
+    transforms. It is used strictly as a negative control and is flagged so it
+    can never affect ``final_status`` (see
+    :func:`audit_product_boundaries`). Returns ``{unit_id: {"horizontal": mask,
+    "vertical": mask}}`` (one unit per approximate seam) or ``{}`` when there is
+    no interior seam.
     """
     import numpy as np
 
@@ -1855,9 +1943,12 @@ def compare_raster_to_canonical(
 ) -> dict:
     """Compare a diagnostic raster to a frozen canonical raster.
 
-    Requires EXACT grid equality (CRS, width, height, transform). Reports
-    valid-mask agreement, compared pixel count, max/mean absolute difference,
-    the tolerance, and a reproduction status of ``pass`` / ``fail`` /
+    ``pass`` requires ALL of: exact grid equality (CRS, width, height,
+    transform, AND bounds -- compared explicitly), EXACT valid-mask equality
+    (every pixel valid in one is valid in the other), and max absolute
+    difference over the common valid pixels <= ``tolerance``. Reports valid-mask
+    agreement, compared pixel count, max/mean absolute difference, tolerance,
+    and a reproduction status of ``pass`` / ``fail`` / ``mask_mismatch`` /
     ``grid_mismatch`` / ``not_available``.
     """
     import numpy as np
@@ -1868,11 +1959,22 @@ def compare_raster_to_canonical(
         return {"reproduction_status": "not_available", "diagnostic_path": str(diagnostic_path)}
     diag_sig = grid_signature(diagnostic_path)
     canon_sig = grid_signature(canonical_path)
-    if (diag_sig["crs"], diag_sig["width"], diag_sig["height"]) != (
-        canon_sig["crs"], canon_sig["width"], canon_sig["height"]
-    ) or any(abs(a - b) > 1e-9 for a, b in zip(diag_sig["transform"], canon_sig["transform"])):
+    mismatch_fields = []
+    if diag_sig["crs"] != canon_sig["crs"]:
+        mismatch_fields.append("crs")
+    if diag_sig["width"] != canon_sig["width"]:
+        mismatch_fields.append("width")
+    if diag_sig["height"] != canon_sig["height"]:
+        mismatch_fields.append("height")
+    if any(abs(a - b) > 1e-9 for a, b in zip(diag_sig["transform"], canon_sig["transform"])):
+        mismatch_fields.append("transform")
+    # Bounds are compared EXPLICITLY (not only via transform+dims).
+    if any(abs(a - b) > 1e-9 for a, b in zip(diag_sig["bounds"], canon_sig["bounds"])):
+        mismatch_fields.append("bounds")
+    if mismatch_fields:
         return {
             "reproduction_status": "grid_mismatch",
+            "mismatch_fields": mismatch_fields,
             "diagnostic_grid": diag_sig,
             "canonical_grid": canon_sig,
             "tolerance": tolerance,
@@ -1882,23 +1984,25 @@ def compare_raster_to_canonical(
     diag_valid = np.isfinite(diag)
     canon_valid = np.isfinite(canon)
     mask_agreement = float(np.mean(diag_valid == canon_valid))
+    valid_mask_exact = bool(np.array_equal(diag_valid, canon_valid))
     both = diag_valid & canon_valid
     compared = int(both.sum())
-    if compared == 0:
-        return {
-            "reproduction_status": "fail",
-            "reason": "no_common_valid_pixels",
-            "valid_mask_agreement": mask_agreement,
-            "compared_pixel_count": 0,
-            "tolerance": tolerance,
-        }
-    abs_diff = np.abs(diag[both] - canon[both])
+    abs_diff = np.abs(diag[both] - canon[both]) if compared else np.array([0.0])
     max_abs = float(abs_diff.max())
     mean_abs = float(abs_diff.mean())
-    status = "pass" if max_abs <= tolerance else "fail"
+    # Exact valid-mask equality is REQUIRED for pass.
+    if not valid_mask_exact:
+        status = "mask_mismatch"
+    elif compared == 0:
+        status = "fail"
+    elif max_abs <= tolerance:
+        status = "pass"
+    else:
+        status = "fail"
     return {
         "reproduction_status": status,
         "valid_mask_agreement": mask_agreement,
+        "valid_mask_exact": valid_mask_exact,
         "compared_pixel_count": compared,
         "max_abs_diff": max_abs,
         "mean_abs_diff": mean_abs,
@@ -1958,7 +2062,8 @@ def run_canonical_reproduction_gate(ctx: dict, root: Path, raster_plan: dict) ->
     )
 
     statuses = [c.get("reproduction_status") for c in checks.values()]
-    if "fail" in statuses or "grid_mismatch" in statuses:
+    failing = {"fail", "grid_mismatch", "mask_mismatch"}
+    if any(s in failing for s in statuses):
         gate = "canonical_reproduction_failed"
     elif "not_available" in statuses:
         gate = "canonical_reproduction_failed" if required else "not_available"
