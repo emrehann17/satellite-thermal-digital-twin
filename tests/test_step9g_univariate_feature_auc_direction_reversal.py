@@ -248,8 +248,15 @@ def test_protected_hash_change_detected(tmp_path, monkeypatch):
     before = g.protected_paths()
     after = g.protected_paths()
     g.assert_protected_unchanged(before, after)
-    # mutate a step8a input
-    target = g.resolve_step8a_dataset_path("manavgat_2021")
+    # Mutate a step8a input -- the FIXTURE copy under tmp_path, never the real
+    # repository artefact. `g.resolve_step8a_dataset` threads this module's
+    # (monkeypatched) PROJECT_ROOT explicitly into the resolver; the older
+    # `resolve_step8a_dataset_path(experiment_id)` form ignored the patch and
+    # silently rewrote outputs/experiments/manavgat_2021/step8a/*.parquet.
+    target = g.resolve_step8a_dataset("manavgat_2021")
+    assert tmp_path in target.parents, (
+        f"test fixture escaped tmp_path and would mutate a real artefact: {target}"
+    )
     df = pd.read_parquet(target)
     df.loc[0, "elevation_mean"] = df.loc[0, "elevation_mean"] + 100
     df.to_parquet(target, index=False)
@@ -342,3 +349,89 @@ def _build_fixture(tmp_path: Path, n_blocks: int = 12) -> None:
     for s, t in ((g.SOURCE_ID, g.TARGET_ID), (g.TARGET_ID, g.SOURCE_ID)):
         for stage in ("step9e", "step9f", "step10"):
             (tmp_path / "outputs" / "cross_region" / f"{s}__{t}" / stage).mkdir(parents=True, exist_ok=True)
+
+# =============================================================================
+# 24. Real-artefact isolation guards
+# =============================================================================
+# These exist because `test_protected_hash_change_detected` once mutated the
+# REAL outputs/experiments/manavgat_2021/step8a parquet on every run: it
+# monkeypatched `g.PROJECT_ROOT`, but the resolver it called lived in
+# src.step9a_audit_cross_region_inputs and honoured that module's own global.
+# The drift was +100 per run and went unnoticed for ~11 runs.
+
+REAL_MANAVGAT_STEP8A = (
+    Path(__file__).resolve().parents[1]
+    / "outputs" / "experiments" / "manavgat_2021" / "step8a"
+    / "step8a_500m_modeling_dataset.parquet"
+)
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def test_monkeypatched_project_root_actually_redirects_step8a_resolution(tmp_path, monkeypatch):
+    """Patching g.PROJECT_ROOT must redirect Step8A resolution for EVERY experiment."""
+    _build_fixture(tmp_path)
+    monkeypatch.setattr(g, "PROJECT_ROOT", tmp_path)
+    for experiment in (g.SOURCE_ID, g.TARGET_ID):
+        resolved = g.resolve_step8a_dataset(experiment)
+        assert tmp_path in resolved.parents, f"{experiment} escaped tmp_path: {resolved}"
+        assert "satellite-thermal-digital-twin/outputs/experiments" not in str(resolved)
+
+
+def test_resolver_honours_explicit_experiments_root(tmp_path):
+    """The injected root must win without any global patching at all."""
+    from src.step9a_audit_cross_region_inputs import resolve_step8a_dataset_path
+
+    resolved = resolve_step8a_dataset_path(
+        "manavgat_2021", experiments_root=tmp_path / "outputs" / "experiments"
+    )
+    assert tmp_path in resolved.parents
+    assert resolved.name == "step8a_500m_modeling_dataset.parquet"
+
+
+@pytest.mark.skipif(
+    not REAL_MANAVGAT_STEP8A.is_file(), reason="real Manavgat Step8A not present"
+)
+def test_hash_mutation_test_leaves_the_real_artefact_untouched(tmp_path, monkeypatch):
+    """Run the previously-offending test body and assert the real file is stable."""
+    before = _sha256(REAL_MANAVGAT_STEP8A)
+
+    _build_fixture(tmp_path)
+    monkeypatch.setattr(g, "PROJECT_ROOT", tmp_path)
+    baseline = g.protected_paths()
+    target = g.resolve_step8a_dataset("manavgat_2021")
+    assert tmp_path in target.parents
+    df = pd.read_parquet(target)
+    df.loc[0, "elevation_mean"] = df.loc[0, "elevation_mean"] + 100
+    df.to_parquet(target, index=False)
+    with pytest.raises(g.Step9GError):
+        g.assert_protected_unchanged(baseline, g.protected_paths())
+
+    after = _sha256(REAL_MANAVGAT_STEP8A)
+    assert after == before, (
+        "the Step9G hash-mutation test rewrote the REAL frozen Manavgat Step8A "
+        f"artefact ({before[:16]}... -> {after[:16]}...)"
+    )
+
+
+@pytest.mark.skipif(
+    not REAL_MANAVGAT_STEP8A.is_file(), reason="real Manavgat Step8A not present"
+)
+def test_module_under_fixture_never_reads_the_real_outputs_tree(tmp_path, monkeypatch):
+    """With PROJECT_ROOT patched, no resolved path may point into the real tree."""
+    _build_fixture(tmp_path)
+    monkeypatch.setattr(g, "PROJECT_ROOT", tmp_path)
+    real_root = Path(__file__).resolve().parents[1] / "outputs"
+    for experiment in (g.SOURCE_ID, g.TARGET_ID):
+        assert real_root not in g.resolve_step8a_dataset(experiment).parents
+    for s, t in ((g.SOURCE_ID, g.TARGET_ID), (g.TARGET_ID, g.SOURCE_ID)):
+        for resolved in (g.step9e_dir(s, t), g.step9f_dir(s, t), g.step10_dir(s, t)):
+            assert real_root not in resolved.parents

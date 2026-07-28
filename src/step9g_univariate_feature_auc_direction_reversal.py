@@ -215,7 +215,7 @@ def protected_paths(
     protected: dict[str, Any] = {"step8a_inputs": {}, "step9e_trees": {}, "step9f_trees": {}, "step10_trees": {}}
     experiment_ids = (source_id, target_id)
     for experiment in experiment_ids:
-        path = resolve_step8a_dataset_path(experiment)
+        path = resolve_step8a_dataset(experiment)
         if not path.is_file():
             raise Step9GError(f"Frozen Step8A input not found for '{experiment}': {path}")
         protected["step8a_inputs"][experiment] = sha256_file(path)
@@ -243,8 +243,24 @@ def assert_protected_unchanged(before: dict[str, Any], after: dict[str, Any]) ->
 # =============================================================================
 # Data loading + population + block assignment
 # =============================================================================
+def experiments_root() -> Path:
+    """`outputs/experiments` root, derived from THIS module's PROJECT_ROOT.
+
+    Every Step8A resolution in this module goes through here and passes the
+    result explicitly to the resolver, so monkeypatching `PROJECT_ROOT` on this
+    module actually redirects the lookup. Without it, the resolver would fall
+    back to `src.step9a_audit_cross_region_inputs`'s own global and reach the
+    real repository artefacts.
+    """
+    return PROJECT_ROOT / "outputs" / "experiments"
+
+
+def resolve_step8a_dataset(experiment_id: str) -> Path:
+    return resolve_step8a_dataset_path(experiment_id, experiments_root=experiments_root())
+
+
 def load_step8a(experiment_id: str) -> pd.DataFrame:
-    path = resolve_step8a_dataset_path(experiment_id)
+    path = resolve_step8a_dataset(experiment_id)
     if not path.is_file():
         raise Step9GError(f"Frozen Step8A dataset not found for '{experiment_id}': {path}")
     return pd.read_parquet(path)
@@ -777,7 +793,7 @@ def dry_run(
         "numeric_features_in_order": list(NUMERIC_FEATURES),
         "block_size_cells": BLOCK_SIZE_CELLS,
         "bootstrap": {"replicates": BOOTSTRAP_REPLICATES, "seed": BOOTSTRAP_SEED},
-        "resolved_step8a_inputs": {e: str(resolve_step8a_dataset_path(e)) for e in experiment_ids},
+        "resolved_step8a_inputs": {e: str(resolve_step8a_dataset(e)) for e in experiment_ids},
         "feature_contract": feature_contract,
         "frozen_step9e_refs": {f"{s}__{t}": str(step9e_dir(s, t)) for s, t in ((source_id, target_id), (target_id, source_id))},
         "frozen_step9f_refs": {f"{s}__{t}": str(step9f_dir(s, t)) for s, t in ((source_id, target_id), (target_id, source_id))},

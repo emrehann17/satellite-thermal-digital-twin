@@ -137,8 +137,21 @@ def cross_region_output_root(source_id: str, target_id: str) -> Path:
     return BASE_DIR / "outputs" / "cross_region" / f"{source_id}__{target_id}"
 
 
-def resolve_step8a_dataset_path(experiment_id: str) -> Path:
-    manifest_path = resolve_step8a_stats_path(experiment_id)
+def resolve_step8a_dataset_path(
+    experiment_id: str, *, experiments_root: Path | None = None
+) -> Path:
+    """Resolve the frozen Step8A dataset for an experiment.
+
+    `experiments_root` is an explicit dependency-injection point: when supplied
+    it replaces the module-global `outputs/experiments` root. Callers that need
+    to be redirectable (tests above all) should pass it rather than relying on
+    monkeypatching a global constant in some *other* module -- patching the
+    caller's `PROJECT_ROOT` does NOT affect this resolver, which is exactly the
+    failure mode that silently corrupted a frozen artefact.
+    """
+    manifest_path = resolve_step8a_stats_path(
+        experiment_id, experiments_root=experiments_root
+    )
     manifest = _load_json(manifest_path)
     if manifest is not None:
         if manifest.get("experiment_id") not in (None, experiment_id):
@@ -155,8 +168,16 @@ def resolve_step8a_dataset_path(experiment_id: str) -> Path:
     return manifest_path.parent / "step8a_500m_modeling_dataset.parquet"
 
 
-def resolve_step8a_stats_path(experiment_id: str) -> Path:
-    return get_experiment_output_root(experiment_id) / "step8a" / "step8a_dataset_stats.json"
+def resolve_step8a_stats_path(
+    experiment_id: str, *, experiments_root: Path | None = None
+) -> Path:
+    """See `resolve_step8a_dataset_path` for the `experiments_root` contract."""
+    if experiments_root is not None:
+        namespace = get_experiment(experiment_id)["output_namespace"]
+        base = Path(experiments_root) / namespace
+    else:
+        base = get_experiment_output_root(experiment_id)
+    return base / "step8a" / "step8a_dataset_stats.json"
 
 
 def resolve_gate_path(experiment_id: str) -> Path:
