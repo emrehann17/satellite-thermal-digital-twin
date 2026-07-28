@@ -66,6 +66,45 @@ MUGLA_AOI_BBOX = (27.10, 36.60, 28.90, 37.45)
 # dogrulanmalidir, tipki digerleri gibi.
 NORTH_EVIA_AOI_BBOX = (23.12, 38.68, 23.52, 39.08)
 
+# Kuzey Evia GENISLETILMIS (extended) AOI -- ayri bir deney icin
+# (bkz. EXPERIMENTS["evia_2021_extended"]). Mevcut NORTH_EVIA_AOI_BBOX'i
+# DEGISTIRMEZ; evia_2021 aynen kalir. Bu bbox, evia_2021 AOI'sini GEOMETRIK
+# OLARAK TAMAMEN ICERIR (her dort kenarda disariya dogru genisletilmistir).
+#
+# Amac: 2021 Kuzey Evia yangin koridorunun daha genis COGRAFI BAGLAMINI ve
+# cevredeki YANMAMIS dogal vejetasyonu kapsamak. Geometri YALNIZCA yer
+# (place) bilgisiyle -- Limni-Rovies-Agia Anna-Pefki koridoru ve Evia
+# adasinin kuzey ucu -- tanimlanmistir; MCD64A1/Copernicus burned-area
+# etiketlerine, burned prevalence'a, gate sonucuna, AUC/PR-AUC'ye veya
+# herhangi bir model metrigine BAKILARAK optimize EDILMEMISTIR ve birden
+# fazla aday geometri denenip en iyisi SECILMEMISTIR (tek, deterministik
+# tanim).
+#
+# Koridorun tasarim capalari (yaklasik yerlesim koordinatlari; yalnizca
+# dokumantasyon amacli, hesaplamada KULLANILMAZ):
+#   Rovies     ~ (lon 23.22, lat 38.78)
+#   Limni      ~ (lon 23.33, lat 38.77)
+#   Agia Anna  ~ (lon 23.42, lat 38.87)
+#   Pefki      ~ (lon 23.67, lat 39.02)   <-- mevcut evia_2021 bbox'inin
+#                                             DISINDA (lon_max = 23.52).
+# Kenar gerekceleri (mevcut -> genisletilmis):
+#   lon_min 23.12 -> 23.05 : Rovies kiyi yamacini marjla icine alir; Kuzey
+#                            Evia Korfezi'nin karsi kiyisindaki Fthiotida
+#                            ANAKARASINA (Arkitsa ~23.03) tasmamak icin
+#                            kasitli olarak dar tutuldu.
+#   lat_min 38.68 -> 38.55 : Prokopi/Kirinthos ic kesimine ve Dirfys'e bakan
+#                            cam/makilik yamaclara dogru ~14 km guneye
+#                            genisler -- YANMAMIS dogal vejetasyon baglami.
+#   lon_max 23.52 -> 23.85 : Pefki'yi (23.67) ve kuzeydogudaki Ege'ye bakan
+#                            kiyi seridini icine alir; koridorun eski bbox
+#                            tarafindan KESILEN kuzeydogu ucu.
+#   lat_max 39.08 -> 39.15 : Adanin kuzey ucunun (Artemisio Burnu ~39.03)
+#                            kuzeyinde marj birakir.
+# KESIN yangin perimetri DEGILDIR. Step6B burned-landcover gate ile
+# dogrulanmalidir -- tipki manavgat_2021 / bejis_2022 / mugla_2021 /
+# evia_2021 gibi.
+NORTH_EVIA_EXTENDED_AOI_BBOX = (23.05, 38.55, 23.85, 39.15)
+
 
 # =============================================================================
 # 1) Region geometrileri (mevcut + yeni placeholder'lar)
@@ -192,6 +231,16 @@ def build_regions() -> dict:
     north_evia_candidate_bbox = ee.Geometry.BBox(*NORTH_EVIA_AOI_BBOX)
     north_evia = north_evia_candidate_bbox
 
+    # --- North Evia GENISLETILMIS AOI (evia_2021_extended) ---
+    # AYRI bir region anahtari; yukaridaki `north_evia` (evia_2021) geometrisi
+    # DEGISTIRILMEZ. Module-seviyesi NORTH_EVIA_EXTENDED_AOI_BBOX sabitinden
+    # (TEK KAYNAK) uretilir ve o sabitin uzerinde belgelenen coğrafi
+    # gerekceyle (Limni-Rovies-Agia Anna-Pefki koridoru + cevredeki yanmamis
+    # dogal vejetasyon) tanimlanmistir. `north_evia` bbox'ini her dort
+    # kenarda ICERIR.
+    north_evia_extended_candidate_bbox = ee.Geometry.BBox(*NORTH_EVIA_EXTENDED_AOI_BBOX)
+    north_evia_extended = north_evia_extended_candidate_bbox
+
     return {
         "dogu_akdeniz": dogu_akdeniz,
         "kozan_aoi": kozan_aoi,
@@ -204,6 +253,8 @@ def build_regions() -> dict:
         "mugla_aoi_candidate_bbox": mugla_aoi_candidate_bbox,
         "north_evia": north_evia,
         "north_evia_candidate_bbox": north_evia_candidate_bbox,
+        "north_evia_extended": north_evia_extended,
+        "north_evia_extended_candidate_bbox": north_evia_extended_candidate_bbox,
     }
 
 
@@ -365,6 +416,48 @@ EXPERIMENTS = {
             "(exclude_pre_label_burns=True) over [predictor_start, "
             "label_start) = 2021-06-05..2021-08-02, using the same generic "
             "Gate -> Step8A contract already established for mugla_2021."
+        ),
+    },
+
+    # evia_2021 ile AYNI olay/pencere, YALNIZCA daha genis bir cografi AOI.
+    # evia_2021 kaydi ve ciktilari DEGISTIRILMEZ/TASINMAZ/OVERWRITE EDILMEZ;
+    # bu AYRI bir deneydir ve kendi namespace'ine
+    # (outputs/experiments/evia_2021_extended/) yazar. Predictor tarihleri,
+    # label tarihleri, baseline yillari, role, country ve pre-label leakage
+    # sozlesmesi evia_2021'den BIREBIR kopyalanmistir -- yalnizca AOI
+    # (region_key), display_name, output_namespace ve aciklayici notes
+    # farklidir.
+    "evia_2021_extended": {
+        "enabled": True,
+        "region_key": "north_evia_extended",
+        "display_name": "North Evia (Euboea), Greece -- extended AOI",
+        "role": "mediterranean_transfer_wildfire",
+        "country": "Greece",
+        "predictor_start_date": "2021-06-05",
+        "predictor_end_date": "2021-08-02",
+        "label_start_date": "2021-08-03",
+        "label_end_date": "2021-09-30",
+        "baseline_years": [2017, 2018, 2019, 2020],
+        "output_namespace": "evia_2021_extended",
+        # Ayni jenerik, deklaratif leakage sozlesmesi (evia_2021 ile birebir;
+        # yeni bir kod dali EKLENMEZ).
+        "exclude_pre_label_burns": True,
+        "pre_label_burn_window": ["2021-06-05", "2021-08-02"],
+        "notes": (
+            "Geographically EXTENDED counterpart of evia_2021: same event, "
+            "same predictor/label windows and same baseline years, but a "
+            "wider AOI (NORTH_EVIA_EXTENDED_AOI_BBOX) that geometrically "
+            "CONTAINS the evia_2021 AOI and adds the surrounding unburned "
+            "natural vegetation plus the Limni-Rovies-Agia Anna-Pefki north "
+            "Evia corridor. AOI defined from geographic place coverage ONLY "
+            "-- never tuned on burned labels, burned prevalence, gate "
+            "outcome, AUC/PR-AUC or any model metric, and not selected from "
+            "several trial geometries. evia_2021 remains registered and "
+            "unchanged; this experiment writes exclusively to "
+            "outputs/experiments/evia_2021_extended/. Must pass the same "
+            "MCD64A1 burned-landcover gate before modeling; registration "
+            "does NOT authorize downstream predictor/Step7/Step8/Step9/"
+            "Step10 execution."
         ),
     },
 }
