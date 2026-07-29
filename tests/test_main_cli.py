@@ -24,7 +24,7 @@ from scripts.main import (
     build_parser, cmd_experiment, cmd_legacy, cmd_self_cal_transfer, cmd_shift_audit,
     cmd_step8_robustness, cmd_transfer, cmd_transfer_explore,
     cmd_step10, cmd_large_block_robustness, cmd_concept_shift,
-    cmd_step8_big_block_robustness,
+    cmd_step8_big_block_robustness, cmd_marginal_aoa,
 )
 
 
@@ -388,6 +388,53 @@ class TestParserStructure(unittest.TestCase):
             dry_run=False, force=True,
         )
         numeric.assert_not_called()
+
+    # --- marginal-aoa ---
+    def test_marginal_aoa_subcommand_parses_arbitrary_experiment_ids(self):
+        """No AOI is hard-coded in the CLI: any future experiment_id parses."""
+        args = self.parser.parse_args([
+            "marginal-aoa",
+            "--experiments", "some_future_experiment", "another_future_experiment",
+            "--dry-run",
+        ])
+        self.assertEqual(args.command, "marginal-aoa")
+        self.assertEqual(
+            args.experiments, ["some_future_experiment", "another_future_experiment"]
+        )
+        self.assertFalse(args.all_enabled)
+        self.assertTrue(args.dry_run)
+        self.assertFalse(args.force)
+        self.assertIs(args.func, cmd_marginal_aoa)
+
+    def test_marginal_aoa_all_enabled_selector_parses(self):
+        args = self.parser.parse_args(["marginal-aoa", "--all-enabled", "--force"])
+        self.assertTrue(args.all_enabled)
+        self.assertIsNone(args.experiments)
+        self.assertTrue(args.force)
+
+    def test_marginal_aoa_selectors_are_mutually_exclusive(self):
+        with self.assertRaises(SystemExit):
+            self.parser.parse_args([
+                "marginal-aoa", "--experiments", "a_experiment", "--all-enabled",
+            ])
+
+    def test_marginal_aoa_requires_a_selector(self):
+        with self.assertRaises(SystemExit):
+            self.parser.parse_args(["marginal-aoa", "--dry-run"])
+
+    def test_marginal_aoa_cli_dispatches_through_orchestrator(self):
+        args = self.parser.parse_args([
+            "marginal-aoa", "--experiments", "a_experiment", "b_experiment", "--dry-run",
+        ])
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_marginal_aoa_stage",
+            return_value={"ran": False, "dry_run": True, "directed_pair_count": 2},
+        ) as mocked:
+            self.assertEqual(cmd_marginal_aoa(args), 0)
+        mocked.assert_called_once_with(
+            experiments=["a_experiment", "b_experiment"],
+            all_enabled=False, dry_run=True, force=False,
+        )
 
     def test_legacy_subcommand_defaults_to_kozan(self):
         args = self.parser.parse_args(["legacy", "--dry-run"])

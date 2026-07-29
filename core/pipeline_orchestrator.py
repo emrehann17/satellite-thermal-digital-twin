@@ -756,6 +756,31 @@ def run_burned_pattern_audit_stage(
     )
 
 
+def run_marginal_aoa_stage(
+    experiments: Optional[list[str]], all_enabled: bool, dry_run: bool, force: bool,
+    output_root: Optional[str] = None, experiments_root: Optional[str] = None,
+) -> dict:
+    """Dispatch the generic, DIRECTED, LABEL-BLIND marginal
+    Area-of-Applicability analysis: for every ordered source->target pair,
+    whether target predictor values fall inside the marginal predictor
+    support observed in the source AOI.
+
+    Reads only frozen Step8A predictor columns through an explicit
+    allow-list -- never `burned` or any other label. Fits no model, produces
+    no prediction, runs no adaptation, CV or bootstrap. `source__target` and
+    `target__source` are distinct analyses with distinct namespaces. No AOI
+    name is hard-coded here or in the underlying module.
+
+    `output_root`/`experiments_root` are programmatic injection points for
+    tests and alternative namespaces; None means the canonical roots."""
+    from scripts.run_marginal_area_of_applicability import main as run_marginal_aoa
+
+    return run_marginal_aoa(
+        experiments=experiments, all_enabled=all_enabled, dry_run=dry_run, force=force,
+        output_root=output_root, experiments_root=experiments_root,
+    )
+
+
 def run_domain_classifier_audit_stage(
     experiments: Optional[list[str]], all_enabled: bool, dry_run: bool, force: bool,
 ) -> dict:

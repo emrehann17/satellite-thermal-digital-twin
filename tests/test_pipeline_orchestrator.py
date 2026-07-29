@@ -215,3 +215,78 @@ class TestStep8BigBlockRobustnessDispatch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMarginalAoADispatch(unittest.TestCase):
+    """The marginal AoA stage is a thin dispatch: it must forward every
+    parameter -- including the output_root/experiments_root injection points
+    -- to the runner unchanged, and add no scientific logic of its own."""
+
+    def test_orchestrator_forwards_exact_kwargs(self):
+        with patch(
+            "scripts.run_marginal_area_of_applicability.main",
+            return_value={"ran": False, "dry_run": True},
+        ) as mocked:
+            result = orch.run_marginal_aoa_stage(
+                experiments=["a_experiment", "b_experiment"],
+                all_enabled=False, dry_run=True, force=False,
+            )
+        self.assertFalse(result["ran"])
+        mocked.assert_called_once_with(
+            experiments=["a_experiment", "b_experiment"],
+            all_enabled=False, dry_run=True, force=False,
+            output_root=None, experiments_root=None,
+        )
+
+    def test_orchestrator_carries_injection_roots(self):
+        with patch(
+            "scripts.run_marginal_area_of_applicability.main",
+            return_value={"ran": True},
+        ) as mocked:
+            orch.run_marginal_aoa_stage(
+                experiments=None, all_enabled=True, dry_run=False, force=True,
+                output_root="/tmp/injected_out", experiments_root="/tmp/injected_exp",
+            )
+        mocked.assert_called_once_with(
+            experiments=None, all_enabled=True, dry_run=False, force=True,
+            output_root="/tmp/injected_out", experiments_root="/tmp/injected_exp",
+        )
+
+    def test_orchestrator_accepts_arbitrary_experiment_ids(self):
+        with patch(
+            "scripts.run_marginal_area_of_applicability.main",
+            return_value={"ran": False},
+        ) as mocked:
+            orch.run_marginal_aoa_stage(
+                experiments=["some_future_experiment"], all_enabled=False,
+                dry_run=True, force=False,
+            )
+        self.assertEqual(
+            mocked.call_args.kwargs["experiments"], ["some_future_experiment"]
+        )
+
+
+class TestMarginalAoARunnerPassthrough(unittest.TestCase):
+    def test_runner_forwards_injection_roots_to_run_analysis(self):
+        from scripts import run_marginal_area_of_applicability as runner
+
+        with patch.object(runner, "run_analysis", return_value={"ran": False}) as mocked:
+            runner.main(
+                experiments=["a_experiment", "b_experiment"], all_enabled=False,
+                dry_run=True, force=False,
+                output_root="/tmp/out_root", experiments_root="/tmp/exp_root",
+            )
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["experiments"], ["a_experiment", "b_experiment"])
+        self.assertTrue(kwargs["dry_run"])
+        self.assertEqual(str(kwargs["output_root"]), "/tmp/out_root")
+        self.assertEqual(str(kwargs["experiments_root"]), "/tmp/exp_root")
+
+    def test_runner_defaults_both_roots_to_none(self):
+        from scripts import run_marginal_area_of_applicability as runner
+
+        with patch.object(runner, "run_analysis", return_value={"ran": False}) as mocked:
+            runner.main(experiments=["a_experiment", "b_experiment"], dry_run=True)
+        kwargs = mocked.call_args.kwargs
+        self.assertIsNone(kwargs["output_root"])
+        self.assertIsNone(kwargs["experiments_root"])
