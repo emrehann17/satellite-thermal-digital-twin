@@ -1,0 +1,147 @@
+{
+  "schema_version": "1.0-legacy-frozen-modis",
+  "mode": "legacy_frozen_modis_compatibility",
+  "experiment": "landsat_composite_downstream_ab",
+  "experiment_id": "manavgat_2021",
+  "scope": "Diagnostic downstream A/B experiment only. This declaration authorizes NOTHING outside src/landsat_composite_downstream_ab.py, and the default Step7B guard is unchanged for every other caller.",
+  "frozen_namespace": "/home/emrehan-metin/satellite-thermal-digital-twin/outputs/experiments/manavgat_2021/data/modis",
+  "zero_fill_guard_threshold": 0.05,
+  "rasters": {
+    "modis_lst_mean_celsius": {
+      "path": "/home/emrehan-metin/satellite-thermal-digital-twin/outputs/experiments/manavgat_2021/data/modis/modis_lst_mean_celsius.tif",
+      "sha256": "4c70dd5943f37c499c4a9ade4a131cdcfb08fa31b9b1dab1ee1bd183bfa76a2b",
+      "bytes": 36700,
+      "crs": "EPSG:4326",
+      "transform": [
+        0.008983152841195215,
+        0.0,
+        31.045776219170666,
+        0.0,
+        -0.008983152841195215,
+        37.3519495136897
+      ],
+      "shape_hw": [
+        71,
+        90
+      ],
+      "dtype": "float64",
+      "nodata": null,
+      "total_pixel_count": 6390,
+      "finite_count": 6390,
+      "exact_zero_count": 518,
+      "exact_zero_fraction": 0.0810641627543036,
+      "min": 0.0,
+      "max": 42.362800000000036,
+      "modified_at": "2026-07-09T12:26:15.287889+00:00",
+      "provenance_role": "modis_lst_mean",
+      "default_guard_would_reject": true
+    },
+    "modis_lst_std_celsius": {
+      "path": "/home/emrehan-metin/satellite-thermal-digital-twin/outputs/experiments/manavgat_2021/data/modis/modis_lst_std_celsius.tif",
+      "sha256": "342b4b055f29c4f4cae2265e5355900dec6c34a7b99eb18f1d92522f1e365756",
+      "bytes": 40115,
+      "crs": "EPSG:4326",
+      "transform": [
+        0.008983152841195215,
+        0.0,
+        31.045776219170666,
+        0.0,
+        -0.008983152841195215,
+        37.3519495136897
+      ],
+      "shape_hw": [
+        71,
+        90
+      ],
+      "dtype": "float64",
+      "nodata": null,
+      "total_pixel_count": 6390,
+      "finite_count": 6390,
+      "exact_zero_count": 518,
+      "exact_zero_fraction": 0.0810641627543036,
+      "min": 0.0,
+      "max": 6.2045730006517275,
+      "modified_at": "2026-07-09T12:26:16.985815+00:00",
+      "provenance_role": "modis_lst_std",
+      "default_guard_would_reject": true
+    }
+  },
+  "frozen_modis_metadata": {
+    "experiment_id": "manavgat_2021",
+    "region_key": "manavgat_aoi",
+    "predictor_start_date": "2021-06-01",
+    "predictor_end_date": "2021-07-27",
+    "modis_product": "MODIS/061/MOD11A1",
+    "modis_input_band": "LST_Day_1km",
+    "dn_to_celsius_formula": "LST_Day_1km * 0.02 - 273.15",
+    "aggregation_window": "experiment predictor window (single-season mean/std over daily MODIS scenes within the window), NOT a multi-year baseline",
+    "output_files": {
+      "mean": "/home/emrehan-metin/satellite-thermal-digital-twin/outputs/experiments/manavgat_2021/data/modis/modis_lst_mean_celsius.tif",
+      "std": "/home/emrehan-metin/satellite-thermal-digital-twin/outputs/experiments/manavgat_2021/data/modis/modis_lst_std_celsius.tif"
+    },
+    "scale_meters": 1000,
+    "crs": "EPSG:4326",
+    "export_transport": {
+      "mean": "direct",
+      "std": "direct"
+    },
+    "tile_grid": {
+      "mean": null,
+      "std": null
+    },
+    "created_at": "2026-07-09T12:26:16.989529+00:00",
+    "status": "exported"
+  },
+  "frozen_step7b_historical_evidence": {
+    "stats_path": "/home/emrehan-metin/satellite-thermal-digital-twin/outputs/experiments/manavgat_2021/step7b/downscaling_dataset_stats.json",
+    "present": true,
+    "canonical_step7b_created_at": "2026-07-09T15:26:48.280843",
+    "rasters": {
+      "modis_lst_mean_celsius": {
+        "source_nodata": null,
+        "source_valid_pixel_count": 6390,
+        "source_total_pixel_count": 6390,
+        "aligned_valid_pixel_count": 6943860,
+        "aligned_valid_fraction": 1.0,
+        "original_source_path": "/home/emrehan-metin/satellite-thermal-digital-twin/outputs/experiments/manavgat_2021/data/modis/modis_lst_mean_celsius.tif",
+        "aligned_path": "/home/emrehan-metin/satellite-thermal-digital-twin/outputs/experiments/manavgat_2021/step7b/aligned_inputs/modis_lst_mean_celsius.tif",
+        "modis_source_validation_recorded": false
+      },
+      "modis_lst_std_celsius": {
+        "source_nodata": null,
+        "source_valid_pixel_count": 6390,
+        "source_total_pixel_count": 6390,
+        "aligned_valid_pixel_count": 6943860,
+        "aligned_valid_fraction": 1.0,
+        "original_source_path": "/home/emrehan-metin/satellite-thermal-digital-twin/outputs/experiments/manavgat_2021/data/modis/modis_lst_std_celsius.tif",
+        "aligned_path": "/home/emrehan-metin/satellite-thermal-digital-twin/outputs/experiments/manavgat_2021/step7b/aligned_inputs/modis_lst_std_celsius.tif",
+        "modis_source_validation_recorded": false
+      }
+    },
+    "aligned_inputs": {
+      "modis_lst_mean_celsius": {
+        "path": "/home/emrehan-metin/satellite-thermal-digital-twin/outputs/experiments/manavgat_2021/step7b/aligned_inputs/modis_lst_mean_celsius.tif",
+        "sha256": "966d3edf0a67d49cee74499ba7ade50e863dfeec912cbb160e4345b325705324",
+        "bytes": 21563348
+      },
+      "modis_lst_std_celsius": {
+        "path": "/home/emrehan-metin/satellite-thermal-digital-twin/outputs/experiments/manavgat_2021/step7b/aligned_inputs/modis_lst_std_celsius.tif",
+        "sha256": "334e540b2efde30c14f3850e278b2efeef5c5494c8e8ec336aa3f9cf3bf24c16",
+        "bytes": 21293983
+      }
+    }
+  },
+  "historical_step7b_evidence_confirmed": true,
+  "declares_zero_scientifically_valid": false,
+  "warning": {
+    "code": "legacy_zero_filled_modis_compatibility",
+    "statement": "This downstream A/B run reproduced the frozen historical MODIS representation: a mean/std pair that declares no nodata and encodes sea / no-observation cells as exact 0.0. The default Step7B zero-fill guard is unchanged and still rejects this signature for every other caller; it was waived only here, only for manavgat_2021, and only after an exact path and SHA-256 attestation against the frozen inputs.",
+    "scientific_effect": "The historical zero-filled MODIS representation was preserved identically in both chains to isolate the Landsat compositing intervention. This does not validate zero as physical MODIS LST and does not replace a future MODIS nodata repair experiment."
+  },
+  "limitations": [
+    "The downstream A/B result is conditional on the frozen historical MODIS representation used by the original Manavgat Step7 run.",
+    "A future MODIS nodata repair must be evaluated separately and may not be combined with the Landsat candidate decision."
+  ],
+  "derived_at": "2026-07-26T15:25:12.369654+00:00",
+  "derivation": "src.landsat_composite_downstream_ab.build_legacy_modis_attestation_declaration"
+}

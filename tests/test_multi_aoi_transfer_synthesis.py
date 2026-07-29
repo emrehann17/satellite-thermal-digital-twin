@@ -316,19 +316,30 @@ def synthetic_repo(tmp_path, monkeypatch):
         ]},
     )
 
-    # Step9E shift audit -- only forward direction available (mirrors real
-    # repo's occasional missing-reverse-direction case); build.py should
-    # surface it as "shift_audit_unavailable" for the missing direction in
-    # dry-run mode, not crash.
+    # Step9E shift audit. `part_d_prediction_distribution_audit` carries the
+    # `transfer_direction` records the resolver uses to decide whether an
+    # artifact serves a requested ordered direction; without it an artifact
+    # is (correctly) treated as carrying no records for the direction.
+    def shift_audit(src, tgt, large_shift):
+        return {
+            "source_experiment_id": src, "target_experiment_id": tgt,
+            "primary_populations": [PRIMARY_POPULATION],
+            "part_a_numeric_feature_shift": [
+                {"feature": "ndvi_mean", "population": PRIMARY_POPULATION,
+                 "source_experiment_id": src, "target_experiment_id": tgt,
+                 "abs_smd_ge_0_5": False, "abs_smd_ge_0_2": large_shift,
+                 "psi_ge_0_25": False, "psi_ge_0_10": large_shift,
+                 "outside_source_support_ge_0_10": False},
+            ],
+            "part_d_prediction_distribution_audit": [
+                {"transfer_direction": f"{src}_to_{tgt}", "population": PRIMARY_POPULATION,
+                 "model_family": "thermal", "ranking_reversal_suspected": False},
+            ],
+        }
+
     _write_json(
         root / "outputs" / "cross_region" / f"{a}__{b}" / "step9e" / "distribution_shift_audit.json",
-        {"source_experiment_id": a, "target_experiment_id": b, "primary_populations": [PRIMARY_POPULATION],
-         "part_a_numeric_feature_shift": [
-             {"feature": "ndvi_mean", "population": PRIMARY_POPULATION,
-              "source_experiment_id": a, "target_experiment_id": b,
-              "abs_smd_ge_0_5": False, "abs_smd_ge_0_2": True, "psi_ge_0_25": False, "psi_ge_0_10": True,
-              "outside_source_support_ge_0_10": False},
-         ]},
+        shift_audit(a, b, large_shift=True),
     )
     _write_json(
         root / "outputs" / "cross_region" / f"{a}__{b}" / "step9e_reverse_marker" / "unused.json", {"x": 1},
@@ -337,13 +348,7 @@ def synthetic_repo(tmp_path, monkeypatch):
     # for the non-dry-run full build to succeed).
     _write_json(
         root / "outputs" / "cross_region" / f"{b}__{a}" / "step9e" / "distribution_shift_audit.json",
-        {"source_experiment_id": b, "target_experiment_id": a, "primary_populations": [PRIMARY_POPULATION],
-         "part_a_numeric_feature_shift": [
-             {"feature": "ndvi_mean", "population": PRIMARY_POPULATION,
-              "source_experiment_id": b, "target_experiment_id": a,
-              "abs_smd_ge_0_5": False, "abs_smd_ge_0_2": False, "psi_ge_0_25": False, "psi_ge_0_10": False,
-              "outside_source_support_ge_0_10": False},
-         ]},
+        shift_audit(b, a, large_shift=False),
     )
 
     # Step9G v1 pair report.
@@ -392,6 +397,7 @@ def synthetic_repo(tmp_path, monkeypatch):
     _write_json(
         root / "outputs" / "cross_region" / f"{a}__{b}" / "step10" / "step10_final_report.json",
         {"report_schema_version": "step10.final_report.v2", "analysis_id": "synthetic",
+         "primary_population": PRIMARY_POPULATION,
          "directions": [f"{a}_to_{b}", f"{b}_to_{a}"],
          "target_performance": target_performance,
          "paired_adaptation_differences": adaptation_differences,
@@ -471,6 +477,215 @@ def test_render_all_writes_expected_files(synthetic_repo, tmp_path):
     assert (out_dir / "multi_aoi_manifest.json").is_file()
     assert len(manifest["output_file_hashes"]) == 5
     assert len(manifest["resolved_inputs"]) > 0
+
+
+# =============================================================================
+# build.py large-block-robustness ADAPTER ROUTING.
+#
+# resolve_large_block_robustness reports three kinds of resolution_method; the
+# two per-experiment ones (default `step8_big_blocks` and versioned
+# `step8_big_blocks_v2`) both carry the generic
+# `step8.big_block_robustness.v2` payload and must reach the GENERIC adapter,
+# while only the pair-relative families may reach the LEGACY adapter. The
+# legacy adapter reads `payload["conditions"]`, which a versioned report does
+# not have, so a mis-route degrades the AOI to "unavailable" instead of
+# failing loudly -- hence this covers the routing branch in build.py directly,
+# not just the resolver.
+# =============================================================================
+def _write_big_block_summary(root, experiment_id, namespace, *, support, stability):
+    path = (
+        root / "outputs" / "experiments" / experiment_id / "robustness"
+        / namespace / "comparison" / "big_block_robustness_summary.json"
+    )
+    _write_json(path, {
+        "experiment_id": experiment_id,
+        "analysis_id": f"synthetic_{namespace}",
+        "report_schema_version": "step8.big_block_robustness.v2",
+        "primary_population": PRIMARY_POPULATION,
+        "support_robustness_status": support,
+        "effect_magnitude_stability_status": stability,
+    })
+    return path
+
+
+def _write_legacy_pair_relative_report(root, experiment_id, other_id, *, status):
+    path = (
+        root / "outputs" / "robustness" / "step8_large_block_sensitivity"
+        / f"{experiment_id}__{other_id}" / "step8_large_block_final_report.json"
+    )
+    _write_json(path, {
+        "report_schema_version": "step8.large_block_robustness.v1",
+        "scope": {"formal_step8b_primary_population_robustness": {"conditions": [
+            {"experiment": experiment_id, "primary_population": PRIMARY_POPULATION,
+             "analysis_id": "synthetic_legacy", "robustness_status": status},
+        ]}},
+    })
+    return path
+
+
+@pytest.fixture
+def large_block_adapter_spies(monkeypatch):
+    """Make the routing decision taken inside build_synthesis observable
+    without altering what either adapter returns."""
+    calls = {"generic": [], "legacy": []}
+
+    def _spy(kind):
+        real = getattr(schema_adapters, f"adapt_large_block_robustness_{kind}")
+
+        def wrapper(raw, experiment_id):
+            calls[kind].append(experiment_id)
+            return real(raw, experiment_id)
+
+        return wrapper
+
+    for kind in ("generic", "legacy"):
+        monkeypatch.setattr(
+            schema_adapters, f"adapt_large_block_robustness_{kind}", _spy(kind),
+        )
+    return calls
+
+
+def _large_block_record(synthesis, experiment_id):
+    matches = [
+        r for r in synthesis["resolved_inputs"]
+        if r["family"] == "large_block_robustness"
+        and r["source_experiment_id"] == experiment_id
+    ]
+    assert len(matches) == 1, matches
+    return matches[0]
+
+
+def _within_region_rows(synthesis, experiment_id):
+    rows = [r for r in synthesis["within_region"] if r["experiment_id"] == experiment_id]
+    assert rows
+    return rows
+
+
+def test_versioned_per_experiment_schema_routes_to_generic_adapter(
+    synthetic_repo, large_block_adapter_spies,
+):
+    from src.multi_aoi_transfer_synthesis import resolvers
+    from src.multi_aoi_transfer_synthesis.build import build_synthesis
+
+    _write_big_block_summary(
+        synthetic_repo, AOI_A, resolvers.VERSIONED_BIG_BLOCK_NAMESPACE,
+        support="strongly_robust", stability="non_monotonic",
+    )
+
+    synthesis = build_synthesis([AOI_A, AOI_B], dry_run=False)
+
+    assert large_block_adapter_spies["generic"] == [AOI_A]
+    assert large_block_adapter_spies["legacy"] == []
+
+    record = _large_block_record(synthesis, AOI_A)
+    assert record["resolution_method"] == "versioned_per_experiment_schema"
+    assert record["namespace"] == resolvers.VERSIONED_BIG_BLOCK_NAMESPACE
+
+    # The normalized result must actually reach the assembled synthesis.
+    for row in _within_region_rows(synthesis, AOI_A):
+        assert row["large_block_robustness_available"] is True
+        assert row["large_block_support_status"] == "strongly_robust"
+        assert row["effect_magnitude_stability_status"] == "non_monotonic"
+        assert row["large_block_unavailable_reason"] is None
+
+
+def test_versioned_namespace_wins_over_default_and_still_routes_to_generic(
+    synthetic_repo, large_block_adapter_spies,
+):
+    from src.multi_aoi_transfer_synthesis import resolvers
+    from src.multi_aoi_transfer_synthesis.build import build_synthesis
+
+    _write_big_block_summary(
+        synthetic_repo, AOI_A, resolvers.DEFAULT_BIG_BLOCK_NAMESPACE,
+        support="not_robust", stability="monotonic_decline",
+    )
+    _write_big_block_summary(
+        synthetic_repo, AOI_A, resolvers.VERSIONED_BIG_BLOCK_NAMESPACE,
+        support="strongly_robust", stability="non_monotonic",
+    )
+
+    synthesis = build_synthesis([AOI_A, AOI_B], dry_run=False)
+
+    assert large_block_adapter_spies["generic"] == [AOI_A]
+    assert large_block_adapter_spies["legacy"] == []
+
+    record = _large_block_record(synthesis, AOI_A)
+    assert record["resolution_method"] == "versioned_per_experiment_schema"
+    assert record["namespace"] == resolvers.VERSIONED_BIG_BLOCK_NAMESPACE
+    assert record["analysis_id"] == f"synthetic_{resolvers.VERSIONED_BIG_BLOCK_NAMESPACE}"
+
+    for row in _within_region_rows(synthesis, AOI_A):
+        assert row["large_block_support_status"] == "strongly_robust"
+
+
+def test_generic_per_experiment_schema_still_routes_to_generic_adapter(
+    synthetic_repo, large_block_adapter_spies,
+):
+    from src.multi_aoi_transfer_synthesis import resolvers
+    from src.multi_aoi_transfer_synthesis.build import build_synthesis
+
+    _write_big_block_summary(
+        synthetic_repo, AOI_A, resolvers.DEFAULT_BIG_BLOCK_NAMESPACE,
+        support="robust", stability="monotonic_decline",
+    )
+
+    synthesis = build_synthesis([AOI_A, AOI_B], dry_run=False)
+
+    assert large_block_adapter_spies["generic"] == [AOI_A]
+    assert large_block_adapter_spies["legacy"] == []
+
+    record = _large_block_record(synthesis, AOI_A)
+    assert record["resolution_method"] == "generic_per_experiment_schema"
+    assert record["namespace"] == resolvers.DEFAULT_BIG_BLOCK_NAMESPACE
+
+    for row in _within_region_rows(synthesis, AOI_A):
+        assert row["large_block_robustness_available"] is True
+        assert row["large_block_support_status"] == "robust"
+        assert row["effect_magnitude_stability_status"] == "monotonic_decline"
+
+
+def test_legacy_pair_relative_schema_still_routes_to_legacy_adapter(
+    synthetic_repo, large_block_adapter_spies,
+):
+    from src.multi_aoi_transfer_synthesis.build import build_synthesis
+
+    # No per-experiment namespace anywhere -- only the pair-relative family.
+    _write_legacy_pair_relative_report(synthetic_repo, AOI_A, AOI_B, status="robust")
+
+    synthesis = build_synthesis([AOI_A, AOI_B], dry_run=False)
+
+    assert large_block_adapter_spies["legacy"] == [AOI_A]
+    assert large_block_adapter_spies["generic"] == []
+
+    record = _large_block_record(synthesis, AOI_A)
+    assert record["resolution_method"].startswith("legacy_pair_relative_schema")
+
+    for row in _within_region_rows(synthesis, AOI_A):
+        assert row["large_block_robustness_available"] is True
+        assert row["large_block_support_status"] == "robust"
+        # The legacy schema carries no effect-magnitude classification.
+        assert row["effect_magnitude_stability_status"] is None
+
+
+def test_per_experiment_namespaces_take_precedence_over_legacy_pair_relative(
+    synthetic_repo, large_block_adapter_spies,
+):
+    from src.multi_aoi_transfer_synthesis import resolvers
+    from src.multi_aoi_transfer_synthesis.build import build_synthesis
+
+    _write_legacy_pair_relative_report(synthetic_repo, AOI_A, AOI_B, status="not_robust")
+    _write_big_block_summary(
+        synthetic_repo, AOI_A, resolvers.VERSIONED_BIG_BLOCK_NAMESPACE,
+        support="strongly_robust", stability="non_monotonic",
+    )
+
+    synthesis = build_synthesis([AOI_A, AOI_B], dry_run=False)
+
+    assert large_block_adapter_spies["generic"] == [AOI_A]
+    assert large_block_adapter_spies["legacy"] == []
+    assert _large_block_record(synthesis, AOI_A)["resolution_method"] == (
+        "versioned_per_experiment_schema"
+    )
 
 
 # =============================================================================

@@ -520,7 +520,7 @@ def run_large_block_robustness_stage(
 
 def run_step8_big_block_robustness_stage(
     experiment: str, block_sizes: list[int], dry_run: bool, force: bool,
-    regenerate_reports_only: bool = False,
+    regenerate_reports_only: bool = False, output_root: Optional[str] = None,
 ) -> dict:
     """Dispatch the single-experiment Step8 big-spatial-block robustness
     runner unchanged. Unlike run_step8_robustness_stage/
@@ -535,12 +535,13 @@ def run_step8_big_block_robustness_stage(
 
     return run_step8_big_block_robustness(
         experiment=experiment, block_sizes=block_sizes, dry_run=dry_run, force=force,
-        regenerate_reports_only=regenerate_reports_only,
+        regenerate_reports_only=regenerate_reports_only, output_root=output_root,
     )
 
 
 def run_concept_shift_stage(
     source_id: str, target_id: str, dry_run: bool, force: bool,
+    output_root: Optional[str] = None,
 ) -> dict:
     """Dispatch the completed Step9G univariate feature-AUC direction-reversal
     analysis (population burnable_tree_shrub_grass; raw feature-value ROC-AUC;
@@ -552,6 +553,7 @@ def run_concept_shift_stage(
     return run_step9g(
         source_id=source_id, target_id=target_id,
         dry=dry_run, force=force,
+        output_root=Path(output_root) if output_root else None,
     )
 
 
@@ -689,6 +691,53 @@ def run_multi_aoi_transfer_synthesis_stage(
         "manifest_path": str(out_dir / "multi_aoi_manifest.json"),
         "input_families_resolved": manifest["input_families_resolved"],
     }
+
+
+def run_evia_signed_auc_stage(
+    experiment_id: str, bootstrap_replicates: int, seed: int, dry_run: bool, force: bool,
+) -> dict:
+    """Dispatch the REPORT-ONLY Evia signed-AUC spatial-block bootstrap.
+
+    Reads the frozen Step8A modeling dataset plus the frozen Step9G univariate
+    tables; never runs modeling, adaptation, prediction or Step10. Writes only
+    under outputs/diagnostics/evia_signed_auc_bootstrap/<experiment_id>/."""
+    from src.evia_signed_auc_bootstrap import EviaSignedAucError, run as run_signed_auc
+
+    try:
+        return run_signed_auc(
+            experiment_id=experiment_id,
+            bootstrap_replicates=bootstrap_replicates,
+            seed=seed,
+            dry_run=dry_run,
+            force=force,
+        )
+    except EviaSignedAucError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def run_transfer_decomposition_stage(
+    aois: list[str], bootstrap_replicates: int, seed: int, dry_run: bool, force: bool,
+) -> dict:
+    """Dispatch the REPORT-ONLY multi-AOI transfer decomposition.
+
+    Recomputes gap/recovery decomposition and its uncertainty from ALREADY
+    FROZEN Step8B/Step9B/Step10 artefacts. Never re-runs models, adaptation,
+    predictions or the Step10 bootstrap itself."""
+    from src.transfer_decomposition import (
+        TransferDecompositionError,
+        run as run_decomposition,
+    )
+
+    try:
+        return run_decomposition(
+            aois=list(aois),
+            bootstrap_replicates=bootstrap_replicates,
+            seed=seed,
+            dry_run=dry_run,
+            force=force,
+        )
+    except TransferDecompositionError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def run_burned_pattern_audit_stage(

@@ -196,6 +196,7 @@ class TestStep8BigBlockRobustnessDispatch(unittest.TestCase):
         self.assertFalse(result["ran"])
         mocked.assert_called_once_with(
             experiment="mugla_2021", block_sizes=[10, 20], dry_run=True, force=False,
+            regenerate_reports_only=False, output_root=None,
         )
 
     def test_orchestrator_accepts_arbitrary_experiment_id(self):
@@ -208,6 +209,7 @@ class TestStep8BigBlockRobustnessDispatch(unittest.TestCase):
             )
         mocked.assert_called_once_with(
             experiment="some_future_experiment", block_sizes=[10, 20], dry_run=True, force=False,
+            regenerate_reports_only=False, output_root=None,
         )
 
 

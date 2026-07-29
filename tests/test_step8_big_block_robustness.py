@@ -381,7 +381,11 @@ def test_direct_runner_dispatches_exact_values():
     with patch.object(direct_runner, "run_analysis", return_value={"ran": False}) as mocked:
         result = direct_runner.main(experiment="mugla_2021", block_sizes=[10, 20], dry_run=True, force=False)
     assert result == {"ran": False}
-    mocked.assert_called_once_with(experiment_id="mugla_2021", block_sizes=[10, 20], dry_run=True, force=False)
+    # `output_root` selects a VERSIONED namespace; None keeps the default one.
+    mocked.assert_called_once_with(
+        experiment_id="mugla_2021", block_sizes=[10, 20], dry_run=True, force=False,
+        output_root=None,
+    )
 
 
 def test_direct_runner_regenerate_reports_only_dispatches_exclusively():
@@ -400,7 +404,9 @@ def test_direct_runner_regenerate_reports_only_dispatches_exclusively():
             regenerate_reports_only=True,
         )
     assert result == {"ran": True}
-    mocked_regen.assert_called_once_with(experiment_id="mugla_2021", dry_run=False)
+    mocked_regen.assert_called_once_with(
+        experiment_id="mugla_2021", dry_run=False, output_root=None,
+    )
     mocked_run.assert_not_called()
 
 
@@ -484,8 +490,16 @@ def _canned_condition(analysis_id: str, experiment_id: str, block_size: int) -> 
         "baseline_brier": 0.2, "thermal_brier": 0.15, "delta_brier": -0.05,
     }
     series_default = {"mean": 0.1, "median": 0.1, "ci_2_5": 0.05, "ci_97_5": 0.15}
+    # Mirrors the frozen bootstrap_summary.json schema on disk: the replicate
+    # accounting fields live FLAT at the top level (not nested under a
+    # scientific_configuration block), and the report-only Markdown renderer
+    # reads them verbatim. A fixture missing them is not a lighter fixture --
+    # it is a different schema from the one report-only mode consumes.
     bootstrap = {
-        **common, "bootstrap_stability": "stable", "valid_replicates": 1000,
+        **common, "bootstrap_stability": "stable",
+        "requested_replicates": 1000,
+        "valid_replicates": 1000,
+        "invalid_single_class_replicates": 0,
         "series": {name: dict(series_default) for name in (
             "auc_baseline", "auc_thermal", "delta_auc",
             "pr_auc_baseline", "pr_auc_thermal", "delta_pr_auc",
@@ -599,3 +613,82 @@ def test_normal_mode_rejects_incompatible_immutable_preregistration(tmp_path):
     ):
         with pytest.raises(robust.Step8BigBlockRobustnessError, match="disagrees with runtime scientific configuration"):
             robust.validate_or_write_manifest(output_root, "test_experiment", [10, 20], {})
+
+
+# =============================================================================
+# Report-only regeneration: frozen bootstrap accounting + no model/bootstrap
+# =============================================================================
+def _real_bootstrap_summary_keys() -> set[str]:
+    """The replicate-accounting keys the frozen artefacts actually carry."""
+    return {"requested_replicates", "valid_replicates", "invalid_single_class_replicates"}
+
+
+def test_report_only_reads_the_frozen_bootstrap_replicate_accounting(tmp_path):
+    """The regenerated bootstrap_summary must carry the frozen replicate
+    accounting through verbatim, read from the FLAT top-level keys the frozen
+    artefacts use -- report-only mode never re-derives or re-samples them."""
+    experiment_id = "test_experiment"
+    analysis_id = "frozen-analysis-id-boot"
+    step8_root = tmp_path / "outputs" / "experiments" / experiment_id
+    _write_frozen_original_step8_artifacts(step8_root)
+    output_root = tmp_path / "big_blocks"
+    _write_frozen_big_block_manifest(output_root, analysis_id, block_sizes=(10, 20))
+
+    with (
+        patch.object(robust, "experiment_step8_root", return_value=step8_root),
+        patch.object(robust, "load_condition_artifacts", side_effect=_fake_load_condition_artifacts(analysis_id, experiment_id)),
+    ):
+        robust.regenerate_reports_from_frozen_artifacts(experiment_id, output_root=output_root)
+
+    canned = _canned_condition(analysis_id, experiment_id, 10)["bootstrap"]
+    for block_size in (10, 20):
+        block_dir = output_root / f"block_{block_size}_cells"
+        written = json.loads((block_dir / "bootstrap_summary.json").read_text())
+        for key in _real_bootstrap_summary_keys():
+            assert key in written, f"{key} missing from regenerated bootstrap_summary.json"
+            assert written[key] == canned[key]
+        markdown = (block_dir / "bootstrap_summary.md").read_text(encoding="utf-8")
+        assert f"requested replicates: {canned['requested_replicates']}" in markdown
+        assert f"valid replicates: {canned['valid_replicates']}" in markdown
+
+
+def test_report_only_matches_the_frozen_on_disk_bootstrap_schema():
+    """Guard the fixture against drifting away from the real artefacts: every
+    replicate-accounting key the renderer needs must exist, flat, on disk."""
+    frozen = sorted(
+        (_PROJECT_ROOT / "outputs" / "experiments").glob(
+            "*/robustness/step8_big_blocks*/block_*_cells/bootstrap_summary.json"
+        )
+    )
+    if not frozen:
+        pytest.skip("no frozen big-block bootstrap summaries in this checkout")
+    for path in frozen:
+        payload = json.loads(path.read_text())
+        missing = _real_bootstrap_summary_keys() - set(payload)
+        assert not missing, f"{path} is missing {sorted(missing)}"
+
+
+def test_report_only_never_writes_replicate_or_prediction_parquets(tmp_path):
+    """Report-only regeneration must not produce any of the artefacts that
+    only a real fit/bootstrap can produce."""
+    experiment_id = "test_experiment"
+    analysis_id = "frozen-analysis-id-noparquet"
+    step8_root = tmp_path / "outputs" / "experiments" / experiment_id
+    _write_frozen_original_step8_artifacts(step8_root)
+    output_root = tmp_path / "big_blocks"
+    _write_frozen_big_block_manifest(output_root, analysis_id, block_sizes=(10, 20))
+
+    with (
+        patch.object(robust, "experiment_step8_root", return_value=step8_root),
+        patch.object(robust, "load_condition_artifacts", side_effect=_fake_load_condition_artifacts(analysis_id, experiment_id)),
+    ):
+        result = robust.regenerate_reports_from_frozen_artifacts(experiment_id, output_root=output_root)
+
+    assert result["models_refit"] is False
+    assert result["bootstrap_rerun"] is False
+    assert list(output_root.rglob("*.parquet")) == []
+    # The frozen analysis identity is preserved, never recomputed.
+    for block_size in (10, 20):
+        block_dir = output_root / f"block_{block_size}_cells"
+        for name in ("step8b_metrics.json", "bootstrap_summary.json", "block_manifest.json"):
+            assert json.loads((block_dir / name).read_text())["analysis_id"] == analysis_id

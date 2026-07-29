@@ -440,11 +440,23 @@ class TestReproductionCheckLogic(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def _write_step9b_metrics(self, direction, population, roc_auc, pr_auc):
+    def _write_step9b_metrics(self, direction, population, roc_auc, pr_auc, brier_score=0.20):
+        # The frozen Step9B `results[]` rows carry all three metrics named in
+        # REQUIRED_STEP9_RAW_METRICS -- roc_auc, pr_auc AND brier_score --
+        # inside each metric block. `_validated_step9_transfer_metrics`
+        # refuses to extract a reference that is missing any of them rather
+        # than substituting a placeholder, so the fixture must supply the
+        # real schema. Only roc_auc/pr_auc take part in the 1e-6 reproduction
+        # comparison; brier_score is carried through for provenance.
         payload = {"results": [{
             "transfer_direction": direction, "population": population, "skipped": False,
-            "baseline_metrics": {"roc_auc": roc_auc, "pr_auc": pr_auc},
-            "thermal_metrics": {"roc_auc": roc_auc + 0.05, "pr_auc": pr_auc + 0.01},
+            "baseline_metrics": {
+                "roc_auc": roc_auc, "pr_auc": pr_auc, "brier_score": brier_score,
+            },
+            "thermal_metrics": {
+                "roc_auc": roc_auc + 0.05, "pr_auc": pr_auc + 0.01,
+                "brier_score": brier_score - 0.02,
+            },
         }]}
         path = self.tmp_dir / "cross_region_transfer_metrics.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
@@ -501,6 +513,51 @@ class TestReproductionCheckLogic(unittest.TestCase):
             self.s10c.verify_raw_reproduction(point_metrics, "src", "tgt", "tgt_to_src")
         # original_source_id/original_target_id ("src","tgt") HER ZAMAN AYNI SIRAYLA cagrilmali.
         self.assertEqual(calls, [("src", "tgt")])
+
+    def test_both_directions_resolve_the_same_pair_path_only_the_slice_differs(self):
+        """Ayni pair dosyasi her iki yon icin de cozulur; degisen tek sey,
+        dosya ICINDEN secilen `transfer_direction` satiridir. Fiziksel yol
+        yon basina ASLA swap edilmez."""
+        import unittest.mock as mock
+
+        payload = {"results": [
+            {
+                "transfer_direction": "src_to_tgt", "population": s10.PRIMARY_POPULATION,
+                "skipped": False,
+                "baseline_metrics": {"roc_auc": 0.60, "pr_auc": 0.10, "brier_score": 0.20},
+                "thermal_metrics": {"roc_auc": 0.65, "pr_auc": 0.11, "brier_score": 0.18},
+            },
+            {
+                "transfer_direction": "tgt_to_src", "population": s10.PRIMARY_POPULATION,
+                "skipped": False,
+                "baseline_metrics": {"roc_auc": 0.40, "pr_auc": 0.05, "brier_score": 0.30},
+                "thermal_metrics": {"roc_auc": 0.45, "pr_auc": 0.06, "brier_score": 0.28},
+            },
+        ]}
+        path = self.tmp_dir / "cross_region_transfer_metrics.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        calls = []
+
+        def _fake_resolver(a, b):
+            calls.append((a, b))
+            return path
+
+        expected = {
+            "src_to_tgt": (0.60, 0.65),
+            "tgt_to_src": (0.40, 0.45),
+        }
+        with mock.patch.object(self.s10c, "resolve_step9b_metrics_path", side_effect=_fake_resolver):
+            for direction, (baseline_roc, thermal_roc) in expected.items():
+                reference = self.s10c.resolve_step9_raw_reference("src", "tgt", direction)
+                self.assertEqual(reference["metrics"]["baseline"]["roc_auc"], baseline_roc)
+                self.assertEqual(reference["metrics"]["thermal"]["roc_auc"], thermal_roc)
+                # Pair identity is the ORIGINAL one for both directions.
+                self.assertEqual(reference["root_source_experiment_id"], "src")
+                self.assertEqual(reference["root_target_experiment_id"], "tgt")
+
+        # Same physical path, same argument order, for both directions.
+        self.assertEqual(calls, [("src", "tgt"), ("src", "tgt")])
 
 
 class TestStep10ReportOnlyQA(unittest.TestCase):

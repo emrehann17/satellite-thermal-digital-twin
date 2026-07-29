@@ -199,10 +199,24 @@ def test_frozen_numeric_values_preserved(tmp_path, monkeypatch):
     original = _frozen_reversal_table()
     corrected = v2.build_corrected_integration()
     per_feature = {r["feature"]: r for r in corrected["per_feature"]}
+    # The FROZEN table keeps its AOI-named columns (`manavgat_auc`,
+    # `bejis_auc`) -- it is immutable and is not rewritten. The corrected
+    # integration re-emits them under AOI-neutral, direction-relative names
+    # (`source_auc`/`target_auc`) so the same code serves any pair. The
+    # values must still be carried through VERBATIM, which is what this
+    # test exists to prove: no recomputation, no rounding, no rescaling.
     for _, row in original.iterrows():
         pf = per_feature[row["feature"]]
-        assert pf["manavgat_auc"] == row["manavgat_auc"]
-        assert pf["bejis_auc"] == row["bejis_auc"]
+        assert pf["source_experiment_id"] == v2.SOURCE_ID
+        assert pf["target_experiment_id"] == v2.TARGET_ID
+        assert pf["source_auc"] == row["manavgat_auc"]
+        assert pf["target_auc"] == row["bejis_auc"]
+        assert pf["source_ci_low"] == row["manavgat_ci_low"]
+        assert pf["source_ci_high"] == row["manavgat_ci_high"]
+        assert pf["target_ci_low"] == row["bejis_ci_low"]
+        assert pf["target_ci_high"] == row["bejis_ci_high"]
+        assert pf["source_direction"] == row["manavgat_direction"]
+        assert pf["target_direction"] == row["bejis_direction"]
         assert pf["reversal_status"] == row["reversal_status"]
     # feature ordering preserved
     assert [r["feature"] for r in corrected["per_feature"]] == list(FEATURES)
@@ -301,3 +315,76 @@ def test_force_required_to_overwrite(tmp_path, monkeypatch):
     # force succeeds
     result = v2.run_correction(dry=False, force=True)
     assert result["ran"] is True
+
+# =============================================================================
+# 12. integration-only never touches the frozen Step9G numeric namespace
+# =============================================================================
+def _hash_tree(root: Path) -> dict[str, str]:
+    import hashlib
+
+    out = {}
+    for p in sorted(root.rglob("*")):
+        if p.is_file():
+            out[p.relative_to(root).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
+    return out
+
+
+def test_integration_only_leaves_the_frozen_step9g_namespace_byte_identical(tmp_path, monkeypatch):
+    """The correction re-reads and re-presents frozen Step9G numbers; it must
+    never rewrite the artefacts it read, not even with --force."""
+    _build_fixture(tmp_path)
+    _patch_roots(monkeypatch, tmp_path)
+    frozen_root = v2.frozen_step9g_root()
+    before = _hash_tree(frozen_root)
+    assert before, "fixture must provide frozen Step9G artefacts"
+
+    v2.run_correction(dry=False)
+    assert _hash_tree(frozen_root) == before
+    v2.run_correction(dry=False, force=True)
+    assert _hash_tree(frozen_root) == before
+
+
+def test_integration_only_writes_into_its_own_versioned_namespace(tmp_path, monkeypatch):
+    """Corrected output lives in a SEPARATE v2 namespace, never inside the
+    frozen Step9G directory it consumes."""
+    _build_fixture(tmp_path)
+    _patch_roots(monkeypatch, tmp_path)
+    v2.run_correction(dry=False)
+
+    frozen_root, output_root = v2.frozen_step9g_root(), v2._output_root()
+    assert output_root.exists()
+    assert output_root != frozen_root
+    assert frozen_root not in output_root.parents
+    for produced in output_root.rglob("*"):
+        if produced.is_file():
+            assert frozen_root not in produced.parents
+
+
+def test_corrected_report_reuses_frozen_numbers_verbatim(tmp_path, monkeypatch):
+    """Every AUC written into the corrected report must be byte-equal to the
+    frozen value -- no recomputation, no rounding."""
+    _build_fixture(tmp_path)
+    _patch_roots(monkeypatch, tmp_path)
+    frozen = _frozen_reversal_table()
+    v2.run_correction(dry=False)
+
+    report = json.loads(
+        (v2._output_root() / "step9g_integration_correction_final_report.json").read_text()
+    )
+    assert report["frozen_step9g_numeric_reused_verbatim"] is True
+    per_feature = {r["feature"]: r for r in report["per_feature_integration"]}
+    for _, row in frozen.iterrows():
+        pf = per_feature[row["feature"]]
+        assert pf["source_auc"] == row["manavgat_auc"]
+        assert pf["target_auc"] == row["bejis_auc"]
+        assert pf["source_ci_low"] == row["manavgat_ci_low"]
+        assert pf["target_ci_high"] == row["bejis_ci_high"]
+        assert pf["reversal_status"] == row["reversal_status"]
+
+    # The per-feature CSV must carry the same verbatim values.
+    csv_rows = pd.read_csv(
+        v2._output_root() / "step9g_integration_correction_per_feature.csv"
+    ).set_index("feature")
+    for _, row in frozen.iterrows():
+        assert csv_rows.loc[row["feature"], "source_auc"] == row["manavgat_auc"]
+        assert csv_rows.loc[row["feature"], "target_auc"] == row["bejis_auc"]
