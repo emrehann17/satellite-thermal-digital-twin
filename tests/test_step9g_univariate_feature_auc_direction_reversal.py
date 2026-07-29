@@ -294,7 +294,9 @@ def test_dry_run_writes_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(g, "PROJECT_ROOT", tmp_path)
     out_root = tmp_path / "outputs" / "diagnostics" / "step9g" / g.PAIR_TOKEN
     monkeypatch.setattr(g, "OUTPUT_ROOT", out_root)
-    result = g.run_analysis(dry=True)
+    # Passed explicitly: otherwise the run resolves its own namespace and
+    # `out_root` would be trivially absent whether or not dry-run writes.
+    result = g.run_analysis(dry=True, output_root=out_root)
     assert result["computes_auc"] is False
     assert result["runs_bootstrap"] is False
     assert result["writes_files"] is False
@@ -307,9 +309,14 @@ def test_dry_run_writes_nothing(tmp_path, monkeypatch):
 def test_end_to_end_namespace_isolation(tmp_path, monkeypatch):
     _build_fixture(tmp_path, n_blocks=30)
     monkeypatch.setattr(g, "PROJECT_ROOT", tmp_path)
+    # `run_analysis` resolves its namespace from the explicit `output_root`
+    # argument, falling back to `output_root_for(source, target)` -- NOT to
+    # the module-level OUTPUT_ROOT constant. Passing it explicitly is what a
+    # versioned rerun does, and it is the only thing that actually redirects
+    # the run, so patching the constant alone would silently test nothing.
     out_root = tmp_path / "outputs" / "diagnostics" / "step9g" / g.PAIR_TOKEN
     monkeypatch.setattr(g, "OUTPUT_ROOT", out_root)
-    result = g.run_analysis(dry=False)
+    result = g.run_analysis(dry=False, output_root=out_root)
     assert result["ran"] is True
     assert result["protected_hash_check"] == "passed"
     assert (out_root / "step9g_final_report.json").is_file()
@@ -435,3 +442,74 @@ def test_module_under_fixture_never_reads_the_real_outputs_tree(tmp_path, monkey
     for s, t in ((g.SOURCE_ID, g.TARGET_ID), (g.TARGET_ID, g.SOURCE_ID)):
         for resolved in (g.step9e_dir(s, t), g.step9f_dir(s, t), g.step10_dir(s, t)):
             assert real_root not in resolved.parents
+
+
+# =============================================================================
+# 25. Versioned namespace isolation
+# =============================================================================
+# A rerun bound to regenerated Step8A inputs must be able to write a NEW
+# versioned namespace WITHOUT touching the frozen numeric artefacts of the
+# original run. This is the contract that lets a repaired input be re-analysed
+# while the superseded results stay byte-identical and auditable.
+
+def _dir_hashes(root: Path) -> dict[str, str]:
+    return {
+        p.relative_to(root).as_posix(): _sha256(p)
+        for p in sorted(root.rglob("*")) if p.is_file()
+    }
+
+
+def test_versioned_rerun_does_not_overwrite_the_frozen_numeric_namespace(tmp_path, monkeypatch):
+    _build_fixture(tmp_path, n_blocks=12)
+    monkeypatch.setattr(g, "PROJECT_ROOT", tmp_path)
+
+    default_root = g.output_root_for(g.SOURCE_ID, g.TARGET_ID)
+    first = g.run_analysis(dry=False, output_root=default_root)
+    assert first["ran"] is True
+    frozen_before = _dir_hashes(default_root)
+    assert frozen_before, "the first run must have produced frozen artefacts"
+
+    # Second run, same inputs, VERSIONED namespace.
+    versioned_root = default_root.parent / f"{default_root.name}_v2"
+    second = g.run_analysis(dry=False, output_root=versioned_root)
+    assert second["ran"] is True
+
+    # The original namespace is byte-identical afterwards.
+    assert _dir_hashes(default_root) == frozen_before
+    # The versioned namespace is populated and physically separate.
+    assert (versioned_root / "step9g_final_report.json").is_file()
+    assert versioned_root != default_root
+    assert default_root not in versioned_root.parents
+    # Nothing leaked outside the two diagnostics namespaces.
+    for produced in versioned_root.rglob("*"):
+        if produced.is_file():
+            assert versioned_root in produced.parents
+
+
+def test_versioned_namespace_is_part_of_the_preregistered_identity(tmp_path, monkeypatch):
+    """The namespace is preregistered, so a versioned rerun carries its own
+    analysis_id and can never be mistaken for the superseded run."""
+    _build_fixture(tmp_path, n_blocks=12)
+    monkeypatch.setattr(g, "PROJECT_ROOT", tmp_path)
+
+    default_root = g.output_root_for(g.SOURCE_ID, g.TARGET_ID)
+    versioned_root = default_root.parent / f"{default_root.name}_v2"
+    default_result = g.run_analysis(dry=False, output_root=default_root)
+    versioned_result = g.run_analysis(dry=False, output_root=versioned_root)
+
+    assert default_result["output_root"] == str(default_root)
+    assert versioned_result["output_root"] == str(versioned_root)
+
+    def _prereg(root: Path) -> dict:
+        return json.loads((root / "step9g_preregistration.json").read_text())
+
+    default_prereg, versioned_prereg = _prereg(default_root), _prereg(versioned_root)
+    assert default_prereg["scientific_configuration"]["output_namespace"] == str(default_root)
+    assert versioned_prereg["scientific_configuration"]["output_namespace"] == str(versioned_root)
+    # Distinct namespaces => distinct preregistered identities.
+    assert default_prereg["analysis_id"] != versioned_prereg["analysis_id"]
+    # ...but every SCIENTIFIC setting is identical; only the namespace moved.
+    default_config = dict(default_prereg["scientific_configuration"])
+    versioned_config = dict(versioned_prereg["scientific_configuration"])
+    del default_config["output_namespace"], versioned_config["output_namespace"]
+    assert default_config == versioned_config

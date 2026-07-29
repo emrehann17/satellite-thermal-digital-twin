@@ -324,17 +324,33 @@ class TestParserStructure(unittest.TestCase):
             self.assertEqual(cmd_step8_big_block_robustness(args), 0)
         mocked.assert_called_once_with(
             experiment="mugla_2021", block_sizes=[10, 20], dry_run=True, force=False,
+            regenerate_reports_only=False, output_root=None,
         )
 
     def test_concept_shift_subcommand_parses(self):
-        args = self.parser.parse_args(["concept-shift", "--dry-run"])
+        # --source/--target are REQUIRED: the pair is never implicit.
+        args = self.parser.parse_args([
+            "concept-shift",
+            "--source", "mugla_2021",
+            "--target", "manavgat_2021",
+            "--dry-run",
+        ])
         self.assertEqual(args.command, "concept-shift")
+        self.assertEqual(args.source, "mugla_2021")
+        self.assertEqual(args.target, "manavgat_2021")
         self.assertFalse(args.integration_only)
         self.assertTrue(args.dry_run)
         self.assertIs(args.func, cmd_concept_shift)
 
     def test_concept_shift_default_runs_numeric_analysis(self):
-        args = self.parser.parse_args(["concept-shift", "--dry-run"])
+        args = self.parser.parse_args([
+            "concept-shift",
+            "--source", "mugla_2021",
+            "--target", "manavgat_2021",
+            "--dry-run",
+        ])
+        self.assertEqual(args.source, "mugla_2021")
+        self.assertEqual(args.target, "manavgat_2021")
         with patch.object(
             sys.modules["scripts.main"].orch, "run_concept_shift_stage",
             return_value={"ran": False},
@@ -343,11 +359,21 @@ class TestParserStructure(unittest.TestCase):
             return_value={"ran": False},
         ) as integration:
             self.assertEqual(cmd_concept_shift(args), 0)
-        numeric.assert_called_once_with(dry_run=True, force=False)
+        numeric.assert_called_once_with(
+            source_id="mugla_2021", target_id="manavgat_2021",
+            dry_run=True, force=False, output_root=None,
+        )
         integration.assert_not_called()
 
     def test_concept_shift_integration_only_is_report_only(self):
-        args = self.parser.parse_args(["concept-shift", "--integration-only", "--force"])
+        args = self.parser.parse_args([
+            "concept-shift",
+            "--source", "mugla_2021",
+            "--target", "manavgat_2021",
+            "--integration-only", "--force",
+        ])
+        self.assertEqual(args.source, "mugla_2021")
+        self.assertEqual(args.target, "manavgat_2021")
         self.assertTrue(args.integration_only)
         with patch.object(
             sys.modules["scripts.main"].orch, "run_concept_shift_integration_stage",
@@ -357,7 +383,10 @@ class TestParserStructure(unittest.TestCase):
             return_value={"ran": True},
         ) as numeric:
             self.assertEqual(cmd_concept_shift(args), 0)
-        integration.assert_called_once_with(dry_run=False, force=True)
+        integration.assert_called_once_with(
+            source_id="mugla_2021", target_id="manavgat_2021",
+            dry_run=False, force=True,
+        )
         numeric.assert_not_called()
 
     def test_legacy_subcommand_defaults_to_kozan(self):

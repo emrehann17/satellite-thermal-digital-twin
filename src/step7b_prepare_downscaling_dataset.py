@@ -22,7 +22,9 @@ MODIS -> Landsat LST downscaling için pencere/tile-bazlı EĞİTİM VERİSETİ 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -75,6 +77,174 @@ class Step7BModisValidationError(SystemExit):
     """Fail-fast MODIS kaynak-raster dogrulama hatasi (hizalamadan ONCE)."""
 
 
+class LegacyModisCompatibilityAttestationError(Step7BModisValidationError):
+    """Gecersiz/eksik tarihsel-uyumluluk beyani (attestation).
+
+    Bu hata, zero-fill muafiyetinin REDDEDILDIGI anlamina gelir: Step7B yine
+    strict davranir.
+    """
+
+
+# =============================================================================
+# Tarihsel (donmus) MODIS uyumluluk beyani -- DAR KAPSAMLI
+# =============================================================================
+#: Bu modun ADI sabittir ve baska hicbir yerde uretilmez. Step7B'nin varsayilan
+#: davranisi HER ZAMAN strict'tir: `legacy_modis_compatibility=None`.
+LEGACY_FROZEN_MODIS_COMPATIBILITY_MODE = "legacy_frozen_modis_compatibility"
+
+
+@dataclass(frozen=True)
+class LegacyModisCompatibilityAttestation:
+    """Tarihsel zero-fill MODIS semantiginin YENIDEN URETILMESI icin beyan.
+
+    Bu beyan bir "dogrulamayi atla" bayragi DEGILDIR: yalnizca burada
+    ADI, SHA-256'si ve BYTE boyutu ONCEDEN kaydedilmis MODIS rasterlari icin,
+    ve yalnizca dosyanin O ANKI icerigi bu hash'lerle BIREBIR esletigi zaman
+    Kural 1'i (nodata-yok + zero-fill imzasi) askiya alir. Kural 2/3/4
+    (fiziksel aralik, negatif std, mean/std grid esitligi) AYNEN uygulanir.
+
+    Tek bir boolean YETERLI DEGILDIR ve kabul edilmez -- `validate_modis_source_rasters`
+    yalnizca bu tipin bir ornegini kabul eder.
+
+    Alanlar:
+        mode: tam olarak LEGACY_FROZEN_MODIS_COMPATIBILITY_MODE olmalidir.
+        experiment_id: beyanin baglandigi deney kimligi; Step7B ctx ile eslesmelidir.
+        rasters: {feature_adi: {"sha256":..., "bytes":..., "authorized_paths":[...]}}
+        historical_step7b_evidence_confirmed: cagiran taraf, donmus Step7B
+            metadatasinin nodata'siz kaynagin gercekten kullanildigini
+            DOGRULADIGINI beyan eder (True olmak zorundadir).
+        issued_by / attestation_id: denetim izi (rapora yazilir).
+    """
+
+    mode: str
+    experiment_id: str
+    rasters: dict
+    historical_step7b_evidence_confirmed: bool
+    issued_by: str = ""
+    attestation_id: str = ""
+    notes: tuple = field(default_factory=tuple)
+
+    @classmethod
+    def from_mapping(cls, payload: dict) -> "LegacyModisCompatibilityAttestation":
+        """Beyani bir mapping'den kurar (alan dogrulamasi kullanim aninda yapilir)."""
+        if not isinstance(payload, dict):
+            raise LegacyModisCompatibilityAttestationError(
+                "legacy MODIS compatibility attestation must be a mapping; "
+                f"got {type(payload).__name__}."
+            )
+        rasters = payload.get("rasters") or {}
+        normalized = {
+            str(name): {
+                "sha256": str(entry.get("sha256", "")),
+                "bytes": int(entry.get("bytes", -1)),
+                "authorized_paths": tuple(
+                    str(Path(p).resolve()) for p in (entry.get("authorized_paths") or [])
+                ),
+            }
+            for name, entry in rasters.items()
+        }
+        return cls(
+            mode=str(payload.get("mode", "")),
+            experiment_id=str(payload.get("experiment_id", "")),
+            rasters=normalized,
+            historical_step7b_evidence_confirmed=bool(
+                payload.get("historical_step7b_evidence_confirmed", False)
+            ),
+            issued_by=str(payload.get("issued_by", "")),
+            attestation_id=str(payload.get("attestation_id", "")),
+            notes=tuple(payload.get("notes") or ()),
+        )
+
+
+def _sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _authorize_zero_fill_waiver(
+    attestation, experiment_id: str | None, required: dict[str, Path],
+) -> dict | None:
+    """Zero-fill muafiyetini YALNIZCA gecerli bir beyanla yetkilendirir.
+
+    `attestation is None` ise None doner -- cagiran taraf strict reddi uygular
+    (varsayilan davranis). Beyan VARSA ve HERHANGI bir kosul saglanmiyorsa
+    LegacyModisCompatibilityAttestationError firlatir; sessizce strict'e
+    dusmez, cunku "gecersiz beyanla calistirma girisimi" bir hatadir.
+    """
+    if attestation is None:
+        return None
+
+    if not isinstance(attestation, LegacyModisCompatibilityAttestation):
+        raise LegacyModisCompatibilityAttestationError(
+            "Step7B zero-fill guard can only be waived by a "
+            "LegacyModisCompatibilityAttestation instance carrying the expected "
+            f"source paths and SHA-256 hashes; got {type(attestation).__name__}. "
+            "A boolean or a plain mapping is NEVER sufficient."
+        )
+    if attestation.mode != LEGACY_FROZEN_MODIS_COMPATIBILITY_MODE:
+        raise LegacyModisCompatibilityAttestationError(
+            f"unknown MODIS compatibility mode {attestation.mode!r}; the only "
+            f"supported mode is {LEGACY_FROZEN_MODIS_COMPATIBILITY_MODE!r}."
+        )
+    if attestation.historical_step7b_evidence_confirmed is not True:
+        raise LegacyModisCompatibilityAttestationError(
+            "the attestation does not confirm the frozen Step7B historical "
+            "evidence (historical_step7b_evidence_confirmed is not True)."
+        )
+    if not experiment_id or attestation.experiment_id != experiment_id:
+        raise LegacyModisCompatibilityAttestationError(
+            f"the attestation is bound to experiment {attestation.experiment_id!r} "
+            f"but Step7B is running for {experiment_id!r}."
+        )
+
+    verified: dict[str, dict] = {}
+    for name, path in required.items():
+        entry = attestation.rasters.get(name)
+        if not entry:
+            raise LegacyModisCompatibilityAttestationError(
+                f"the attestation does not cover the MODIS raster {name!r}; every "
+                "MODIS raster Step7B is about to read must be attested."
+            )
+        resolved = str(Path(path).resolve())
+        if resolved not in entry["authorized_paths"]:
+            raise LegacyModisCompatibilityAttestationError(
+                f"{name}: {resolved} is not an authorized path in the attestation "
+                f"({list(entry['authorized_paths'])})."
+            )
+        actual_bytes = int(Path(path).stat().st_size)
+        actual_sha = _sha256_of(Path(path))
+        if actual_bytes != entry["bytes"] or actual_sha != entry["sha256"]:
+            raise LegacyModisCompatibilityAttestationError(
+                f"{name}: the file at {resolved} does not match the attested "
+                f"content (expected sha256={entry['sha256']} bytes={entry['bytes']}, "
+                f"found sha256={actual_sha} bytes={actual_bytes}). The historical "
+                "compatibility path is refused; the strict guard stands."
+            )
+        verified[name] = {
+            "path": resolved, "sha256": actual_sha, "bytes": actual_bytes,
+        }
+
+    return {
+        "mode": LEGACY_FROZEN_MODIS_COMPATIBILITY_MODE,
+        "waived_rule": "no_nodata_zero_fill_signature",
+        "waiver_scope": "this Step7B call only",
+        "experiment_id": experiment_id,
+        "attestation_id": attestation.attestation_id,
+        "issued_by": attestation.issued_by,
+        "verified_rasters": verified,
+        "rasters_rewritten": False,
+        "nodata_assigned": False,
+        "values_or_mask_changed": False,
+        "statement":
+            "The historical zero-filled MODIS representation was reproduced "
+            "verbatim. No raster value, mask, dtype or grid was changed and zero "
+            "is NOT declared a physically valid MODIS LST value.",
+    }
+
+
 def _read_source_raster_stats(path: Path) -> dict:
     """Bir kaynak (hizalanmamis) rasterin nodata/gecerlilik/deger ozetini
     okur -- yalnizca metadata/dogrulama icin, hicbir dosya YAZMAZ."""
@@ -109,12 +279,24 @@ def _read_source_raster_stats(path: Path) -> dict:
     }
 
 
-def validate_modis_source_rasters(core_features: list[dict]) -> dict:
+def validate_modis_source_rasters(
+    core_features: list[dict],
+    *,
+    experiment_id: str | None = None,
+    legacy_modis_compatibility: "LegacyModisCompatibilityAttestation | None" = None,
+) -> dict:
     """
     Deney-farkında (Kozan-dışı) çalıştırmalarda, MODIS mean/std kaynak
     rasterlarını BİLİNEAR HİZALAMADAN ÖNCE doğrular. Herhangi bir kural
     ihlal edilirse Step7BModisValidationError (SystemExit) fırlatır --
     hizalama/örnekleme HİÇ ÇALIŞMAZ.
+
+    `legacy_modis_compatibility` VARSAYILAN OLARAK None'dır: davranış strict'tir
+    ve mevcut tüm çağıranlar (CLI dahil) etkilenmez. Yalnızca geçerli bir
+    :class:`LegacyModisCompatibilityAttestation` verildiğinde -- yani beklenen
+    yollar ve SHA-256 hash'leri O AN doğrulandığında -- Kural 1 askıya alınır.
+    Bu, sıfırın fiziksel olarak geçerli olduğunu İLAN ETMEZ; yalnızca donmuş
+    tarihsel Step7 davranışını yeniden üretir. Kural 2/3/4 aynen uygulanır.
 
     Kurallar:
         1) nodata TANIMSIZ VE "geçerli" piksellerin şüpheli bir oranı tam
@@ -136,20 +318,50 @@ def validate_modis_source_rasters(core_features: list[dict]) -> dict:
     if mean_path is None:
         return {}
 
+    std_path = by_name.get(MODIS_STD_FEATURE_NAME)
+
     mean_stats = _read_source_raster_stats(mean_path)
     zero_fraction = (
         mean_stats["exact_zero_count_among_valid"] / mean_stats["source_valid_count"]
         if mean_stats["source_valid_count"] else 0.0
     )
-    if mean_stats["source_nodata"] is None and zero_fraction > STEP7B_MODIS_SUSPICIOUS_ZERO_FRACTION:
-        raise Step7BModisValidationError(
-            f"MODIS mean girdisi ({mean_path}) HİÇBİR nodata tanımlamıyor VE "
-            f"'geçerli' piksellerinin %{zero_fraction * 100:.1f}'i tam 0.0 -- "
-            "bu, Step7B'nin reddetmesi gereken deniz/gözlemsiz bölge "
-            "sıfır-doldurma imzasıdır (0.0 fiziksel olarak geçerli bir "
-            "Celsius değeri olduğu için sessizce kabul edilemez). MODIS'i "
-            "açık bir nodata değeriyle yeniden export edin: "
-            "python scripts/prepare_modis_for_step7.py --export --force"
+    zero_fill_signature = (
+        mean_stats["source_nodata"] is None
+        and zero_fraction > STEP7B_MODIS_SUSPICIOUS_ZERO_FRACTION
+    )
+    zero_fill_guard = {
+        "rule": "no_nodata_zero_fill_signature",
+        "threshold": STEP7B_MODIS_SUSPICIOUS_ZERO_FRACTION,
+        "observed_zero_fraction": zero_fraction,
+        "signature_present": zero_fill_signature,
+        "mode": "strict_default_guard",
+        "waived": False,
+    }
+    if zero_fill_signature:
+        required = {MODIS_MEAN_FEATURE_NAME: mean_path}
+        if std_path is not None:
+            required[MODIS_STD_FEATURE_NAME] = std_path
+        waiver = _authorize_zero_fill_waiver(
+            legacy_modis_compatibility, experiment_id, required,
+        )
+        if waiver is None:
+            raise Step7BModisValidationError(
+                f"MODIS mean girdisi ({mean_path}) HİÇBİR nodata tanımlamıyor VE "
+                f"'geçerli' piksellerinin %{zero_fraction * 100:.1f}'i tam 0.0 -- "
+                "bu, Step7B'nin reddetmesi gereken deniz/gözlemsiz bölge "
+                "sıfır-doldurma imzasıdır (0.0 fiziksel olarak geçerli bir "
+                "Celsius değeri olduğu için sessizce kabul edilemez). MODIS'i "
+                "açık bir nodata değeriyle yeniden export edin: "
+                "python scripts/prepare_modis_for_step7.py --export --force"
+            )
+        zero_fill_guard.update({
+            "mode": waiver["mode"], "waived": True, "waiver": waiver,
+        })
+        log.warning(
+            "[step7b] MODIS zero-fill guard WAIVED under %s for experiment=%s "
+            "(attestation=%s). No raster value/mask/dtype/grid is changed; zero "
+            "is NOT declared a valid MODIS LST value.",
+            waiver["mode"], experiment_id, waiver["attestation_id"] or "<unnamed>",
         )
 
     if mean_stats["source_valid_count"] and (
@@ -163,9 +375,14 @@ def validate_modis_source_rasters(core_features: list[dict]) -> dict:
             f"(min={mean_stats['source_min']}, max={mean_stats['source_max']})."
         )
 
-    diagnostics = {MODIS_MEAN_FEATURE_NAME: {**mean_stats, "validation_status": "passed"}}
+    diagnostics = {
+        MODIS_MEAN_FEATURE_NAME: {
+            **mean_stats,
+            "validation_status": "passed",
+            "zero_fill_guard": zero_fill_guard,
+        }
+    }
 
-    std_path = by_name.get(MODIS_STD_FEATURE_NAME)
     if std_path is not None:
         std_stats = _read_source_raster_stats(std_path)
         if std_stats["source_valid_count"] and std_stats["source_min"] is not None and std_stats["source_min"] < 0:
@@ -181,7 +398,11 @@ def validate_modis_source_rasters(core_features: list[dict]) -> dict:
                 f"{mean_stats['shape_hw']}/{mean_stats['transform']}, "
                 f"std shape/transform={std_stats['shape_hw']}/{std_stats['transform']})."
             )
-        diagnostics[MODIS_STD_FEATURE_NAME] = {**std_stats, "validation_status": "passed"}
+        diagnostics[MODIS_STD_FEATURE_NAME] = {
+            **std_stats,
+            "validation_status": "passed",
+            "zero_fill_guard": zero_fill_guard,
+        }
 
     return diagnostics
 
@@ -1123,7 +1344,14 @@ def main(
     include_optional_tvdi: bool = STEP7B_INCLUDE_OPTIONAL_TVDI_FEATURES,
     include_optional_anomaly: bool = STEP7B_INCLUDE_OPTIONAL_ANOMALY_FEATURES,
     ctx: dict | None = None,
+    legacy_modis_compatibility: "LegacyModisCompatibilityAttestation | None" = None,
 ) -> dict:
+    """`legacy_modis_compatibility` DEFAULTS TO None -> strict MODIS validation.
+
+    It is never set by the CLI and has no command-line flag; only a caller that
+    can produce a hash-verified :class:`LegacyModisCompatibilityAttestation` can
+    reach the narrow historical-compatibility path.
+    """
     log.info("=" * 60)
     log.info(
         "STEP 7B BAŞLIYOR (MODIS downscaling training dataset)%s",
@@ -1187,7 +1415,11 @@ def main(
         # bu kontrole HİÇ TABİ TUTULMAZ. Herhangi bir kural ihlalinde
         # Step7BModisValidationError (SystemExit) fırlatılır -- hizalama HİÇ
         # ÇALIŞMAZ.
-        modis_source_diagnostics = validate_modis_source_rasters(core_features)
+        modis_source_diagnostics = validate_modis_source_rasters(
+            core_features,
+            experiment_id=ctx.get("experiment_id"),
+            legacy_modis_compatibility=legacy_modis_compatibility,
+        )
 
         log.info("Deney-farkında girdi hizalama başlıyor (aligned_inputs/)...")
         core_features, optional_features, alignment_diagnostics = align_features_to_reference(
@@ -1325,6 +1557,10 @@ def main(
         "summary_path": str(summary_path),
         "output_files": out_result.get("output_files"),
         "experiment_id": ctx["experiment_id"] if ctx else None,
+        "modis_compatibility_mode": (
+            legacy_modis_compatibility.mode
+            if legacy_modis_compatibility is not None else "strict_default_guard"
+        ),
     }
 
 
@@ -1337,6 +1573,10 @@ def run_step7b(ctx: dict | None = None, force: bool = False, **kwargs) -> dict:
         yazar ve tum girdileri (target/NDVI/anomaly/TVDI) namespaced
         Step5/Step5C'den okur (DEM shared/read-only, landcover Step6A
         gate-input'undan -- bkz. build_feature_registry docstring).
+
+    kwargs icinde OPSIYONEL `legacy_modis_compatibility` gecirilebilir; verilmezse
+    (varsayilan) MODIS dogrulamasi STRICT kalir. Bkz.
+    :class:`LegacyModisCompatibilityAttestation`.
     """
     global OUTPUTS_DIR
 

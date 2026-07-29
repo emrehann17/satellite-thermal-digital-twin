@@ -156,7 +156,10 @@ def build_synthesis(
             if record is None:
                 return schema_adapters.unavailable_large_block_robustness(unavailable_reason)
             resolved_inputs.append(record)
-            if record["resolution_method"] == "generic_per_experiment_schema":
+            if record["resolution_method"] in {
+                "generic_per_experiment_schema",
+                "versioned_per_experiment_schema",
+            }:
                 return schema_adapters.adapt_large_block_robustness_generic(raw, experiment_id)
             return schema_adapters.adapt_large_block_robustness_legacy(raw, experiment_id)
 

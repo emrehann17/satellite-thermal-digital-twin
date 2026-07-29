@@ -37,6 +37,13 @@ from core.regions import get_experiment_output_root
 
 PRIMARY_POPULATION = "burnable_tree_shrub_grass"
 
+# Per-experiment big-block robustness namespaces, most specific first. The
+# versioned namespace holds a rerun bound to regenerated Step8 inputs; the
+# default namespace holds the original per-experiment run. Neither is ever
+# written by the resolver -- this is a read priority only.
+VERSIONED_BIG_BLOCK_NAMESPACE = "step8_big_blocks_v2"
+DEFAULT_BIG_BLOCK_NAMESPACE = "step8_big_blocks"
+
 
 class InputResolutionError(Exception):
     """Raised when a required frozen input cannot be found, is ambiguous,
@@ -245,17 +252,36 @@ def resolve_large_block_robustness(
     experiment_id: str, other_experiment_ids: list[str]
 ) -> tuple[Optional[dict], Optional[dict], Optional[str]]:
     """Returns (record, raw_payload, unavailable_reason). Exactly one of
-    (record/raw_payload) or (unavailable_reason) is non-None."""
-    generic_path = (
-        get_experiment_output_root(experiment_id)
-        / "robustness" / "step8_big_blocks" / "comparison" / "big_block_robustness_summary.json"
+    (record/raw_payload) or (unavailable_reason) is non-None.
+
+    Resolution priority, most specific first:
+      1. versioned per-experiment namespace  (`step8_big_blocks_v2`)
+      2. default per-experiment namespace    (`step8_big_blocks`)
+      3. legacy pair-relative families
+
+    Tier 1 exists so an experiment whose Step8 inputs were regenerated can
+    carry a rerun bound to the NEW inputs without overwriting the frozen
+    artefacts of the older run. Both per-experiment tiers are read from the
+    experiment's OWN output root and their declared `experiment_id` is
+    verified, so a versioned rerun for one AOI can never be served for
+    another.
+    """
+    experiment_root = get_experiment_output_root(experiment_id) / "robustness"
+    per_experiment_tiers = (
+        (VERSIONED_BIG_BLOCK_NAMESPACE, "versioned_per_experiment_schema"),
+        (DEFAULT_BIG_BLOCK_NAMESPACE, "generic_per_experiment_schema"),
     )
-    if generic_path.is_file():
+    for namespace, resolution_method in per_experiment_tiers:
+        generic_path = (
+            experiment_root / namespace / "comparison" / "big_block_robustness_summary.json"
+        )
+        if not generic_path.is_file():
+            continue
         raw = _read_json(generic_path)
         if raw.get("experiment_id") != experiment_id:
             raise InputResolutionError(
                 "large_block_robustness",
-                f"Generic big-block robustness file at {generic_path} declares "
+                f"Big-block robustness file at {generic_path} declares "
                 f"experiment_id='{raw.get('experiment_id')}', expected '{experiment_id}'.",
             )
         record = _record(
@@ -263,12 +289,13 @@ def resolve_large_block_robustness(
             path=generic_path,
             schema_version=raw.get("report_schema_version"),
             analysis_id=raw.get("analysis_id"),
-            resolution_method="generic_per_experiment_schema",
+            resolution_method=resolution_method,
             source_experiment_id=experiment_id,
             primary_population=raw.get("primary_population"),
         )
         record["artifact_scope"] = "per_experiment"
         record["extraction_key"] = "$"
+        record["namespace"] = namespace
         return record, raw, None
 
     legacy_root = PROJECT_ROOT / "outputs" / "robustness"

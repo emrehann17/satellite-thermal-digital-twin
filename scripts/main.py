@@ -283,6 +283,7 @@ def cmd_step8_big_block_robustness(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             force=args.force,
             regenerate_reports_only=args.regenerate_reports_only,
+            output_root=args.output_root,
         )
     except SystemExit as exc:
         return _fail("step8-big-block-robustness", exc)
@@ -310,6 +311,7 @@ def cmd_concept_shift(args: argparse.Namespace) -> int:
             result = orch.run_concept_shift_stage(
                 source_id=args.source, target_id=args.target,
                 dry_run=args.dry_run, force=args.force,
+                output_root=args.output_root,
             )
     except SystemExit as exc:
         return _fail("concept-shift", exc)
@@ -355,6 +357,106 @@ def cmd_transfer_synthesis(args: argparse.Namespace) -> int:
     if args.dry_run:
         print(json.dumps(result, indent=2, default=str))
     log.info("[transfer-synthesis] tamamlandı: ran=%s canonical_set_id=%s", result.get("ran"), result.get("canonical_set_id"))
+    return 0
+
+
+def cmd_evia_signed_auc(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_evia_signed_auc_stage(
+            experiment_id=args.experiment,
+            bootstrap_replicates=args.bootstrap_replicates,
+            seed=args.seed,
+            dry_run=args.dry_run,
+            force=args.force,
+        )
+    except SystemExit as exc:
+        return _fail("evia-signed-auc", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("evia-signed-auc", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info(
+        "[evia-signed-auc] tamamlandı: ran=%s experiment=%s support=%s",
+        result.get("ran"), result.get("experiment_id"), result.get("support_counts"),
+    )
+    return 0
+
+
+def cmd_transfer_decomposition(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_transfer_decomposition_stage(
+            aois=args.aoi,
+            bootstrap_replicates=args.bootstrap_replicates,
+            seed=args.seed,
+            dry_run=args.dry_run,
+            force=args.force,
+        )
+    except SystemExit as exc:
+        return _fail("transfer-decomposition", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("transfer-decomposition", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info(
+        "[transfer-decomposition] tamamlandı: ran=%s canonical_set_id=%s rows=%s",
+        result.get("ran"), result.get("canonical_set_id"), result.get("n_rows"),
+    )
+    return 0
+
+
+def cmd_frozen_hash_inventory(args: argparse.Namespace) -> int:
+    try:
+        from src.provenance_audit import build_frozen_hash_inventory, diff_frozen_hash_inventory
+
+        if args.phase == "diff":
+            result = diff_frozen_hash_inventory()
+            ok = result["passes"]
+        else:
+            result = build_frozen_hash_inventory(args.phase)
+            ok = True
+    except SystemExit as exc:
+        return _fail("frozen-hash-inventory", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("frozen-hash-inventory", exc)
+    print(json.dumps({k: v for k, v in result.items() if k != "entries"}, indent=2, default=str))
+    log.info("[frozen-hash-inventory] tamamlandı: phase=%s", args.phase)
+    if args.phase == "diff" and not ok:
+        log.error(
+            "[frozen-hash-inventory] BEKLENMEYEN degisiklik: %s",
+            result.get("unexpected_change_count"),
+        )
+        return 1
+    return 0
+
+
+def cmd_manavgat_hash_audit(args: argparse.Namespace) -> int:
+    try:
+        from src.provenance_audit import run_manavgat_single_step8a_hash_audit
+
+        result = run_manavgat_single_step8a_hash_audit(experiment_id=args.experiment)
+    except SystemExit as exc:
+        return _fail("manavgat-step8a-hash-audit", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("manavgat-step8a-hash-audit", exc)
+    print(json.dumps({k: v for k, v in result.items() if k != "records"}, indent=2, default=str))
+    log.info(
+        "[manavgat-step8a-hash-audit] status=%s unique_hashes=%s",
+        result["status"], result["unique_hash_count"],
+    )
+    return 0 if result["passes"] else 1
+
+
+def cmd_old_new_deltas(args: argparse.Namespace) -> int:
+    try:
+        from src.old_new_metric_deltas import build as build_deltas
+
+        result = build_deltas(aois=args.aoi)
+    except SystemExit as exc:
+        return _fail("old-new-deltas", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("old-new-deltas", exc)
+    print(json.dumps(result, indent=2, default=str))
+    log.info("[old-new-deltas] tamamlandı: rows=%s", result.get("row_count"))
     return 0
 
 
@@ -466,7 +568,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=EPILOG_EXAMPLES,
     )
-    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,step10,step8-robustness,large-block-robustness,step8-big-block-robustness,concept-shift,concept-shift-compare,transfer-synthesis,burned-pattern-audit,domain-classifier-audit,legacy}")
+    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,step10,step8-robustness,large-block-robustness,step8-big-block-robustness,concept-shift,concept-shift-compare,transfer-synthesis,evia-signed-auc,transfer-decomposition,frozen-hash-inventory,manavgat-step8a-hash-audit,old-new-deltas,burned-pattern-audit,domain-classifier-audit,legacy}")
 
     # --- experiment ---
     p_exp = subparsers.add_parser(
@@ -690,6 +792,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_big_block.add_argument("--force", action="store_true", help="Yalnızca downstream robustness çıktılarını üzerine yaz; preregistration'ı veya orijinal Step8 çıktılarını asla yeniden yazma.")
     p_big_block.add_argument("--dry-run", action="store_true", help="Dondurulmuş planı çöz ve bas; fit/bootstrap yapma, bilimsel çıktı yazma.")
     p_big_block.add_argument(
+        "--output-root", default=None,
+        help=(
+            "Sürümlenmiş çıktı namespace'i (örn. outputs/experiments/manavgat_2021/"
+            "robustness/step8_big_blocks_v2). Yalnızca NEREYE yazıldığını değiştirir; "
+            "population, blok boyutları, bootstrap/seed ve model sözleşmesi AYNI kalır. "
+            "Verilmezse varsayılan .../robustness/step8_big_blocks kullanılır ve mevcut "
+            "v1/legacy artefactlara asla yazılmaz."
+        ),
+    )
+    p_big_block.add_argument(
         "--regenerate-reports-only", action="store_true",
         help=(
             "Rapor-only mod: yalnızca önceki tam çalıştırmanın dondurulmuş "
@@ -752,6 +864,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_concept.add_argument("--force", action="store_true", help="İlgili çıktılar zaten varsa üzerine yaz (orijinal frozen Step9G sayısal çıktıları HARİÇ -- onlar değişmez).")
     p_concept.add_argument("--dry-run", action="store_true", help="Hiçbir AUC/bootstrap hesaplama, hiçbir dosya yazma; yalnızca planı bas.")
+    p_concept.add_argument(
+        "--output-root", default=None,
+        help=(
+            "Sürümlenmiş çıktı namespace'i. Step9G preregistration'ı IMMUTABLE'dır "
+            "ve tükettiği Step8A girdilerinin hash'ine bağlıdır; girdiler yeniden "
+            "üretildiğinde eski preregistration kaçınılmaz olarak uyuşmaz. Bu bayrak "
+            "YENİ bir dizine yazar; eski dizin ve preregistration DEĞİŞTİRİLMEZ, "
+            "silinmez. Bilimsel ayarların hiçbiri değişmez."
+        ),
+    )
     p_concept.set_defaults(func=cmd_concept_shift)
 
     # --- concept-shift-compare ---
@@ -816,6 +938,137 @@ def build_parser() -> argparse.ArgumentParser:
     p_transfer_synthesis.add_argument("--force", action="store_true", help="Çıktı dizini zaten doluysa üzerine yaz.")
     p_transfer_synthesis.add_argument("--dry-run", action="store_true", help="Hiçbir dosya yazma; yalnızca çözümlenen plan/girdileri (ve varsa eksik/çelişkili girdileri) bas.")
     p_transfer_synthesis.set_defaults(func=cmd_transfer_synthesis)
+
+    # --- evia-signed-auc ---
+    p_signed_auc = subparsers.add_parser(
+        "evia-signed-auc",
+        help="REPORT-ONLY signed-AUC (2*AUC-1) spatial-block bootstrap for one experiment.",
+        description=(
+            "Scientific purpose: express each predictor's RAW univariate ROC-AUC "
+            "on the signed effect scale signed_auc = 2*AUC-1 and report it with "
+            "~5 km spatial-block bootstrap uncertainty, over the canonical "
+            "primary population burnable_tree_shrub_grass. The AUC is NEVER "
+            "inverted, so a feature whose high values rank UNBURNED cells higher "
+            "keeps a negative signed value. The CI is taken from the "
+            "REPLICATE-LEVEL signed distribution. REPORT-ONLY -- reads the frozen "
+            "Step8A dataset and the frozen Step9G univariate tables, and never "
+            "runs modeling, adaptation, prediction or Step10. Writes under "
+            "outputs/diagnostics/evia_signed_auc_bootstrap/<experiment_id>/. "
+            "Delegates to src/evia_signed_auc_bootstrap.py."
+        ),
+    )
+    p_signed_auc.add_argument(
+        "--experiment", default="evia_2021_extended",
+        help="Kanonik deney kimliği (varsayılan: evia_2021_extended).",
+    )
+    p_signed_auc.add_argument(
+        "--bootstrap-replicates", type=int, default=1000,
+        help="Ön-kayıtlı replicate sayısı; sözleşmeden farklı bir değer reddedilir.",
+    )
+    p_signed_auc.add_argument(
+        "--seed", type=int, default=42,
+        help="Ön-kayıtlı seed; sözleşmeden farklı bir değer reddedilir.",
+    )
+    p_signed_auc.add_argument("--force", action="store_true", help="Çıktı dizini zaten doluysa üzerine yaz.")
+    p_signed_auc.add_argument("--dry-run", action="store_true", help="Hiçbir dosya yazma; yalnızca çözümlenen plan/girdileri bas.")
+    p_signed_auc.set_defaults(func=cmd_evia_signed_auc)
+
+    # --- transfer-decomposition ---
+    p_decomp = subparsers.add_parser(
+        "transfer-decomposition",
+        help="REPORT-ONLY multi-AOI transfer gap/recovery decomposition from frozen Step10.",
+        description=(
+            "Scientific purpose: recompute the transfer decomposition "
+            "(raw_gap, adaptation_effect, remaining_gap, recovered_fraction, "
+            "remaining_fraction) for every ordered direction x model family x "
+            "adaptation method, from ALREADY FROZEN Step8B/Step9B/Step10 "
+            "artefacts. Negative recovery is reported as such and NEVER clipped "
+            "to zero; fractions are suppressed only when raw_gap <= 0. "
+            "REPORT-ONLY -- never re-runs models, adaptation, predictions or the "
+            "Step10 bootstrap. Writes under "
+            "outputs/diagnostics/four_aoi_transfer_decomposition/"
+            "<canonical_set_id>/. Delegates to src/transfer_decomposition.py."
+        ),
+    )
+    p_decomp.add_argument(
+        "--aoi", action="append", required=True, dest="aoi",
+        help="AOI experiment ID (core/regions.py EXPERIMENTS kaydı). Tekrarlanabilir.",
+    )
+    p_decomp.add_argument(
+        "--bootstrap-replicates", type=int, default=1000,
+        help="Frozen Step10 replicate sayısı beklentisi; uyuşmazlık raporlanır.",
+    )
+    p_decomp.add_argument(
+        "--seed", type=int, default=42,
+        help="Frozen Step10 seed beklentisi; uyuşmazlık raporlanır.",
+    )
+    p_decomp.add_argument("--force", action="store_true", help="Çıktı dizini zaten doluysa üzerine yaz.")
+    p_decomp.add_argument("--dry-run", action="store_true", help="Hiçbir dosya yazma; yalnızca çözümlenen plan/girdileri bas.")
+    p_decomp.set_defaults(func=cmd_transfer_decomposition)
+
+    # --- frozen-hash-inventory ---
+    p_inventory = subparsers.add_parser(
+        "frozen-hash-inventory",
+        help="READ-ONLY content-hash inventory of frozen scientific artefacts (before/after/diff).",
+        description=(
+            "Scientific purpose: record the SHA-256 of every frozen Step8/Step9/"
+            "Step9E/Step9G/Step10 and synthesis artefact so that any change -- "
+            "including one caused by running the test suite -- is detectable. "
+            "Run with --phase before, then again with --phase after, then "
+            "--phase diff. The diff separates expected changes (Manavgat-dependent "
+            "reruns) from unexpected ones (anything in the Bejis/Mugla/Evia "
+            "triangle). --phase diff exits non-zero if any unexpected change or "
+            "disappearance is found. Writes only under "
+            "outputs/diagnostics/advisor_followup_provenance/."
+        ),
+    )
+    p_inventory.add_argument(
+        "--phase", required=True, choices=["before", "after", "diff"],
+        help="'before'/'after' yazar; 'diff' ikisini karsilastirir ve beklenmeyen degisiklikte 1 doner.",
+    )
+    p_inventory.set_defaults(func=cmd_frozen_hash_inventory)
+
+    # --- manavgat-step8a-hash-audit ---
+    p_hash_audit = subparsers.add_parser(
+        "manavgat-step8a-hash-audit",
+        help="READ-ONLY audit: every Manavgat consumer must record ONE Step8A content hash.",
+        description=(
+            "Scientific purpose: prove that every artefact consuming Manavgat's "
+            "Step8A dataset (Step8B-E, versioned large-block robustness, and the "
+            "Step9A-D/9E/9G/Step10 chains of all three Manavgat pairs) was built "
+            "against a single Step8A content hash. The expected hash is COMPUTED "
+            "from the canonical file on disk, never hard-coded. Artefacts that do "
+            "not record Step8A provenance are reported as such and force "
+            "'incomplete_provenance' -- the hash is never inferred for them. "
+            "Exits non-zero unless the unique hash count is exactly 1."
+        ),
+    )
+    p_hash_audit.add_argument(
+        "--experiment", default="manavgat_2021",
+        help="Denetlenecek deney kimligi (varsayilan: manavgat_2021).",
+    )
+    p_hash_audit.set_defaults(func=cmd_manavgat_hash_audit)
+
+    # --- old-new-deltas ---
+    p_deltas = subparsers.add_parser(
+        "old-new-deltas",
+        help="READ-ONLY old-vs-new transfer metric delta report around the Manavgat repair.",
+        description=(
+            "Scientific purpose: compare the preserved pre-repair four-AOI "
+            "decomposition against the regenerated one, per direction x model "
+            "family x adaptation method x metric. When an old artefact was not "
+            "preserved the row is emitted with comparison_available=false and an "
+            "explicit unavailable_reason -- values are never invented. Brier is "
+            "reported as unavailable because it is not preregistered for the "
+            "Step10 adapted models. Writes only under "
+            "outputs/diagnostics/advisor_followup_provenance/."
+        ),
+    )
+    p_deltas.add_argument(
+        "--aoi", action="append", required=True, dest="aoi",
+        help="AOI experiment ID (tekrarlanabilir); yeniden uretilmis decomposition ile ayni kume olmali.",
+    )
+    p_deltas.set_defaults(func=cmd_old_new_deltas)
 
     # --- burned-pattern-audit ---
     p_burned_pattern = subparsers.add_parser(

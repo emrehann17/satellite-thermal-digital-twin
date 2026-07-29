@@ -1748,6 +1748,60 @@ def write_cell_preview_geojson(df: pd.DataFrame, result: dict, output_dir: Path,
 # =============================================================================
 # Stats / summary writers
 # =============================================================================
+BURNABLE_MASK_COLUMNS = ("burnable_tree_shrub_grass", "burnable_tree_shrub")
+
+BURNABLE_COUNT_POPULATION_SEMANTICS = {
+    "burnable_tree_shrub_grass_count": (
+        "LEGACY field: counted over ALL grid rows, including "
+        "valid_for_modeling == False. Retained unchanged for "
+        "backward compatibility. Do NOT report it as the modeling "
+        "population."
+    ),
+    "burnable_diagnostics_population": (
+        "Describes the landcover diagnostics block above, NOT the "
+        "burnable_*_count fields."
+    ),
+    "canonical_downstream_population": (
+        "burnable_tree_shrub_grass AND valid_for_modeling == True "
+        "-- this is what Step8B/Step9/Step10 and the multi-AOI "
+        "synthesis actually consume; see "
+        "burnable_tree_shrub_grass_count_valid_for_modeling."
+    ),
+}
+
+
+def burnable_counts_by_population_fields(df) -> dict[str, int | None]:
+    """Burnable-mask counts on BOTH populations (report-layer only).
+
+    `burnable_tree_shrub_grass_count` has always been accumulated over ALL
+    grid rows, including `valid_for_modeling == False`. The neighbouring
+    `burnable_diagnostics_population` field describes the landcover
+    diagnostics block, not these counts, so the two read as if the counts
+    were validity-filtered when they are not. This emits both populations
+    under unambiguous names; `write_stats` then states which one downstream
+    consumes.
+
+    Pure and side-effect free so the semantics can be verified without
+    regenerating a modeling dataset. A count is None when the frame is
+    absent or does not carry that mask column -- never 0, which would be
+    indistinguishable from a genuinely empty mask. No label, predictor or
+    population used by Step8B/Step9/Step10 changes.
+    """
+    def _count(mask_column: str, valid_only: bool) -> int | None:
+        if df is None or mask_column not in df.columns:
+            return None
+        mask = df[mask_column].astype(bool)
+        if valid_only:
+            mask &= df["valid_for_modeling"].astype(bool)
+        return int(mask.sum())
+
+    fields: dict[str, int | None] = {}
+    for column in BURNABLE_MASK_COLUMNS:
+        fields[f"{column}_count_all_rows"] = _count(column, False)
+        fields[f"{column}_count_valid_for_modeling"] = _count(column, True)
+    return fields
+
+
 def write_stats(
     output_dir: Path,
     result: dict,
@@ -1764,6 +1818,9 @@ def write_stats(
     pre_label_exclusion_manifest_path: str | None = None,
 ) -> Path:
     burnable_diag = result.get("burnable_landcover_diagnostics", {}) or {}
+    burnable_counts_by_population = burnable_counts_by_population_fields(
+        result.get("dataframe")
+    )
     with rasterio.open(reference_path) as ref:
         ref_info = {
             "path": str(reference_path), "width": ref.width, "height": ref.height,
@@ -1825,6 +1882,9 @@ def write_stats(
         "primary_burnable_mask": burnable_diag.get("primary_burnable_mask"),
         "burned_count_within_primary_burnable_mask": burnable_diag.get("burned_count_within_primary_burnable_mask"),
         "burnable_diagnostics_population": burnable_diag.get("diagnostics_population"),
+        # Explicit, unambiguous burnable-mask counts per population.
+        **burnable_counts_by_population,
+        "burnable_count_population_semantics": dict(BURNABLE_COUNT_POPULATION_SEMANTICS),
         "feature_missing_counts": counters["feature_missing_counts"],
         "feature_valid_counts": counters["feature_valid_counts"],
         "predictor_paths": {k: str(v) for k, v in predictor_paths.items()},

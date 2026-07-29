@@ -22,7 +22,14 @@ from src.step8_big_block_robustness import (
 def main(
     experiment: str, block_sizes: list[int] | None = None,
     dry_run: bool = False, force: bool = False, regenerate_reports_only: bool = False,
+    output_root: str | Path | None = None,
 ) -> dict:
+    # `output_root` selects a VERSIONED namespace (e.g. .../step8_big_blocks_v2)
+    # without touching the default one. It changes only WHERE the analysis
+    # writes; every scientific setting -- population, block sizes, bootstrap
+    # replicates, seed, model family and hyperparameters -- is unchanged and
+    # still resolved from the frozen Step8 contract.
+    resolved_root = Path(output_root) if output_root else None
     # Dispatched BEFORE anything in run_analysis: no preregistration
     # creation, no runtime scientific-config comparison, no fold
     # construction, no model fitting, no bootstrap setup. Block sizes,
@@ -30,13 +37,15 @@ def main(
     # existing frozen preregistration/manifests, never from block_sizes/
     # CLI defaults -- --regenerate-reports-only ignores --block-sizes.
     if regenerate_reports_only:
-        return regenerate_reports_from_frozen_artifacts(experiment_id=experiment, dry_run=dry_run)
+        return regenerate_reports_from_frozen_artifacts(
+            experiment_id=experiment, dry_run=dry_run, output_root=resolved_root,
+        )
 
     # Normal path: preserved exactly as before.
     return run_analysis(
         experiment_id=experiment,
         block_sizes=list(block_sizes) if block_sizes else list(DEFAULT_BLOCK_SIZES),
-        dry_run=dry_run, force=force,
+        dry_run=dry_run, force=force, output_root=resolved_root,
     )
 
 
