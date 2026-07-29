@@ -481,6 +481,28 @@ def cmd_burned_pattern_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_marginal_aoa(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_marginal_aoa_stage(
+            experiments=args.experiments,
+            all_enabled=args.all_enabled,
+            dry_run=args.dry_run,
+            force=args.force,
+        )
+    except SystemExit as exc:
+        return _fail("marginal-aoa", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("marginal-aoa", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info(
+        "[marginal-aoa] tamamlandı: ran=%s resolved=%s directed_pairs=%s",
+        result.get("ran"), result.get("resolved_experiment_ids"),
+        result.get("directed_pair_count"),
+    )
+    return 0
+
+
 def cmd_domain_classifier_audit(args: argparse.Namespace) -> int:
     try:
         result = orch.run_domain_classifier_audit_stage(
@@ -568,7 +590,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=EPILOG_EXAMPLES,
     )
-    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,step10,step8-robustness,large-block-robustness,step8-big-block-robustness,concept-shift,concept-shift-compare,transfer-synthesis,evia-signed-auc,transfer-decomposition,frozen-hash-inventory,manavgat-step8a-hash-audit,old-new-deltas,burned-pattern-audit,domain-classifier-audit,legacy}")
+    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,step10,step8-robustness,large-block-robustness,step8-big-block-robustness,concept-shift,concept-shift-compare,transfer-synthesis,evia-signed-auc,transfer-decomposition,frozen-hash-inventory,manavgat-step8a-hash-audit,old-new-deltas,burned-pattern-audit,marginal-aoa,domain-classifier-audit,legacy}")
 
     # --- experiment ---
     p_exp = subparsers.add_parser(
@@ -1104,6 +1126,48 @@ def build_parser() -> argparse.ArgumentParser:
     p_burned_pattern.add_argument("--force", action="store_true", help="Overwrite existing outputs already produced by a different analysis_id.")
     p_burned_pattern.add_argument("--dry-run", action="store_true", help="Resolve experiments/inputs and print the plan; no component computation, no files written.")
     p_burned_pattern.set_defaults(func=cmd_burned_pattern_audit)
+
+    # --- marginal-aoa ---
+    p_marginal_aoa = subparsers.add_parser(
+        "marginal-aoa",
+        help="Generic directed, label-blind marginal Area-of-Applicability analysis.",
+        description=(
+            "Scientific purpose: for every ORDERED source->target pair among "
+            "the resolved experiments, report whether each target predictor "
+            "value falls inside the marginal predictor support actually "
+            "OBSERVED in the source AOI (inclusive observed min/max for "
+            "numeric predictors; observed non-missing levels for categorical "
+            "ones). 'Marginal' is literal: each predictor is evaluated on its "
+            "own; this is NOT multivariate joint support and does not assess "
+            "predictor correlation structure. "
+            "LABEL-BLIND: every parquet read uses an explicit allow-list of "
+            "predictor, grid, population-mask and eligibility columns -- "
+            "'burned' and every other label column are never loaded, so the "
+            "result is byte-identical under any change to the target labels. "
+            "Fits no model, produces no prediction, runs no adaptation, CV or "
+            "bootstrap; read-only against Step8A. Direction matters: "
+            "source__target and target__source are distinct analyses with "
+            "distinct output namespaces. Results are DESCRIPTIVE -- being "
+            "inside the source range does not guarantee transfer success, and "
+            "being outside it does not prove it caused transfer failure; no "
+            "statistical significance is claimed. No experiment ID is "
+            "hard-coded. Delegates to "
+            "scripts/run_marginal_area_of_applicability.py / "
+            "src/marginal_area_of_applicability.py."
+        ),
+    )
+    p_marginal_aoa_selection = p_marginal_aoa.add_mutually_exclusive_group(required=True)
+    p_marginal_aoa_selection.add_argument(
+        "--experiments", nargs="+", default=None,
+        help="Explicit experiment_id list (core/regions.py registry entries).",
+    )
+    p_marginal_aoa_selection.add_argument(
+        "--all-enabled", action="store_true",
+        help="Resolve every enabled, non-legacy core/regions.py experiment_id that has a canonical Step8A dataset.",
+    )
+    p_marginal_aoa.add_argument("--force", action="store_true", help="Overwrite existing marginal AoA outputs produced by a different analysis_id (this namespace only).")
+    p_marginal_aoa.add_argument("--dry-run", action="store_true", help="Resolve inputs/schema, list every directed pair and planned output path; no analysis, no files written.")
+    p_marginal_aoa.set_defaults(func=cmd_marginal_aoa)
 
     # --- domain-classifier-audit ---
     p_domain_classifier = subparsers.add_parser(
