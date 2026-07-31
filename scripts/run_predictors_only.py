@@ -631,6 +631,22 @@ def _export_tiled(
     return out_path
 
 
+#: Uzantisi `.tif` OLMAYAN bir filename verilirse geemap.ee_export_image
+#: sessizce (istisnasiz) None doner ve dosya uretmez. Direct export'un gecici
+#: dosyasi bu yuzden `.tif` ile bitmek ZORUNDADIR.
+GEEMAP_REQUIRED_EXPORT_SUFFIX = ".tif"
+
+
+def direct_export_tmp_path(out_path: Path) -> Path:
+    """Direct export'un gecici dosya yolu -- her zaman `.tif` ile biter.
+
+    Nokta-onekli (gizli) ve `out_path` ile AYNI dizinde kalir, boylece
+    `_atomic_replace` ayni dosya sisteminde atomik olarak calisir.
+    """
+    out_path = Path(out_path)
+    return out_path.parent / f".{out_path.stem}.direct.tmp{GEEMAP_REQUIRED_EXPORT_SUFFIX}"
+
+
 def export_image_direct_or_tiled(
     image,
     out_path: Path,
@@ -765,7 +781,21 @@ def export_image_direct_or_tiled(
         )
     else:
         log.info("Direct export attempt: [%s] tam AOI, tiled olmayan export -> %s", label, out_path)
-        tmp_direct_path = out_path.parent / f".{out_path.name}.direct.tmp"
+        # REGRESSION FIX: geemap.ee_export_image REDDEDER (istisna FIRLATMADAN,
+        # yalnizca "The filename must end with .tif" basip None doner) bir
+        # filename'i uzantisi `.tif` DEGILSE. Eski gecici ad
+        # `.<name>.tif.direct.tmp` idi -- uzantisi `.tmp` oldugu icin HER direct
+        # export sessizce dosya uretmiyor, `_file_ok` False donuyor ve HER
+        # export gereksiz yere tiled fallback'e dusuyordu (prelabel export
+        # logunda gozlenen davranis tam olarak budur). Tiled yol bundan
+        # etkilenmiyordu, cunku tile adlari zaten `..._tile_rX_cY.tif` ile
+        # bitiyor (bkz. _export_tiled).
+        #
+        # Gecici ad artik `.tif` ile BITER; hala nokta-onekli (gizli), hala
+        # ayni dizinde ve hala `_atomic_replace` ile tasiniyor -- atomiklik,
+        # nodata damgalama ve hizalama QA davranisi DEGISMEDI. Bilimsel
+        # icerik/reducer bu duzeltmeden ETKILENMEZ.
+        tmp_direct_path = direct_export_tmp_path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             geemap.ee_export_image(

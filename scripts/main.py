@@ -10,7 +10,7 @@ runner'lara devredilir (bkz. core/pipeline_orchestrator.py):
 
     experiment   -> gate / predictors / step7 / seam-audit / step8 asama zinciri
                     (core/pipeline_orchestrator.py -> scripts/run_label_gate_only.py,
-                    scripts/run_predictors_only.py,
+                    cscripts/run_predictors_only.py,
                     scripts/run_step7_downscaling_only.py,
                     scripts/run_step8_modeling.py)
     transfer     -> Step9A-D cross-region transfer
@@ -29,7 +29,7 @@ CLI:
 
     python scripts/main.py experiment \\
       --experiment manavgat_2021 --from-stage predictors --to-stage step8 \\
-      --predictor-mode local-only --dry-run
+      --predictor-mode local-only --dry-run 
 
     python scripts/main.py experiment \\
       --experiment bejis_2022 --from-stage predictors --to-stage step8 \\
@@ -503,6 +503,99 @@ def cmd_marginal_aoa(args: argparse.Namespace) -> int:
     return 0
 
 
+from src.window_closure_sensitivity import (
+    DEFAULT_SHIFTS as _WINDOW_CLOSURE_DEFAULT_SHIFTS,
+    STAGES as _WINDOW_CLOSURE_STAGES,
+)
+
+
+def cmd_window_closure_sensitivity(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_window_closure_sensitivity_stage(
+            experiment_id=args.experiment,
+            shifts=args.shifts,
+            from_stage=args.from_stage,
+            to_stage=args.to_stage,
+            dry_run=args.dry_run,
+            force=args.force,
+            resume=args.resume,
+        )
+    except SystemExit as exc:
+        return _fail("window-closure-sensitivity", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("window-closure-sensitivity", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info(
+        "[window-closure-sensitivity] tamamlandı: ran=%s experiment=%s shifts=%s",
+        result.get("ran"), args.experiment, args.shifts,
+    )
+    if result.get("ran"):
+        log.info(
+            "[window-closure-sensitivity] stages=%s analysis_id=%s "
+            "files_written=%s reused=%s",
+            result.get("stages_run"), result.get("analysis_id"),
+            result.get("files_written_count"), result.get("reused"),
+        )
+        if result.get("exported_variants") is not None:
+            log.info(
+                "[window-closure-sensitivity] predictor-export: processed=%s "
+                "exported=%s reused=%s roles=%s rasters=%s "
+                "canonical_export_attempted=%s",
+                result.get("processed_variants"), result.get("exported_variants"),
+                result.get("reused_variants"), result.get("logical_roles_produced"),
+                result.get("predictor_rasters_produced"),
+                result.get("canonical_export_attempted"),
+            )
+        if result.get("completed_variants") is not None:
+            log.info(
+                "[window-closure-sensitivity] local-downstream: processed=%s "
+                "completed=%s reused=%s artifacts=%s step8a_datasets=%s "
+                "canonical_downstream_attempted=%s common_cohort_created=%s "
+                "model_fit=%s bootstrap_run=%s",
+                result.get("processed_variants"), result.get("completed_variants"),
+                result.get("reused_variants"),
+                result.get("downstream_artifacts_produced"),
+                result.get("step8a_datasets_produced"),
+                result.get("canonical_downstream_attempted"),
+                result.get("common_cohort_created"),
+                result.get("model_fit"), result.get("bootstrap_run"),
+            )
+        if result.get("model_stage_metadata") is not None:
+            metadata = result.get("model_stage_metadata") or {}
+            log.info(
+                "[window-closure-sensitivity] model: reused=%s evaluations=%s "
+                "cohort_rows=%s prevalence=%s folds=%s "
+                "fire_risk_model_fit=%s downscaling_model_fit=%s "
+                "bootstrap_run=%s compare_run=%s",
+                result.get("model_reused"),
+                metadata.get("model_evaluation_count"),
+                (metadata.get("common_cohort") or {}).get("final_common_cohort_rows"),
+                (metadata.get("common_cohort") or {}).get("prevalence"),
+                (metadata.get("shared_folds") or {}).get("fold_count"),
+                result.get("fire_risk_model_fit"),
+                result.get("downscaling_model_fit"),
+                result.get("bootstrap_run"), result.get("compare_run"),
+            )
+        if result.get("compare_stage_metadata") is not None:
+            metadata = result.get("compare_stage_metadata") or {}
+            log.info(
+                "[window-closure-sensitivity] compare: reused=%s "
+                "point_metrics=%s contributions=%s bootstrap_rows=%s "
+                "evidence=%s model_fit=%s bootstrap_run=%s compare_run=%s",
+                result.get("compare_reused"),
+                metadata.get("point_metric_row_count"),
+                metadata.get("thermal_contribution_row_count"),
+                metadata.get("bootstrap_summary_row_count"),
+                metadata.get("evidence_status_counts"),
+                result.get("model_fit"), result.get("bootstrap_run"),
+                result.get("compare_run"),
+            )
+        for path in result.get("files_written") or []:
+            log.info("[window-closure-sensitivity]   %s", path)
+    return 0
+
+
 def cmd_domain_classifier_audit(args: argparse.Namespace) -> int:
     try:
         result = orch.run_domain_classifier_audit_stage(
@@ -590,7 +683,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=EPILOG_EXAMPLES,
     )
-    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,step10,step8-robustness,large-block-robustness,step8-big-block-robustness,concept-shift,concept-shift-compare,transfer-synthesis,evia-signed-auc,transfer-decomposition,frozen-hash-inventory,manavgat-step8a-hash-audit,old-new-deltas,burned-pattern-audit,marginal-aoa,domain-classifier-audit,legacy}")
+    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,step10,step8-robustness,large-block-robustness,step8-big-block-robustness,concept-shift,concept-shift-compare,transfer-synthesis,evia-signed-auc,transfer-decomposition,frozen-hash-inventory,manavgat-step8a-hash-audit,old-new-deltas,burned-pattern-audit,marginal-aoa,window-closure-sensitivity,domain-classifier-audit,legacy}")
 
     # --- experiment ---
     p_exp = subparsers.add_parser(
@@ -1168,6 +1261,47 @@ def build_parser() -> argparse.ArgumentParser:
     p_marginal_aoa.add_argument("--force", action="store_true", help="Overwrite existing marginal AoA outputs produced by a different analysis_id (this namespace only).")
     p_marginal_aoa.add_argument("--dry-run", action="store_true", help="Resolve inputs/schema, list every directed pair and planned output path; no analysis, no files written.")
     p_marginal_aoa.set_defaults(func=cmd_marginal_aoa)
+
+    # --- window-closure-sensitivity ---
+    p_window_closure = subparsers.add_parser(
+        "window-closure-sensitivity",
+        help="Predictor window-closure sensitivity of within-AOI baseline/thermal results.",
+        description=(
+            "Scientific purpose: shift the canonical predictor window EARLIER "
+            "by preregistered day counts (default 0/7/14) while preserving its "
+            "LENGTH exactly, and measure how the within-AOI baseline and "
+            "thermal model results -- and the thermal contribution between "
+            "them -- respond to the predictor closure date. Both window ends "
+            "move together, so duration is invariant; the label window never "
+            "moves. Every predictor derived from the window is rebuilt "
+            "coherently (current Landsat LST and NDVI, each baseline year's "
+            "LST and NDVI, current-window MODIS mean/std/valid-observation "
+            "support, and the Step5/5C/7/8A products above them) -- moving "
+            "only current LST while freezing NDVI/baseline/MODIS is refused. "
+            "DEM, slope, landcover, grid, feature registry, hyper-parameters, "
+            "seed and spatial block definition are held fixed. A single shared "
+            "pre-label censoring interval and a single shared spatial fold "
+            "assignment are applied identically to every variant, and all "
+            "comparisons are made on the exact common cohort. Results are "
+            "DESCRIPTIVE predictor-timing sensitivity: closing the window "
+            "earlier is not an operational forecasting validation, and an "
+            "interval containing zero is not evidence of equivalence. Writes "
+            "only under outputs/diagnostics/window_closure_sensitivity/. "
+            "Delegates to scripts/run_window_closure_sensitivity.py / "
+            "src/window_closure_sensitivity.py."
+        ),
+    )
+    p_window_closure.add_argument("--experiment", required=True, help="Experiment ID (core/regions.py registry entry).")
+    p_window_closure.add_argument(
+        "--shifts", nargs="+", type=int, default=list(_WINDOW_CLOSURE_DEFAULT_SHIFTS),
+        help="Preregistered closure shifts in days (default: 0 7 14). Shifts move the window earlier; they are never window lengths.",
+    )
+    p_window_closure.add_argument("--from-stage", default="plan", choices=list(_WINDOW_CLOSURE_STAGES))
+    p_window_closure.add_argument("--to-stage", default="compare", choices=list(_WINDOW_CLOSURE_STAGES))
+    p_window_closure.add_argument("--force", action="store_true", help="Overwrite the dedicated window-closure namespace only; never canonical outputs or another diagnostics namespace.")
+    p_window_closure.add_argument("--resume", action="store_true", help="Reuse completed stages whose recorded input hashes still match.")
+    p_window_closure.add_argument("--dry-run", action="store_true", help="Print the full plan (windows, censor interval, export roles, planned paths); write no files, run no GEE query/export, no model fit, no bootstrap.")
+    p_window_closure.set_defaults(func=cmd_window_closure_sensitivity)
 
     # --- domain-classifier-audit ---
     p_domain_classifier = subparsers.add_parser(

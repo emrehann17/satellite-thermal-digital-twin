@@ -781,6 +781,35 @@ def run_marginal_aoa_stage(
     )
 
 
+def run_window_closure_sensitivity_stage(
+    experiment_id: str, shifts: Optional[list[int]] = None,
+    from_stage: str = "plan", to_stage: str = "compare",
+    dry_run: bool = False, force: bool = False, resume: bool = False,
+    output_root: Optional[str] = None, experiments_root: Optional[str] = None,
+) -> dict:
+    """Dispatch the window-closure sensitivity analysis.
+
+    Shifts the canonical predictor window earlier by preregistered day counts
+    while preserving its LENGTH, so every predictor derived from that window
+    (current Landsat LST/NDVI, each baseline year, current-window MODIS and
+    the Step5/5C/7/8A products above them) is rebuilt coherently. The label
+    window, DEM, slope, landcover, grid, feature registry, hyper-parameters,
+    seed and spatial block definition are all frozen.
+
+    Writes only under outputs/diagnostics/window_closure_sensitivity/; never
+    touches the canonical production namespace. Live Earth Engine work
+    happens only when an export stage is explicitly selected and dry_run is
+    False. No AOI name is hard-coded here or in the underlying module."""
+    from scripts.run_window_closure_sensitivity import main as run_window_closure
+
+    return run_window_closure(
+        experiment_id=experiment_id, shifts=shifts,
+        from_stage=from_stage, to_stage=to_stage,
+        dry_run=dry_run, force=force, resume=resume,
+        output_root=output_root, experiments_root=experiments_root,
+    )
+
+
 def run_domain_classifier_audit_stage(
     experiments: Optional[list[str]], all_enabled: bool, dry_run: bool, force: bool,
 ) -> dict:

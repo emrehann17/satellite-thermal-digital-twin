@@ -290,3 +290,86 @@ class TestMarginalAoARunnerPassthrough(unittest.TestCase):
         kwargs = mocked.call_args.kwargs
         self.assertIsNone(kwargs["output_root"])
         self.assertIsNone(kwargs["experiments_root"])
+
+
+class TestWindowClosureSensitivityDispatch(unittest.TestCase):
+    """Thin dispatch: every parameter, including the injection roots, must
+    reach the runner unchanged."""
+
+    def test_orchestrator_forwards_exact_kwargs(self):
+        with patch(
+            "scripts.run_window_closure_sensitivity.main",
+            return_value={"ran": False, "dry_run": True},
+        ) as mocked:
+            result = orch.run_window_closure_sensitivity_stage(
+                experiment_id="some_future_experiment", shifts=[0, 7, 14],
+                from_stage="plan", to_stage="compare", dry_run=True,
+                force=False, resume=False,
+            )
+        self.assertFalse(result["ran"])
+        mocked.assert_called_once_with(
+            experiment_id="some_future_experiment", shifts=[0, 7, 14],
+            from_stage="plan", to_stage="compare",
+            dry_run=True, force=False, resume=False,
+            output_root=None, experiments_root=None,
+        )
+
+    def test_orchestrator_forwards_the_local_downstream_stage(self):
+        with patch(
+            "scripts.run_window_closure_sensitivity.main",
+            return_value={"ran": True, "stages_run": ["local-downstream"]},
+        ) as mocked:
+            orch.run_window_closure_sensitivity_stage(
+                experiment_id="some_future_experiment", shifts=[0, 7, 14],
+                from_stage="local-downstream", to_stage="local-downstream",
+                dry_run=False, force=False, resume=True,
+            )
+        mocked.assert_called_once_with(
+            experiment_id="some_future_experiment", shifts=[0, 7, 14],
+            from_stage="local-downstream", to_stage="local-downstream",
+            dry_run=False, force=False, resume=True,
+            output_root=None, experiments_root=None,
+        )
+
+    def test_orchestrator_carries_injection_roots(self):
+        with patch(
+            "scripts.run_window_closure_sensitivity.main",
+            return_value={"ran": True},
+        ) as mocked:
+            orch.run_window_closure_sensitivity_stage(
+                experiment_id="e", shifts=[0, 7], from_stage="model",
+                to_stage="compare", dry_run=False, force=True, resume=True,
+                output_root="/tmp/injected_out", experiments_root="/tmp/injected_exp",
+            )
+        mocked.assert_called_once_with(
+            experiment_id="e", shifts=[0, 7], from_stage="model", to_stage="compare",
+            dry_run=False, force=True, resume=True,
+            output_root="/tmp/injected_out", experiments_root="/tmp/injected_exp",
+        )
+
+
+class TestWindowClosureRunnerPassthrough(unittest.TestCase):
+    def test_runner_forwards_injection_roots(self):
+        from scripts import run_window_closure_sensitivity as runner
+
+        with patch.object(runner, "run_analysis", return_value={"ran": False}) as mocked:
+            runner.main(
+                experiment_id="e", shifts=[0, 7, 14], dry_run=True,
+                output_root="/tmp/out_root", experiments_root="/tmp/exp_root",
+            )
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["experiment_id"], "e")
+        self.assertEqual(tuple(kwargs["shifts"]), (0, 7, 14))
+        self.assertTrue(kwargs["dry_run"])
+        self.assertEqual(str(kwargs["output_root"]), "/tmp/out_root")
+        self.assertEqual(str(kwargs["experiments_root"]), "/tmp/exp_root")
+
+    def test_runner_defaults_shifts_and_roots(self):
+        from scripts import run_window_closure_sensitivity as runner
+
+        with patch.object(runner, "run_analysis", return_value={"ran": False}) as mocked:
+            runner.main(experiment_id="e", dry_run=True)
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(tuple(kwargs["shifts"]), (0, 7, 14))
+        self.assertIsNone(kwargs["output_root"])
+        self.assertIsNone(kwargs["experiments_root"])

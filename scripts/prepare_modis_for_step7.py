@@ -96,14 +96,54 @@ def resolve_modis_output_paths(ctx: dict) -> dict:
     }
 
 
+#: Bir cagiran, kendi ADANMIS diagnostics namespace'ine MODIS uretmek icin
+#: ctx'e EK bir izinli kok koyabilir (or. window-closure sensitivity varyant
+#: namespace'i). Anahtar YOKSA davranis ESKISIYLE BIREBIR AYNIDIR.
+NAMESPACE_ALLOWED_ROOTS_KEY = "namespace_allowed_roots"
+
+
+def _resolve_allowed_output_roots(ctx: dict) -> list[Path]:
+    """Bu ctx icin MODIS ciktilarinin yazilabilecegi izinli kokler.
+
+    Varsayilan TEK kok, deneyin kendi canonical namespace'idir. Cagiran
+    ctx[NAMESPACE_ALLOWED_ROOTS_KEY] ile EK kok(ler) verebilir; bunlar:
+      * outputs/ altinda olmak,
+      * outputs/experiments/ altinda OLMAMAK
+    zorundadir. Boylece bir diagnostics namespace'i acikca izinli hale
+    getirilebilirken, BASKA bir deneyin canonical namespace'i asla
+    acilamaz.
+    """
+    experiment_id = ctx["experiment_id"]
+    outputs_root = (BASE_DIR / "outputs").resolve()
+    experiments_parent = (outputs_root / "experiments").resolve()
+    roots = [(experiments_parent / experiment_id).resolve()]
+
+    for extra in ctx.get(NAMESPACE_ALLOWED_ROOTS_KEY) or ():
+        resolved = Path(extra).resolve()
+        if resolved != outputs_root and outputs_root not in resolved.parents:
+            raise ModisPrepError(
+                f"GÜVENLİK İHLALİ: ek izinli kök ({resolved}) outputs/ dışında. "
+                "İşlem DURDURULDU."
+            )
+        if resolved == experiments_parent or experiments_parent in resolved.parents:
+            raise ModisPrepError(
+                f"GÜVENLİK İHLALİ: ek izinli kök ({resolved}) canonical "
+                "outputs/experiments/ ağacının içinde; başka bir deneyin "
+                "namespace'i bu yolla açılamaz. İşlem DURDURULDU."
+            )
+        roots.append(resolved)
+    return roots
+
+
 def _assert_paths_are_safely_namespaced(ctx: dict, paths: dict) -> None:
     """
     GÜVENLİK KONTROLÜ (Kozan-dışı deneyler için ZORUNLU): tüm MODIS çıktı
-    yolları outputs/experiments/<experiment_id>/ altında olmalı ve legacy
-    Kozan data/modis/ dizinine ASLA düşmemelidir.
+    yolları izinli köklerden birinin (varsayılan:
+    outputs/experiments/<experiment_id>/) altında olmalı ve legacy Kozan
+    data/modis/ dizinine ASLA düşmemelidir.
     """
     experiment_id = ctx["experiment_id"]
-    experiments_root = (BASE_DIR / "outputs" / "experiments" / experiment_id).resolve()
+    allowed_roots = _resolve_allowed_output_roots(ctx)
 
     for key in ("modis_dir", "mean_path", "std_path", "valid_count_path", "metadata_path"):
         resolved = Path(paths[key]).resolve()
@@ -113,11 +153,13 @@ def _assert_paths_are_safely_namespaced(ctx: dict, paths: dict) -> None:
                 f"({resolved}) Kozan'ın legacy paylaşılan MODIS dizinine "
                 f"({_LEGACY_MODIS_DIR}) düşüyor. İşlem DURDURULDU."
             )
-        if resolved != experiments_root and experiments_root not in resolved.parents:
+        if not any(
+            resolved == root or root in resolved.parents for root in allowed_roots
+        ):
             raise ModisPrepError(
                 f"GÜVENLİK İHLALİ: '{experiment_id}' deneyi için '{key}' yolu "
-                f"({resolved}) outputs/experiments/{experiment_id}/ dışında. "
-                "İşlem DURDURULDU."
+                f"({resolved}) izinli köklerin "
+                f"({[str(r) for r in allowed_roots]}) dışında. İşlem DURDURULDU."
             )
 
 

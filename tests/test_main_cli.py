@@ -25,6 +25,7 @@ from scripts.main import (
     cmd_step8_robustness, cmd_transfer, cmd_transfer_explore,
     cmd_step10, cmd_large_block_robustness, cmd_concept_shift,
     cmd_step8_big_block_robustness, cmd_marginal_aoa,
+    cmd_window_closure_sensitivity,
 )
 
 
@@ -435,6 +436,299 @@ class TestParserStructure(unittest.TestCase):
             experiments=["a_experiment", "b_experiment"],
             all_enabled=False, dry_run=True, force=False,
         )
+
+    # --- window-closure-sensitivity ---
+    def test_window_closure_subcommand_parses_shifts_and_stages(self):
+        args = self.parser.parse_args([
+            "window-closure-sensitivity",
+            "--experiment", "some_future_experiment",
+            "--shifts", "0", "7", "14",
+            "--from-stage", "plan", "--to-stage", "compare",
+            "--dry-run",
+        ])
+        self.assertEqual(args.command, "window-closure-sensitivity")
+        self.assertEqual(args.experiment, "some_future_experiment")
+        self.assertEqual(args.shifts, [0, 7, 14])
+        self.assertEqual(args.from_stage, "plan")
+        self.assertEqual(args.to_stage, "compare")
+        self.assertTrue(args.dry_run)
+        self.assertFalse(args.force)
+        self.assertFalse(args.resume)
+        self.assertIs(args.func, cmd_window_closure_sensitivity)
+
+    def test_window_closure_defaults_to_the_preregistered_shifts(self):
+        args = self.parser.parse_args([
+            "window-closure-sensitivity", "--experiment", "some_future_experiment",
+        ])
+        self.assertEqual(args.shifts, [0, 7, 14])
+        self.assertEqual(args.from_stage, "plan")
+        self.assertEqual(args.to_stage, "compare")
+
+    def test_window_closure_rejects_an_unknown_stage(self):
+        with self.assertRaises(SystemExit):
+            self.parser.parse_args([
+                "window-closure-sensitivity", "--experiment", "e",
+                "--from-stage", "not_a_stage",
+            ])
+
+    def test_window_closure_requires_an_experiment(self):
+        with self.assertRaises(SystemExit):
+            self.parser.parse_args(["window-closure-sensitivity", "--dry-run"])
+
+    def test_window_closure_cli_dispatches_through_orchestrator(self):
+        args = self.parser.parse_args([
+            "window-closure-sensitivity",
+            "--experiment", "some_future_experiment",
+            "--shifts", "0", "7", "14",
+            "--dry-run",
+        ])
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_window_closure_sensitivity_stage",
+            return_value={"ran": False, "dry_run": True},
+        ) as mocked:
+            self.assertEqual(cmd_window_closure_sensitivity(args), 0)
+        mocked.assert_called_once_with(
+            experiment_id="some_future_experiment",
+            shifts=[0, 7, 14],
+            from_stage="plan", to_stage="compare",
+            dry_run=True, force=False, resume=False,
+        )
+
+    def test_window_closure_cli_dispatches_an_actual_plan_only_run(self):
+        """The single non-dry-run stage range reaches the orchestrator as-is."""
+        args = self.parser.parse_args([
+            "window-closure-sensitivity",
+            "--experiment", "some_future_experiment",
+            "--shifts", "0", "7", "14",
+            "--from-stage", "plan", "--to-stage", "plan",
+        ])
+        self.assertFalse(args.dry_run)
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_window_closure_sensitivity_stage",
+            return_value={
+                "ran": True, "dry_run": False, "analysis_id": "a" * 64,
+                "stages_run": ["plan"], "files_written": [], "files_written_count": 7,
+                "reused": False,
+            },
+        ) as mocked:
+            self.assertEqual(cmd_window_closure_sensitivity(args), 0)
+        mocked.assert_called_once_with(
+            experiment_id="some_future_experiment",
+            shifts=[0, 7, 14],
+            from_stage="plan", to_stage="plan",
+            dry_run=False, force=False, resume=False,
+        )
+
+    def test_window_closure_cli_dispatches_the_prelabel_export_stage(self):
+        """The prelabel-export stage range reaches the orchestrator verbatim."""
+        args = self.parser.parse_args([
+            "window-closure-sensitivity",
+            "--experiment", "some_future_experiment",
+            "--shifts", "0", "7", "14",
+            "--from-stage", "prelabel-export", "--to-stage", "prelabel-export",
+        ])
+        self.assertFalse(args.dry_run)
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_window_closure_sensitivity_stage",
+            return_value={
+                "ran": True, "dry_run": False, "analysis_id": "c" * 64,
+                "stages_run": ["prelabel-export"], "files_written": [],
+                "files_written_count": 3, "reused": False,
+            },
+        ) as mocked:
+            self.assertEqual(cmd_window_closure_sensitivity(args), 0)
+        mocked.assert_called_once_with(
+            experiment_id="some_future_experiment",
+            shifts=[0, 7, 14],
+            from_stage="prelabel-export", to_stage="prelabel-export",
+            dry_run=False, force=False, resume=False,
+        )
+
+    def test_window_closure_cli_dispatches_plan_to_prelabel_export(self):
+        args = self.parser.parse_args([
+            "window-closure-sensitivity",
+            "--experiment", "some_future_experiment",
+            "--from-stage", "plan", "--to-stage", "prelabel-export",
+        ])
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_window_closure_sensitivity_stage",
+            return_value={"ran": True, "stages_run": ["plan", "prelabel-export"],
+                          "analysis_id": "d" * 64, "files_written_count": 10,
+                          "reused": False, "files_written": []},
+        ) as mocked:
+            self.assertEqual(cmd_window_closure_sensitivity(args), 0)
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["from_stage"], "plan")
+        self.assertEqual(kwargs["to_stage"], "prelabel-export")
+        self.assertFalse(kwargs["dry_run"])
+
+    def test_window_closure_cli_dispatches_the_predictor_export_stage(self):
+        """The predictor-export stage range reaches the orchestrator verbatim."""
+        args = self.parser.parse_args([
+            "window-closure-sensitivity",
+            "--experiment", "some_future_experiment",
+            "--shifts", "0", "7", "14",
+            "--from-stage", "predictor-export", "--to-stage", "predictor-export",
+        ])
+        self.assertFalse(args.dry_run)
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_window_closure_sensitivity_stage",
+            return_value={
+                "ran": True, "dry_run": False, "analysis_id": "e" * 64,
+                "stages_run": ["predictor-export"], "files_written": [],
+                "files_written_count": 48, "reused": False,
+                "processed_variants": ["close_7d_earlier", "close_14d_earlier"],
+                "exported_variants": ["close_7d_earlier", "close_14d_earlier"],
+                "reused_variants": [], "logical_roles_produced": 26,
+                "predictor_rasters_produced": 46,
+                "canonical_export_attempted": False,
+            },
+        ) as mocked:
+            self.assertEqual(cmd_window_closure_sensitivity(args), 0)
+        mocked.assert_called_once_with(
+            experiment_id="some_future_experiment",
+            shifts=[0, 7, 14],
+            from_stage="predictor-export", to_stage="predictor-export",
+            dry_run=False, force=False, resume=False,
+        )
+
+    def test_window_closure_cli_dispatches_the_local_downstream_stage(self):
+        """The local-downstream stage range reaches the orchestrator verbatim."""
+        args = self.parser.parse_args([
+            "window-closure-sensitivity",
+            "--experiment", "some_future_experiment",
+            "--shifts", "0", "7", "14",
+            "--from-stage", "local-downstream", "--to-stage", "local-downstream",
+        ])
+        self.assertFalse(args.dry_run)
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_window_closure_sensitivity_stage",
+            return_value={
+                "ran": True, "dry_run": False, "analysis_id": "f" * 64,
+                "stages_run": ["local-downstream"], "files_written": [],
+                "files_written_count": 24, "reused": False,
+                "processed_variants": ["close_7d_earlier", "close_14d_earlier"],
+                "completed_variants": ["close_7d_earlier", "close_14d_earlier"],
+                "reused_variants": [], "downstream_artifacts_produced": 24,
+                "step8a_datasets_produced": 2,
+                "canonical_downstream_attempted": False,
+                "common_cohort_created": False,
+                "model_fit": False, "bootstrap_run": False,
+            },
+        ) as mocked:
+            self.assertEqual(cmd_window_closure_sensitivity(args), 0)
+        mocked.assert_called_once_with(
+            experiment_id="some_future_experiment",
+            shifts=[0, 7, 14],
+            from_stage="local-downstream", to_stage="local-downstream",
+            dry_run=False, force=False, resume=False,
+        )
+
+    def test_window_closure_cli_dispatches_the_model_stage(self):
+        """The model stage range reaches the orchestrator verbatim."""
+        args = self.parser.parse_args([
+            "window-closure-sensitivity",
+            "--experiment", "some_future_experiment",
+            "--shifts", "0", "7", "14",
+            "--from-stage", "model", "--to-stage", "model",
+        ])
+        self.assertFalse(args.dry_run)
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_window_closure_sensitivity_stage",
+            return_value={
+                "ran": True, "dry_run": False, "analysis_id": "a" * 64,
+                "stages_run": ["model"], "files_written": [],
+                "files_written_count": 17, "reused": False,
+                "model_reused": False,
+                "model_stage_metadata": {
+                    "model_evaluation_count": 6,
+                    "common_cohort": {
+                        "final_common_cohort_rows": 24087, "prevalence": 0.03,
+                    },
+                    "shared_folds": {"fold_count": 5},
+                },
+                "fire_risk_model_fit": True, "downscaling_model_fit": False,
+                "bootstrap_run": True, "compare_run": False,
+            },
+        ) as mocked:
+            self.assertEqual(cmd_window_closure_sensitivity(args), 0)
+        mocked.assert_called_once_with(
+            experiment_id="some_future_experiment",
+            shifts=[0, 7, 14],
+            from_stage="model", to_stage="model",
+            dry_run=False, force=False, resume=False,
+        )
+
+    def test_window_closure_cli_dispatches_a_model_dry_run(self):
+        args = self.parser.parse_args([
+            "window-closure-sensitivity",
+            "--experiment", "some_future_experiment",
+            "--from-stage", "model", "--to-stage", "model", "--dry-run",
+        ])
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_window_closure_sensitivity_stage",
+            return_value={"ran": False, "dry_run": True},
+        ) as mocked:
+            self.assertEqual(cmd_window_closure_sensitivity(args), 0)
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["from_stage"], "model")
+        self.assertEqual(kwargs["to_stage"], "model")
+        self.assertTrue(kwargs["dry_run"])
+
+    def test_window_closure_cli_dispatches_a_local_downstream_dry_run(self):
+        args = self.parser.parse_args([
+            "window-closure-sensitivity",
+            "--experiment", "some_future_experiment",
+            "--from-stage", "local-downstream", "--to-stage", "local-downstream",
+            "--dry-run",
+        ])
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_window_closure_sensitivity_stage",
+            return_value={"ran": False, "dry_run": True},
+        ) as mocked:
+            self.assertEqual(cmd_window_closure_sensitivity(args), 0)
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["from_stage"], "local-downstream")
+        self.assertEqual(kwargs["to_stage"], "local-downstream")
+        self.assertTrue(kwargs["dry_run"])
+        self.assertFalse(kwargs["force"])
+        self.assertFalse(kwargs["resume"])
+
+    def test_window_closure_cli_dispatches_a_predictor_dry_run(self):
+        args = self.parser.parse_args([
+            "window-closure-sensitivity",
+            "--experiment", "some_future_experiment",
+            "--from-stage", "predictor-export", "--to-stage", "predictor-export",
+            "--dry-run",
+        ])
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_window_closure_sensitivity_stage",
+            return_value={"ran": False, "dry_run": True},
+        ) as mocked:
+            self.assertEqual(cmd_window_closure_sensitivity(args), 0)
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["from_stage"], "predictor-export")
+        self.assertEqual(kwargs["to_stage"], "predictor-export")
+        self.assertTrue(kwargs["dry_run"])
+        self.assertFalse(kwargs["force"])
+        self.assertFalse(kwargs["resume"])
+
+    def test_window_closure_cli_forwards_force_and_resume(self):
+        args = self.parser.parse_args([
+            "window-closure-sensitivity",
+            "--experiment", "some_future_experiment",
+            "--from-stage", "plan", "--to-stage", "plan", "--force", "--resume",
+        ])
+        with patch.object(
+            sys.modules["scripts.main"].orch, "run_window_closure_sensitivity_stage",
+            return_value={"ran": True, "files_written_count": 7, "reused": False,
+                          "analysis_id": "b" * 64, "stages_run": ["plan"]},
+        ) as mocked:
+            self.assertEqual(cmd_window_closure_sensitivity(args), 0)
+        kwargs = mocked.call_args.kwargs
+        self.assertTrue(kwargs["force"])
+        self.assertTrue(kwargs["resume"])
+        self.assertFalse(kwargs["dry_run"])
 
     def test_legacy_subcommand_defaults_to_kozan(self):
         args = self.parser.parse_args(["legacy", "--dry-run"])
