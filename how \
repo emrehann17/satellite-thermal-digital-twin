@@ -1,0 +1,31 @@
+[1mdiff --git a/docs/multi_region_window_closure_design/README.md b/docs/multi_region_window_closure_design/README.md[m
+[1mindex 071c037..13ae2ba 100644[m
+[1m--- a/docs/multi_region_window_closure_design/README.md[m
+[1m+++ b/docs/multi_region_window_closure_design/README.md[m
+[36m@@ -177,9 +177,22 @@[m [mImplementation may begin **only** when all of the following hold at that moment:[m
+ [m
+ ## 9. Repository hygiene note[m
+ [m
+[31m-At design time the worktree carried unrelated pre-existing changes: a modified[m
+[31m-`.gitignore`, deleted `docs/advisor_results_review_2026-07-31/**` and two deleted[m
+[32m+[m[32mAt the start of this design task the worktree carried unrelated pre-existing changes: a[m
+[32m+[m[32mmodified `.gitignore`, deleted `docs/advisor_results_review_2026-07-31/**` and two deleted[m
+ `docs/*.pdf`, plus untracked `docs/Hocaya_Cevap_Maili_2026-08-03.pdf` and[m
+ `docs/advisor_final_numerical_package/`. **None of these were touched by this task.**[m
+[31m-This design package added exactly one new untracked directory:[m
+[31m-`docs/multi_region_window_closure_design/`.[m
+[32m+[m
+[32m+[m[32mThis design package created exactly one new directory,[m
+[32m+[m[32m`docs/multi_region_window_closure_design/`, and wrote nine markdown files into it. No source[m
+[32m+[m[32mfile, config file, canonical output or existing analysis namespace was read-write accessed.[m
+[32m+[m
+[32m+[m[32m**Commit `0f9f691` was not created by this task.** While the package was being written, an[m
+[32m+[m[32mexternal commit (author `emrehann17`, message `.`, 2026-08-04 09:36:58 +0300) swept up the[m
+[32m+[m[32mpre-existing worktree changes listed above **and** this `README.md` — the only design document[m
+[32m+[m[32mthat existed at that moment. The remaining eight documents are untracked. Nothing was[m
+[32m+[m[32mrewritten, rebased or force-pushed by this task, and the committed `README.md` is byte-identical[m
+[32m+[m[32mto the file on disk.[m
+[32m+[m
+[32m+[m[32mConsequence for the §8 gate: item 1 should now be read as *"no modification outside[m
+[32m+[m[32m`docs/multi_region_window_closure_design/`"* relative to `0f9f691`, which the current[m
+[32m+[m[32m`git status --short` satisfies.[m

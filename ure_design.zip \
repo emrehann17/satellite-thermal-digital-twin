@@ -1,0 +1,64 @@
+[33mcommit 0f9f69198fad92fd7d056c9e6da01876b6862086[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m
+Author:     emrehann17 <emrehann17@gmail.com>
+AuthorDate: Tue Aug 4 09:36:58 2026 +0300
+Commit:     emrehann17 <emrehann17@gmail.com>
+CommitDate: Tue Aug 4 09:36:58 2026 +0300
+
+    .
+
+M	.gitignore
+D	docs/Few_Shot_Recovery_Sonuc_Incelemesi.pdf
+A	docs/Hocaya_Cevap_Maili_2026-08-03.pdf
+D	docs/Marginal_AoA_Sonuc_Incelemesi.pdf
+A	docs/advisor_final_numerical_package/00_signed_univariate_auc.md
+A	docs/advisor_final_numerical_package/02_evia_decision.md
+A	docs/advisor_final_numerical_package/03_marginal_aoa.md
+A	docs/advisor_final_numerical_package/04_window_closure.md
+A	docs/advisor_final_numerical_package/05_evia_signed_auc.md
+A	docs/advisor_final_numerical_package/06_few_shot_recovery.md
+A	docs/advisor_final_numerical_package/07_transfer_decomposition.md
+A	docs/advisor_final_numerical_package/08_mugla_subsampling.md
+A	docs/advisor_final_numerical_package/09_coral_lambda_sensitivity.md
+A	docs/advisor_final_numerical_package/ADVISOR_NUMERICAL_SUMMARY.md
+A	docs/advisor_final_numerical_package/ALL_NUMBERS.json
+A	docs/advisor_final_numerical_package/EMAIL_READY_NUMBERS.md
+A	docs/advisor_final_numerical_package/GIT_AND_EXPORT_PROVENANCE.md
+A	docs/advisor_final_numerical_package/README.md
+A	docs/advisor_final_numerical_package/SHORT_CONFIRMATIONS.md
+A	docs/advisor_final_numerical_package/SOURCE_INDEX.csv
+A	docs/advisor_final_numerical_package/VALIDATION_STATUS.md
+A	docs/advisor_final_numerical_package/tables/canonical_inputs.csv
+A	docs/advisor_final_numerical_package/tables/coral_lambda_grid_results.csv
+A	docs/advisor_final_numerical_package/tables/coral_lambda_sensitivity_summary.csv
+A	docs/advisor_final_numerical_package/tables/evia_decision.csv
+A	docs/advisor_final_numerical_package/tables/evia_signed_auc.csv
+A	docs/advisor_final_numerical_package/tables/few_shot_budget_summary.csv
+A	docs/advisor_final_numerical_package/tables/few_shot_recovery.csv
+A	docs/advisor_final_numerical_package/tables/marginal_aoa_pairs.csv
+A	docs/advisor_final_numerical_package/tables/marginal_aoa_rank_correlations.csv
+A	docs/advisor_final_numerical_package/tables/mugla_subsampling.csv
+A	docs/advisor_final_numerical_package/tables/short_confirmations.csv
+A	docs/advisor_final_numerical_package/tables/signed_univariate_auc.csv
+A	docs/advisor_final_numerical_package/tables/transfer_decomposition.csv
+A	docs/advisor_final_numerical_package/tables/validation_matrix.csv
+A	docs/advisor_final_numerical_package/tables/window_closure_metrics.csv
+D	docs/advisor_results_review_2026-07-31/00_completed_vs_pending.md
+D	docs/advisor_results_review_2026-07-31/01_archive_and_provenance.md
+D	docs/advisor_results_review_2026-07-31/02_evia_decision.md
+D	docs/advisor_results_review_2026-07-31/03_marginal_aoa.md
+D	docs/advisor_results_review_2026-07-31/04_window_closure_sensitivity.md
+D	docs/advisor_results_review_2026-07-31/05_evia_signed_auc.md
+D	docs/advisor_results_review_2026-07-31/06_few_shot_recovery_status.md
+D	docs/advisor_results_review_2026-07-31/07_transfer_decomposition.md
+D	docs/advisor_results_review_2026-07-31/08_mugla_subsampling_status.md
+D	docs/advisor_results_review_2026-07-31/09_coral_lambda_status.md
+D	docs/advisor_results_review_2026-07-31/10_short_confirmations.md
+D	docs/advisor_results_review_2026-07-31/11_cross_analysis_synthesis.md
+D	docs/advisor_results_review_2026-07-31/12_advisor_reply_fact_sheet.md
+D	docs/advisor_results_review_2026-07-31/README.md
+D	docs/advisor_results_review_2026-07-31/evidence_matrix.csv
+D	docs/advisor_results_review_2026-07-31/numeric_results_long.csv
+D	docs/advisor_results_review_2026-07-31/result_manifest.json
+D	docs/advisor_results_review_2026-07-31/source_artifact_index.csv
+D	docs/advisor_results_review_2026-07-31/unresolved_items.md
+A	docs/multi_region_window_closure_design/README.md

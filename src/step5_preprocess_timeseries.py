@@ -133,6 +133,57 @@ def build_cloud_mask_from_qa(qa_array: np.ndarray) -> np.ndarray:
     )
 
 
+#: OPT-IN context key: an EXPLICIT, already-resolved baseline LST file list.
+#: When it is present the baseline stack is bound to exactly those files --
+#: neither the Step4 metadata lookup nor the directory scan runs. It exists for
+#: callers that resolve their inputs from a hash-pinned inventory (e.g. the
+#: window-closure local downstream) and for which a directory-scan fallback
+#: would be an unmanaged-input risk. When the key is absent, everything below
+#: behaves EXACTLY as before.
+EXPLICIT_BASELINE_PATHS_KEY = "explicit_baseline_lst_paths"
+
+
+def explicit_baseline_tifs(ctx: dict | None = None) -> list[Path] | None:
+    """The opt-in explicit baseline LST list, validated. None when not opted in.
+
+    Every entry must exist and must not be a QA raster; a bad entry raises
+    rather than silently falling back to a directory scan, because the whole
+    point of opting in is that no unmanaged file may enter the baseline stack.
+    """
+    if not ctx:
+        return None
+    explicit = ctx.get(EXPLICIT_BASELINE_PATHS_KEY)
+    if not explicit:
+        return None
+
+    paths = [Path(entry) for entry in explicit]
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Explicit baseline LST raster(s) not found: "
+            + ", ".join(missing)
+            + f". '{EXPLICIT_BASELINE_PATHS_KEY}' pins the baseline stack "
+            "exactly; no directory scan fallback is performed."
+        )
+    qa_entries = [str(path) for path in paths if is_qa_tif_name(path.name)]
+    if qa_entries:
+        raise ValueError(
+            f"'{EXPLICIT_BASELINE_PATHS_KEY}' carries QA raster(s): "
+            + ", ".join(qa_entries)
+            + ". A QA mask is never a baseline image."
+        )
+    duplicates = sorted({
+        str(path) for path in paths
+        if [str(p) for p in paths].count(str(path)) > 1
+    })
+    if duplicates:
+        raise ValueError(
+            f"'{EXPLICIT_BASELINE_PATHS_KEY}' carries duplicate path(s): "
+            + ", ".join(duplicates) + "."
+        )
+    return paths
+
+
 def list_baseline_tifs(ctx: dict | None = None) -> list[Path]:
     """
     Baseline zaman serisini oluşturan GeoTIFF dosyalarını listeler.
@@ -145,7 +196,19 @@ def list_baseline_tifs(ctx: dict | None = None) -> list[Path]:
         Verilirse ctx["baseline_input_dir"] ve ctx.get("step4_metadata_path")
         kullanılır (deney-farkında/experiment-aware çağrılar için,
         bkz. core/experiment_context.py).
+
+    ctx["explicit_baseline_lst_paths"] verilirse (OPT-IN) baseline yığını
+    YALNIZ o listeye bağlanır: ne Step4 metadata araması ne de klasör taraması
+    çalışır. Bu alan yoksa davranış BİREBİR eskisi gibidir.
     """
+    explicit = explicit_baseline_tifs(ctx)
+    if explicit is not None:
+        log.info(
+            "Baseline LST listesi EXPLICIT olarak verildi (%d dosya); Step4 "
+            "metadata araması ve klasör taraması atlandı.", len(explicit),
+        )
+        return explicit
+
     baseline_dir = ctx["baseline_input_dir"] if ctx else BASELINE_INPUT_DIR
     baseline_start = ctx["baseline_start_date"] if ctx else BASELINE_START_DATE
     baseline_end = ctx["baseline_end_date"] if ctx else BASELINE_END_DATE

@@ -1,0 +1,7 @@
+diagnostic,transfer,is_primary_comparison,diagnostic_is_directed,n_pairs,spearman_rho,kendall_tau,top3_overlap_count,bottom3_overlap_count,interpretation_boundary
+target_mean_dissimilarity,raw_thermal_roc_auc,True,True,12,-0.1048951048951049,-0.030303030303030304,0,0,"In this four-AOI set, the diagnostic ordering does or does not reproduce the observed raw-transfer ordering."
+target_p95_dissimilarity,raw_thermal_roc_auc,True,True,12,-0.08391608391608392,0.0,1,0,"In this four-AOI set, the diagnostic ordering does or does not reproduce the observed raw-transfer ordering."
+fraction_inside_weighted_aoa,raw_thermal_roc_auc,True,True,12,0.21678321678321677,0.09090909090909091,0,1,"In this four-AOI set, the diagnostic ordering does or does not reproduce the observed raw-transfer ordering."
+climate_distance,raw_thermal_roc_auc,True,False,12,0.05654027941921756,0.03178208630818641,1,1,"In this four-AOI set, the diagnostic ordering does or does not reproduce the observed raw-transfer ordering."
+centroid_geodesic_distance_km,raw_thermal_roc_auc,True,False,12,-0.24029618753167464,-0.15891043154093204,0,1,"In this four-AOI set, the diagnostic ordering does or does not reproduce the observed raw-transfer ordering."
+unweighted_fraction_target_cells_inside_support,raw_thermal_roc_auc,True,True,12,0.07692307692307693,0.030303030303030304,0,1,"In this four-AOI set, the diagnostic ordering does or does not reproduce the observed raw-transfer ordering."

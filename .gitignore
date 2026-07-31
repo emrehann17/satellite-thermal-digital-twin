@@ -8,6 +8,9 @@ logs/
 outputs/
 old_codes/
 
+# Yerel dokumantasyon arsivi (superseded/teslim kopyalari GitHub'a gitmez)
+docs/archive/
+
 
 # IDE ayarları
 .vscode/

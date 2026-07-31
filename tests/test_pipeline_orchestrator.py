@@ -290,3 +290,343 @@ class TestMarginalAoARunnerPassthrough(unittest.TestCase):
         kwargs = mocked.call_args.kwargs
         self.assertIsNone(kwargs["output_root"])
         self.assertIsNone(kwargs["experiments_root"])
+
+
+class TestWindowClosureSensitivityDispatch(unittest.TestCase):
+    """Thin dispatch: every parameter, including the injection roots, must
+    reach the runner unchanged."""
+
+    def test_orchestrator_forwards_exact_kwargs(self):
+        with patch(
+            "scripts.run_window_closure_sensitivity.main",
+            return_value={"ran": False, "dry_run": True},
+        ) as mocked:
+            result = orch.run_window_closure_sensitivity_stage(
+                experiment_id="some_future_experiment", shifts=[0, 7, 14],
+                from_stage="plan", to_stage="compare", dry_run=True,
+                force=False, resume=False,
+            )
+        self.assertFalse(result["ran"])
+        mocked.assert_called_once_with(
+            experiment_id="some_future_experiment", shifts=[0, 7, 14],
+            from_stage="plan", to_stage="compare",
+            dry_run=True, force=False, resume=False,
+            output_root=None, experiments_root=None,
+        )
+
+    def test_orchestrator_forwards_the_local_downstream_stage(self):
+        with patch(
+            "scripts.run_window_closure_sensitivity.main",
+            return_value={"ran": True, "stages_run": ["local-downstream"]},
+        ) as mocked:
+            orch.run_window_closure_sensitivity_stage(
+                experiment_id="some_future_experiment", shifts=[0, 7, 14],
+                from_stage="local-downstream", to_stage="local-downstream",
+                dry_run=False, force=False, resume=True,
+            )
+        mocked.assert_called_once_with(
+            experiment_id="some_future_experiment", shifts=[0, 7, 14],
+            from_stage="local-downstream", to_stage="local-downstream",
+            dry_run=False, force=False, resume=True,
+            output_root=None, experiments_root=None,
+        )
+
+    def test_orchestrator_carries_injection_roots(self):
+        with patch(
+            "scripts.run_window_closure_sensitivity.main",
+            return_value={"ran": True},
+        ) as mocked:
+            orch.run_window_closure_sensitivity_stage(
+                experiment_id="e", shifts=[0, 7], from_stage="model",
+                to_stage="compare", dry_run=False, force=True, resume=True,
+                output_root="/tmp/injected_out", experiments_root="/tmp/injected_exp",
+            )
+        mocked.assert_called_once_with(
+            experiment_id="e", shifts=[0, 7], from_stage="model", to_stage="compare",
+            dry_run=False, force=True, resume=True,
+            output_root="/tmp/injected_out", experiments_root="/tmp/injected_exp",
+        )
+
+
+class TestWindowClosureRunnerPassthrough(unittest.TestCase):
+    def test_runner_forwards_injection_roots(self):
+        from scripts import run_window_closure_sensitivity as runner
+
+        with patch.object(runner, "run_analysis", return_value={"ran": False}) as mocked:
+            runner.main(
+                experiment_id="e", shifts=[0, 7, 14], dry_run=True,
+                output_root="/tmp/out_root", experiments_root="/tmp/exp_root",
+            )
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["experiment_id"], "e")
+        self.assertEqual(tuple(kwargs["shifts"]), (0, 7, 14))
+        self.assertTrue(kwargs["dry_run"])
+        self.assertEqual(str(kwargs["output_root"]), "/tmp/out_root")
+        self.assertEqual(str(kwargs["experiments_root"]), "/tmp/exp_root")
+
+    def test_runner_defaults_shifts_and_roots(self):
+        from scripts import run_window_closure_sensitivity as runner
+
+        with patch.object(runner, "run_analysis", return_value={"ran": False}) as mocked:
+            runner.main(experiment_id="e", dry_run=True)
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(tuple(kwargs["shifts"]), (0, 7, 14))
+        self.assertIsNone(kwargs["output_root"])
+        self.assertIsNone(kwargs["experiments_root"])
+
+
+class TestMarginalAoACompletionStage(unittest.TestCase):
+    """The orchestrator is a thin dispatcher: it must forward every argument
+    to the runner and must NOT reimplement any scientific logic."""
+
+    def test_stage_forwards_every_argument(self):
+        from core import pipeline_orchestrator as orch
+
+        with patch(
+            "scripts.run_marginal_aoa_completion.main",
+            return_value={"ran": True, "stages_executed": ["plan"]},
+        ) as mocked:
+            result = orch.run_marginal_aoa_completion_stage(
+                experiments=["a", "b"], from_stage="plan", to_stage="compare",
+                dry_run=True, resume=False,
+                output_root="/tmp/out", experiments_root="/tmp/exp",
+            )
+        self.assertTrue(result["ran"])
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["experiments"], ["a", "b"])
+        self.assertEqual(kwargs["from_stage"], "plan")
+        self.assertEqual(kwargs["to_stage"], "compare")
+        self.assertTrue(kwargs["dry_run"])
+        self.assertFalse(kwargs["resume"])
+        self.assertEqual(kwargs["output_root"], "/tmp/out")
+        self.assertEqual(kwargs["experiments_root"], "/tmp/exp")
+
+    def test_stage_defaults_are_the_full_range(self):
+        from core import pipeline_orchestrator as orch
+
+        with patch(
+            "scripts.run_marginal_aoa_completion.main",
+            return_value={"ran": False},
+        ) as mocked:
+            orch.run_marginal_aoa_completion_stage(dry_run=True)
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["from_stage"], "plan")
+        self.assertEqual(kwargs["to_stage"], "compare")
+        self.assertIsNone(kwargs["experiments"])
+
+    def test_stage_propagates_contract_failures(self):
+        from core import pipeline_orchestrator as orch
+
+        with patch(
+            "scripts.run_marginal_aoa_completion.main",
+            side_effect=SystemExit("stage lock"),
+        ):
+            with self.assertRaises(SystemExit):
+                orch.run_marginal_aoa_completion_stage(dry_run=True)
+
+
+class TestFewShotRecoveryStage(unittest.TestCase):
+    """The orchestrator is a thin dispatcher: it must forward every argument
+    to the runner and must NOT reimplement any scientific logic."""
+
+    def test_stage_forwards_every_argument(self):
+        from core import pipeline_orchestrator as orch
+
+        with patch(
+            "scripts.run_few_shot_recovery.main",
+            return_value={"ran": True, "stages_executed": ["plan"]},
+        ) as mocked:
+            result = orch.run_few_shot_recovery_stage(
+                experiments=["a", "b"], from_stage="plan", to_stage="fit",
+                dry_run=True, resume=True, force=False,
+                output_root="/tmp/out", experiments_root="/tmp/exp",
+            )
+        self.assertTrue(result["ran"])
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["experiments"], ["a", "b"])
+        self.assertEqual(kwargs["from_stage"], "plan")
+        self.assertEqual(kwargs["to_stage"], "fit")
+        self.assertTrue(kwargs["dry_run"])
+        self.assertTrue(kwargs["resume"])
+        self.assertFalse(kwargs["force"])
+        self.assertEqual(kwargs["output_root"], "/tmp/out")
+        self.assertEqual(kwargs["experiments_root"], "/tmp/exp")
+
+    def test_stage_defaults_are_the_full_range(self):
+        from core import pipeline_orchestrator as orch
+
+        with patch(
+            "scripts.run_few_shot_recovery.main", return_value={"ran": False},
+        ) as mocked:
+            orch.run_few_shot_recovery_stage(dry_run=True)
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["from_stage"], "plan")
+        self.assertEqual(kwargs["to_stage"], "summarize")
+        self.assertIsNone(kwargs["experiments"])
+        self.assertFalse(kwargs["force"])
+
+    def test_stage_propagates_contract_failures(self):
+        from core import pipeline_orchestrator as orch
+
+        with patch(
+            "scripts.run_few_shot_recovery.main",
+            side_effect=SystemExit("canonical Step8A hash mismatch"),
+        ):
+            with self.assertRaises(SystemExit):
+                orch.run_few_shot_recovery_stage(dry_run=True)
+
+
+class TestMuglaSubsamplingStage(unittest.TestCase):
+    """The orchestrator is a thin dispatcher: it must forward every argument
+    to the runner and must NOT reimplement any scientific logic."""
+
+    def test_stage_forwards_every_argument(self):
+        from core import pipeline_orchestrator as orch
+
+        with patch(
+            "scripts.run_mugla_subsampling.main",
+            return_value={"ran": True, "stages_executed": ["plan"]},
+        ) as mocked:
+            result = orch.run_mugla_subsampling_stage(
+                experiments=["a", "b"], from_stage="plan", to_stage="fit",
+                dry_run=True, resume=True, force=False,
+                output_root="/tmp/out", experiments_root="/tmp/exp",
+            )
+        self.assertTrue(result["ran"])
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["experiments"], ["a", "b"])
+        self.assertEqual(kwargs["from_stage"], "plan")
+        self.assertEqual(kwargs["to_stage"], "fit")
+        self.assertTrue(kwargs["dry_run"])
+        self.assertTrue(kwargs["resume"])
+        self.assertFalse(kwargs["force"])
+        self.assertEqual(kwargs["output_root"], "/tmp/out")
+        self.assertEqual(kwargs["experiments_root"], "/tmp/exp")
+
+    def test_stage_defaults_are_the_full_range(self):
+        from core import pipeline_orchestrator as orch
+
+        with patch(
+            "scripts.run_mugla_subsampling.main", return_value={"ran": False},
+        ) as mocked:
+            orch.run_mugla_subsampling_stage(dry_run=True)
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["from_stage"], "plan")
+        self.assertEqual(kwargs["to_stage"], "summarize")
+        self.assertIsNone(kwargs["experiments"])
+        self.assertFalse(kwargs["force"])
+
+    def test_stage_propagates_contract_failures(self):
+        from core import pipeline_orchestrator as orch
+
+        with patch(
+            "scripts.run_mugla_subsampling.main",
+            side_effect=SystemExit("canonical Step8A hash mismatch"),
+        ):
+            with self.assertRaises(SystemExit):
+                orch.run_mugla_subsampling_stage(dry_run=True)
+
+    def test_stage_writes_only_inside_its_diagnostics_namespace(self):
+        """The namespace is a module-level contract, not a runtime argument."""
+        import src.mugla_subsampling as mss
+
+        root = mss.analysis_root("a" * 64)
+        self.assertEqual(root.parent.name, "mugla_subsampling")
+        self.assertEqual(root.parent.parent.name, "diagnostics")
+
+
+class TestMuglaSubsamplingRunnerPassthrough(unittest.TestCase):
+    def test_runner_forwards_injection_roots(self):
+        from scripts import run_mugla_subsampling as runner
+
+        with patch.object(runner, "run_analysis", return_value={"ran": False}) as mocked:
+            runner.main(
+                experiments=["a"], from_stage="plan", to_stage="plan", dry_run=True,
+                output_root="/tmp/out_root", experiments_root="/tmp/exp_root",
+            )
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["experiments"], ["a"])
+        self.assertTrue(kwargs["dry_run"])
+        self.assertEqual(str(kwargs["output_root"]), "/tmp/out_root")
+        self.assertEqual(str(kwargs["experiments_root"]), "/tmp/exp_root")
+
+    def test_runner_defaults_roots_to_none(self):
+        from scripts import run_mugla_subsampling as runner
+
+        with patch.object(runner, "run_analysis", return_value={"ran": False}) as mocked:
+            runner.main(dry_run=True)
+        kwargs = mocked.call_args.kwargs
+        self.assertIsNone(kwargs["output_root"])
+        self.assertIsNone(kwargs["experiments_root"])
+        self.assertEqual(kwargs["from_stage"], "plan")
+        self.assertEqual(kwargs["to_stage"], "summarize")
+
+
+class TestFewShotRecoveryRunnerPassthrough(unittest.TestCase):
+    def test_runner_forwards_injection_roots(self):
+        from scripts import run_few_shot_recovery as runner
+
+        with patch.object(runner, "run_analysis", return_value={"ran": False}) as mocked:
+            runner.main(
+                experiments=["a"], from_stage="plan", to_stage="plan", dry_run=True,
+                output_root="/tmp/out_root", experiments_root="/tmp/exp_root",
+            )
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["experiments"], ["a"])
+        self.assertTrue(kwargs["dry_run"])
+        self.assertEqual(str(kwargs["output_root"]), "/tmp/out_root")
+        self.assertEqual(str(kwargs["experiments_root"]), "/tmp/exp_root")
+
+    def test_runner_defaults_roots_to_none(self):
+        from scripts import run_few_shot_recovery as runner
+
+        with patch.object(runner, "run_analysis", return_value={"ran": False}) as mocked:
+            runner.main(dry_run=True)
+        kwargs = mocked.call_args.kwargs
+        self.assertIsNone(kwargs["output_root"])
+        self.assertIsNone(kwargs["experiments_root"])
+        self.assertEqual(kwargs["from_stage"], "plan")
+        self.assertEqual(kwargs["to_stage"], "summarize")
+
+
+class TestMarginalAoACompletionRunnerPassthrough(unittest.TestCase):
+    def test_runner_forwards_injection_roots(self):
+        from scripts import run_marginal_aoa_completion as runner
+
+        with patch.object(runner, "run_analysis", return_value={"ran": False}) as mocked:
+            runner.main(
+                experiments=["a"], from_stage="plan", to_stage="plan", dry_run=True,
+                output_root="/tmp/out_root", experiments_root="/tmp/exp_root",
+            )
+        kwargs = mocked.call_args.kwargs
+        self.assertEqual(kwargs["experiments"], ["a"])
+        self.assertTrue(kwargs["dry_run"])
+        self.assertEqual(str(kwargs["output_root"]), "/tmp/out_root")
+        self.assertEqual(str(kwargs["experiments_root"]), "/tmp/exp_root")
+
+    def test_runner_defaults_roots_to_none(self):
+        from scripts import run_marginal_aoa_completion as runner
+
+        with patch.object(runner, "run_analysis", return_value={"ran": False}) as mocked:
+            runner.main(dry_run=True)
+        kwargs = mocked.call_args.kwargs
+        self.assertIsNone(kwargs["output_root"])
+        self.assertIsNone(kwargs["experiments_root"])
+        self.assertEqual(kwargs["from_stage"], "plan")
+        self.assertEqual(kwargs["to_stage"], "compare")
+
+    def test_runner_parser_exposes_the_required_flags(self):
+        from scripts import run_marginal_aoa_completion as runner
+
+        parser = runner.build_parser()
+        args = parser.parse_args([
+            "--from-stage", "climate-export", "--to-stage", "compare",
+            "--dry-run", "--resume",
+            "--output-root", "/tmp/o", "--experiments-root", "/tmp/e",
+        ])
+        self.assertEqual(args.from_stage, "climate-export")
+        self.assertEqual(args.to_stage, "compare")
+        self.assertTrue(args.dry_run)
+        self.assertTrue(args.resume)
+        self.assertEqual(args.output_root, "/tmp/o")
+        self.assertEqual(args.experiments_root, "/tmp/e")

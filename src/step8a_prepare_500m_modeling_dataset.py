@@ -81,6 +81,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1802,6 +1803,32 @@ def burnable_counts_by_population_fields(df) -> dict[str, int | None]:
     return fields
 
 
+#: Final name of the Step8A stats sidecar. Kept as a constant so the staged
+#: (pre-promotion) name can be derived from it instead of duplicated.
+STATS_FILENAME = "step8a_dataset_stats.json"
+
+
+def _staged_path(final_path: Path) -> Path:
+    """Where a Step8A dataset artefact is written BEFORE it is promoted.
+
+    Staging keeps the output directory free of a half-validated CSV/parquet/
+    stats file: the artefact only appears under its final name once every
+    metadata/date validator has passed, and the promoted bytes are exactly the
+    ones the previous in-place write produced.
+    """
+    return final_path.parent / f".{final_path.name}.{os.getpid()}.staged"
+
+
+def _discard_staged(staged: list[tuple[Path, Path]]) -> None:
+    """Remove only the temp files THIS call created. Never touches a final path."""
+    for source, _ in staged:
+        try:
+            if source.exists():
+                source.unlink()
+        except OSError:
+            log.warning("Gecici Step8A dosyasi silinemedi: %s", source)
+
+
 def write_stats(
     output_dir: Path,
     result: dict,
@@ -1816,6 +1843,7 @@ def write_stats(
     warnings_list: list[str],
     exclude_pre_label_burns: bool = False,
     pre_label_exclusion_manifest_path: str | None = None,
+    filename: str = STATS_FILENAME,
 ) -> Path:
     burnable_diag = result.get("burnable_landcover_diagnostics", {}) or {}
     burnable_counts_by_population = burnable_counts_by_population_fields(
@@ -1920,7 +1948,7 @@ def write_stats(
             "manifest_path": pre_label_exclusion_manifest_path,
         },
     }
-    path = output_dir / "step8a_dataset_stats.json"
+    path = output_dir / filename
     path.write_text(json.dumps(stats, indent=2, default=str), encoding="utf-8")
     return path
 
@@ -2138,6 +2166,261 @@ _EXPECTED_EXPERIMENT_DATES = {
 }
 
 
+# =============================================================================
+# OPT-IN: window-closure variant mode
+#
+# `_EXPECTED_EXPERIMENT_DATES` pins the CANONICAL predictor window of a
+# manually verified experiment. A window-closure sensitivity variant runs the
+# SAME production chain over a deliberately SHIFTED predictor window, so the
+# canonical constants are the wrong expectation for it -- but the guard must
+# not simply be switched off, because "the ctx carries some dates" is not
+# evidence that those dates were preregistered.
+#
+# The opt-in below therefore replaces the SOURCE of the expectation, never the
+# strictness: in variant mode the expected dates come from the FROZEN
+# preregistration document on disk, and the run is refused unless the
+# analysis_id, the variant id, the shift, the predictor dates and the label
+# window all agree with it. An arbitrary date override is impossible.
+#
+# When the opt-in key is absent, every code path below is byte-for-byte the
+# previous behaviour.
+# =============================================================================
+WINDOW_CLOSURE_VARIANT_MODE_KEY = "window_closure_variant_mode"
+WINDOW_CLOSURE_PREREGISTRATION_KEY = "window_closure_preregistration_path"
+WINDOW_CLOSURE_ALLOWED_OUTPUT_ROOT_KEY = "window_closure_allowed_output_root"
+WINDOW_CLOSURE_CANONICAL_VARIANT_ID = "canonical"
+WINDOW_CLOSURE_REQUIRED_CONTEXT_KEYS: tuple[str, ...] = (
+    "base_experiment_id", "analysis_id", "variant_id", "shift_days",
+    "predictor_start_date", "predictor_end_date",
+    "label_start_date", "label_end_date",
+    "expected_predictor_start_date", "expected_predictor_end_date",
+    WINDOW_CLOSURE_PREREGISTRATION_KEY,
+)
+
+
+def window_closure_variant_mode(ctx: dict | None) -> bool:
+    """Whether this run is an explicitly declared window-closure variant."""
+    return bool(ctx) and ctx.get(WINDOW_CLOSURE_VARIANT_MODE_KEY) is True
+
+
+def assert_window_closure_variant_context(ctx: dict) -> dict:
+    """Validate the opt-in variant block against the FROZEN preregistration.
+
+    Returns the expected date map for this variant. Raises `Step8AError` on
+    anything that is not a preregistered, non-canonical variant of the frozen
+    analysis. Read-only: the preregistration is opened and never written.
+    """
+    missing = [key for key in WINDOW_CLOSURE_REQUIRED_CONTEXT_KEYS if ctx.get(key) is None]
+    if missing:
+        raise Step8AError(
+            f"WINDOW-CLOSURE VARIANT MODE: context alan(lar)i eksik: {missing}. "
+            "Variant modu yalnizca TAM ve dogrulanabilir bir baglam ile "
+            "calisir. Islem DURDURULDU."
+        )
+
+    experiment_id = ctx["experiment_id"]
+    if ctx["base_experiment_id"] != experiment_id:
+        raise Step8AError(
+            f"WINDOW-CLOSURE VARIANT MODE: base_experiment_id "
+            f"({ctx['base_experiment_id']!r}) ctx experiment_id "
+            f"({experiment_id!r}) ile eslesmiyor. Islem DURDURULDU."
+        )
+
+    variant_id = str(ctx["variant_id"])
+    if variant_id == WINDOW_CLOSURE_CANONICAL_VARIANT_ID or int(ctx["shift_days"]) == 0:
+        raise Step8AError(
+            "WINDOW-CLOSURE VARIANT MODE: canonical varyant bu yoldan YENIDEN "
+            "URETILEMEZ; canonical Step8A frozen referanstir. Islem DURDURULDU."
+        )
+
+    prereg_path = Path(ctx[WINDOW_CLOSURE_PREREGISTRATION_KEY])
+    if not prereg_path.is_file():
+        raise Step8AError(
+            f"WINDOW-CLOSURE VARIANT MODE: frozen preregistration bulunamadi: "
+            f"{prereg_path}. Islem DURDURULDU."
+        )
+    try:
+        preregistration = json.loads(prereg_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        raise Step8AError(
+            f"WINDOW-CLOSURE VARIANT MODE: preregistration okunamadi "
+            f"({prereg_path}): {exc}. Islem DURDURULDU."
+        ) from exc
+    if not isinstance(preregistration, dict):
+        raise Step8AError(
+            "WINDOW-CLOSURE VARIANT MODE: preregistration bir JSON nesnesi "
+            "degil. Islem DURDURULDU."
+        )
+
+    if preregistration.get("analysis_id") != ctx["analysis_id"]:
+        raise Step8AError(
+            f"WINDOW-CLOSURE VARIANT MODE: analysis_id uyusmuyor "
+            f"(ctx={ctx['analysis_id']!r}, frozen preregistration="
+            f"{preregistration.get('analysis_id')!r}). Islem DURDURULDU."
+        )
+    if preregistration.get("experiment_id") != experiment_id:
+        raise Step8AError(
+            f"WINDOW-CLOSURE VARIANT MODE: preregistration experiment_id "
+            f"({preregistration.get('experiment_id')!r}) ctx ile eslesmiyor. "
+            "Islem DURDURULDU."
+        )
+
+    variants = preregistration.get("variants") or []
+    preregistered = next(
+        (v for v in variants
+         if isinstance(v, dict) and v.get("variant_id") == variant_id),
+        None,
+    )
+    if preregistered is None:
+        raise Step8AError(
+            f"WINDOW-CLOSURE VARIANT MODE: '{variant_id}' preregistration'da "
+            f"kayitli degil (kayitli varyantlar: "
+            f"{[v.get('variant_id') for v in variants if isinstance(v, dict)]}). "
+            "Islem DURDURULDU."
+        )
+    if preregistered.get("is_canonical") is True:
+        raise Step8AError(
+            f"WINDOW-CLOSURE VARIANT MODE: '{variant_id}' preregistration'da "
+            "canonical olarak isaretli; canonical varyant bu yoldan yeniden "
+            "uretilemez. Islem DURDURULDU."
+        )
+    if int(preregistered.get("shift_days", -1)) != int(ctx["shift_days"]):
+        raise Step8AError(
+            f"WINDOW-CLOSURE VARIANT MODE: shift_days uyusmuyor "
+            f"(ctx={ctx['shift_days']!r}, preregistration="
+            f"{preregistered.get('shift_days')!r}). Islem DURDURULDU."
+        )
+
+    expected = {
+        "predictor_start_date": preregistered.get("predictor_start_date"),
+        "predictor_end_date": preregistered.get("predictor_end_date"),
+        "label_start_date": preregistered.get("label_start_date"),
+        "label_end_date": preregistered.get("label_end_date"),
+    }
+    unpinned = sorted(field for field, value in expected.items() if not value)
+    if unpinned:
+        raise Step8AError(
+            f"WINDOW-CLOSURE VARIANT MODE: preregistration '{variant_id}' icin "
+            f"su tarih(ler)i pinlemiyor: {unpinned}. Islem DURDURULDU."
+        )
+
+    # The declared expectation must equal the preregistered one: a caller can
+    # never smuggle in a date the frozen document does not carry.
+    declared = {
+        "predictor_start_date": ctx["expected_predictor_start_date"],
+        "predictor_end_date": ctx["expected_predictor_end_date"],
+    }
+    wrong_declared = {
+        field: (value, expected[field])
+        for field, value in declared.items() if value != expected[field]
+    }
+    if wrong_declared:
+        raise Step8AError(
+            f"WINDOW-CLOSURE VARIANT MODE: '{variant_id}' icin bildirilen "
+            f"beklenen tarihler preregistration ile eslesmiyor "
+            f"(alan: (bildirilen, preregistered)): {wrong_declared}. "
+            "Islem DURDURULDU."
+        )
+
+    # ...and the context the production chain will actually run on must equal
+    # it too, so no arbitrary shifted window can be processed.
+    actual = {field: ctx[field] for field in expected}
+    wrong_actual = {
+        field: (value, expected[field])
+        for field, value in actual.items() if value != expected[field]
+    }
+    if wrong_actual:
+        raise Step8AError(
+            f"WINDOW-CLOSURE VARIANT MODE: '{variant_id}' calisma baglami "
+            f"preregistered varyant tarihleriyle eslesmiyor "
+            f"(alan: (ctx, preregistered)): {wrong_actual}. Islem DURDURULDU."
+        )
+
+    # The label window is FROZEN: it must equal the canonical label window of
+    # the analysis, not merely the variant record.
+    canonical_label = preregistration.get("label_window") or {}
+    frozen_label = {
+        "label_start_date": canonical_label.get("start_date"),
+        "label_end_date": canonical_label.get("end_date"),
+    }
+    wrong_label = {
+        field: (ctx[field], value)
+        for field, value in frozen_label.items()
+        if value is not None and ctx[field] != value
+    }
+    if wrong_label:
+        raise Step8AError(
+            f"WINDOW-CLOSURE VARIANT MODE: label penceresi FROZEN canonical "
+            f"pencere ile eslesmiyor (alan: (ctx, frozen)): {wrong_label}. "
+            "Islem DURDURULDU."
+        )
+    if None in frozen_label.values():
+        raise Step8AError(
+            "WINDOW-CLOSURE VARIANT MODE: preregistration frozen canonical "
+            "label penceresini pinlemiyor. Islem DURDURULDU."
+        )
+    return expected
+
+
+def resolve_expected_experiment_dates(ctx: dict | None) -> dict | None:
+    """The manually verified date expectation this run must match.
+
+    Without the opt-in this is exactly `_EXPECTED_EXPERIMENT_DATES[experiment]`
+    -- unchanged. With it, the expectation comes from the frozen
+    preregistration instead, after that document has been fully validated.
+    """
+    if ctx is None:
+        return None
+    if window_closure_variant_mode(ctx):
+        return assert_window_closure_variant_context(ctx)
+    return _EXPECTED_EXPERIMENT_DATES.get(ctx.get("experiment_id"))
+
+
+def assert_step8a_preflight(ctx: dict | None, out_dir: Path) -> None:
+    """Date/context and output-containment gate, BEFORE anything is created.
+
+    Runs before the output directory is made and before any raster, CSV,
+    parquet, stats or summary is produced, so a date or context mismatch can
+    never leave a partial Step8A artefact behind. For a canonical run this is a
+    no-op superset of the checks that already ran later.
+    """
+    if ctx is None or ctx.get("experiment_id") == "kozan_2023":
+        return
+
+    experiment_id = ctx["experiment_id"]
+    expected = resolve_expected_experiment_dates(ctx)
+    if expected:
+        wrong = {
+            field: (ctx.get(field), value) for field, value in expected.items()
+            if ctx.get(field) != value
+        }
+        if wrong:
+            raise Step8AError(
+                f"METADATA TUTARSIZLIGI ('{experiment_id}'): calisma baglaminin "
+                f"tarihleri beklenen degerlerle eslesmiyor (alan: (ctx, "
+                f"beklenen)): {wrong}. Hicbir cikti YAZILMADI; islem DURDURULDU."
+            )
+
+    if not window_closure_variant_mode(ctx):
+        return
+
+    allowed_root = ctx.get(WINDOW_CLOSURE_ALLOWED_OUTPUT_ROOT_KEY)
+    if allowed_root is None:
+        raise Step8AError(
+            "WINDOW-CLOSURE VARIANT MODE: "
+            f"'{WINDOW_CLOSURE_ALLOWED_OUTPUT_ROOT_KEY}' verilmedi; cikti "
+            "yolu dogrulanamaz. Islem DURDURULDU."
+        )
+    allowed = Path(allowed_root).resolve()
+    resolved = Path(out_dir).resolve()
+    if not (resolved == allowed or allowed in resolved.parents):
+        raise Step8AError(
+            f"WINDOW-CLOSURE VARIANT MODE: Step8A cikti dizini {resolved} "
+            f"ayrilmis namespace {allowed} disinda. Hicbir cikti YAZILMADI; "
+            "islem DURDURULDU."
+        )
+
+
 def assert_metadata_dates_consistent(stats_data: dict, ctx: dict | None) -> None:
     """
     Step8A ciktilari YAZILMADAN once calisan sert (hard) tutarlilik kontrolu.
@@ -2193,8 +2476,11 @@ def assert_metadata_dates_consistent(stats_data: dict, ctx: dict | None) -> None
             f"{stats_data['label_end_date']}) eslesmiyor. Islem DURDURULDU."
         )
 
-    # 3. elle-dogrulanmis beklenen tarihler (varsa)
-    expected = _EXPECTED_EXPERIMENT_DATES.get(experiment_id)
+    # 3. elle-dogrulanmis beklenen tarihler (varsa).
+    #    Kaynak: normalde _EXPECTED_EXPERIMENT_DATES; window-closure variant
+    #    modunda (opt-in) FROZEN preregistration -- ayni sertlikte, sadece
+    #    beklentinin kaynagi degisir.
+    expected = resolve_expected_experiment_dates(ctx)
     if expected:
         wrong = {
             f: (stats_data.get(f), v) for f, v in expected.items()
@@ -2510,6 +2796,12 @@ def main(
     log.info("=" * 60)
 
     out_dir = BASE_DIR / output_dir_arg
+    # PREFLIGHT (fail-fast): tarih/baglam ve -- variant modunda -- cikti yolu
+    # kontrolu, HICBIR dizin veya dosya olusturulmadan ONCE. Boylece bir tarih
+    # veya baglam uyusmazligi geride yarim CSV/parquet/stats birakamaz.
+    # Canonical calistirma icin bu, zaten var olan kontrollerin daha erken
+    # calisan bir ust kumesidir; canonical ciktilar degismez.
+    assert_step8a_preflight(ctx, out_dir)
     required_outputs = [
         out_dir / "step8a_500m_modeling_dataset.parquet",
         out_dir / "step8a_500m_modeling_dataset.csv",
@@ -2705,30 +2997,42 @@ def main(
     parquet_path = out_dir / "step8a_500m_modeling_dataset.parquet"
     parquet_written = False
 
+    # The dataset artefacts are STAGED next to their final paths and promoted
+    # only after every metadata/date validator below has passed, so a context
+    # or date mismatch can never leave a CSV, parquet or stats file behind.
+    # The promoted bytes are identical to the previous in-place write.
+    staged: list[tuple[Path, Path]] = []
     if write_csv:
-        df.to_csv(csv_path, index=False)
-        log.info("CSV yazildi: %s", csv_path)
+        csv_staged = _staged_path(csv_path)
+        df.to_csv(csv_staged, index=False)
+        staged.append((csv_staged, csv_path))
 
     if write_parquet:
+        parquet_staged = _staged_path(parquet_path)
         try:
-            df.to_parquet(parquet_path, index=False)
+            df.to_parquet(parquet_staged, index=False)
             parquet_written = True
-            log.info("Parquet yazildi: %s", parquet_path)
+            staged.append((parquet_staged, parquet_path))
         except (ImportError, ValueError) as exc:
+            if parquet_staged.exists():
+                parquet_staged.unlink()
             log.warning(
                 "Parquet yazilamadi (pyarrow/fastparquet eksik olabilir): %s. "
                 "CSV ile devam ediliyor.", exc,
             )
 
-    stats_path = write_stats(
+    stats_path = out_dir / STATS_FILENAME
+    stats_staged = write_stats(
         out_dir, result, reference_path, label_path, predictor_paths,
         landcover_path, landcover_info, source_mask_path,
         min_valid_fraction, burnable_threshold, result["warnings"],
         exclude_pre_label_burns=exclude_pre_label_burns,
         pre_label_exclusion_manifest_path=pre_label_exclusion_manifest_path,
+        filename=_staged_path(stats_path).name,
     )
+    staged.append((stats_staged, stats_path))
     # parquet_written flag is added post-hoc so write_stats stays pure.
-    stats_data = json.loads(stats_path.read_text(encoding="utf-8"))
+    stats_data = json.loads(stats_staged.read_text(encoding="utf-8"))
     stats_data["parquet_written"] = parquet_written
     stats_data["csv_written"] = bool(write_csv)
     stats_data["diagnostic_rasters"] = {k: str(v) for k, v in diag_rasters.items()}
@@ -2754,13 +3058,28 @@ def main(
         stats_data["label_start_date"] = ctx["label_start_date"]
         stats_data["label_end_date"] = ctx["label_end_date"]
 
-    # FAIL-FAST (madde 6): ciktilar DISKE YAZILMADAN once, tarih alanlarinin
-    # ctx / predictor_window / label_window / elle-dogrulanmis beklenen
-    # degerlerle birebir tutarli oldugunu ve Kozan'in legacy tarihlerini
-    # icermedigini dogrula. Kozan icin hicbir sey yapmaz.
-    assert_metadata_dates_consistent(stats_data, ctx)
+    # FAIL-FAST (madde 6): ciktilar FINAL ADLARINA TASINMADAN once, tarih
+    # alanlarinin ctx / predictor_window / label_window / elle-dogrulanmis
+    # beklenen degerlerle birebir tutarli oldugunu ve Kozan'in legacy
+    # tarihlerini icermedigini dogrula. Kozan icin hicbir sey yapmaz.
+    # Basarisiz olursa YALNIZ bu cagrinin kendi gecici dosyalari silinir;
+    # cikti dizininde hicbir final CSV/parquet/stats olusmaz.
+    try:
+        assert_metadata_dates_consistent(stats_data, ctx)
+        stats_staged.write_text(
+            json.dumps(stats_data, indent=2, default=str), encoding="utf-8",
+        )
+    except BaseException:
+        _discard_staged(staged)
+        raise
 
-    stats_path.write_text(json.dumps(stats_data, indent=2, default=str), encoding="utf-8")
+    # --- Atomic promote: the artefacts appear only now, all validated -------
+    for source, destination in staged:
+        os.replace(source, destination)
+    if write_csv:
+        log.info("CSV yazildi: %s", csv_path)
+    if parquet_written:
+        log.info("Parquet yazildi: %s", parquet_path)
 
     summary_path = write_summary(out_dir, result, stats_path, effective_label_start, effective_label_end)
 

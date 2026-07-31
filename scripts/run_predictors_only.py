@@ -326,6 +326,7 @@ def _atomic_replace(tmp_path: Path, out_path: Path) -> None:
 def _validate_export_alignment(
     out_path: Path, region, scale_m: float, crs: str,
     expected_band_count: int = 1, bounds_tolerance_px: float = 2.0,
+    crs_equivalence_fn=None,
 ) -> dict:
     """
     Export SONRASI (direct veya tiled -- HER IKI YOLDAN SONRA da) hizalama
@@ -339,6 +340,16 @@ def _validate_export_alignment(
     Herhangi biri basarisiz olursa PredictorRunnerError firlatir -- yanlis
     hizalanmis bir dosya SESSIZCE basarili sayilamaz. Basarili olursa QA
     raporunu (dict) dondurur (metadata/log icin).
+
+    crs_equivalence_fn: OPSIYONEL. None ise (VARSAYILAN) CRS kontrolu
+        asagidaki mevcut exact/string karsilastirmasidir ve TUM mevcut
+        cagiranlar icin davranis BIREBIR AYNI kalir. Bir callable verilirse
+        `crs_equivalence_fn(actual_crs, expected_crs)` cagrilir ve YALNIZCA
+        True donerse CRS uyumlu sayilir -- authority kodu OLMAYAN, yalnizca
+        WKT ile tanimli kaynaklar icindir (or. TerraClimate: GDAL yazarken
+        isimleri ve eksen sirasini normalize ettigi icin string esitlik
+        tutmaz, semantik esdegerlik tutar). Transform, piksel boyutu,
+        sinirlar, bant sayisi ve dtype kontrolleri DEGISMEZ/GEVSEMEZ.
     """
     import numpy as np
     import rasterio
@@ -361,12 +372,22 @@ def _validate_export_alignment(
     # --- CRS ---
     if actual_crs is None:
         raise PredictorRunnerError(f"Alignment QA: cikti CRS'siz: {out_path}")
-    try:
-        crs_ok = actual_crs.to_string().upper() == str(crs).upper() or (
-            actual_crs.to_epsg() is not None and str(actual_crs.to_epsg()) in str(crs)
-        )
-    except Exception:  # noqa: BLE001
-        crs_ok = str(actual_crs).upper() == str(crs).upper()
+    if crs_equivalence_fn is not None:
+        # Cagiranin sagladigi SEMANTIK karsilastirma. Yalnizca True kabul
+        # edilir; istisna veya False reddedilir.
+        try:
+            crs_ok = bool(crs_equivalence_fn(actual_crs, crs))
+        except Exception:  # noqa: BLE001 -- cozulemeyen CRS = uyumsuz
+            crs_ok = False
+        crs_check_mode = "caller_supplied_equivalence_fn"
+    else:
+        try:
+            crs_ok = actual_crs.to_string().upper() == str(crs).upper() or (
+                actual_crs.to_epsg() is not None and str(actual_crs.to_epsg()) in str(crs)
+            )
+        except Exception:  # noqa: BLE001
+            crs_ok = str(actual_crs).upper() == str(crs).upper()
+        crs_check_mode = "exact_string_or_epsg"
     if not crs_ok:
         raise PredictorRunnerError(
             f"Alignment QA: beklenmeyen CRS ({actual_crs} != {crs}) -> {out_path}"
@@ -416,6 +437,7 @@ def _validate_export_alignment(
         "crs": str(actual_crs), "dtype": dtype, "band_count": band_count,
         "pixel_size_deg": [px_w, px_h], "bounds": list(bounds),
         "requested_aoi": [xmin, ymin, xmax, ymax],
+        "crs_check_mode": crs_check_mode,
     }
 
 
@@ -631,6 +653,22 @@ def _export_tiled(
     return out_path
 
 
+#: Uzantisi `.tif` OLMAYAN bir filename verilirse geemap.ee_export_image
+#: sessizce (istisnasiz) None doner ve dosya uretmez. Direct export'un gecici
+#: dosyasi bu yuzden `.tif` ile bitmek ZORUNDADIR.
+GEEMAP_REQUIRED_EXPORT_SUFFIX = ".tif"
+
+
+def direct_export_tmp_path(out_path: Path) -> Path:
+    """Direct export'un gecici dosya yolu -- her zaman `.tif` ile biter.
+
+    Nokta-onekli (gizli) ve `out_path` ile AYNI dizinde kalir, boylece
+    `_atomic_replace` ayni dosya sisteminde atomik olarak calisir.
+    """
+    out_path = Path(out_path)
+    return out_path.parent / f".{out_path.stem}.direct.tmp{GEEMAP_REQUIRED_EXPORT_SUFFIX}"
+
+
 def export_image_direct_or_tiled(
     image,
     out_path: Path,
@@ -647,6 +685,7 @@ def export_image_direct_or_tiled(
     band_count: int = 1,
     run_alignment_qa: bool = True,
     nodata: float | None = None,
+    crs_equivalence_fn=None,
 ) -> dict:
     """
     nodata: verilirse, `image`'in caller tarafindan ONCEDEN AYNI degerle
@@ -695,6 +734,11 @@ def export_image_direct_or_tiled(
     (daha ince) grid'e geçilir. Boyutla/dosya-eksikliğiyle İLGİSİZ bir hata
     (auth, geometry, vb.) alınırsa döngü durur ve hata olduğu gibi
     fırlatılır.
+
+    crs_equivalence_fn: OPSIYONEL, dogrudan _validate_export_alignment'ya
+        iletilir. None (VARSAYILAN) ise CRS kontrolu mevcut exact/string
+        davranisidir ve butun mevcut cagiranlar icin hicbir sey degismez.
+        Bkz. _validate_export_alignment docstring'i.
 
     band_count: cagiran tarafin EXPORT EDILEN GORUNTUNUN GERCEK bant sayisini
         acikca gecmesi gereken parametre -- boyut tahmininde
@@ -765,7 +809,21 @@ def export_image_direct_or_tiled(
         )
     else:
         log.info("Direct export attempt: [%s] tam AOI, tiled olmayan export -> %s", label, out_path)
-        tmp_direct_path = out_path.parent / f".{out_path.name}.direct.tmp"
+        # REGRESSION FIX: geemap.ee_export_image REDDEDER (istisna FIRLATMADAN,
+        # yalnizca "The filename must end with .tif" basip None doner) bir
+        # filename'i uzantisi `.tif` DEGILSE. Eski gecici ad
+        # `.<name>.tif.direct.tmp` idi -- uzantisi `.tmp` oldugu icin HER direct
+        # export sessizce dosya uretmiyor, `_file_ok` False donuyor ve HER
+        # export gereksiz yere tiled fallback'e dusuyordu (prelabel export
+        # logunda gozlenen davranis tam olarak budur). Tiled yol bundan
+        # etkilenmiyordu, cunku tile adlari zaten `..._tile_rX_cY.tif` ile
+        # bitiyor (bkz. _export_tiled).
+        #
+        # Gecici ad artik `.tif` ile BITER; hala nokta-onekli (gizli), hala
+        # ayni dizinde ve hala `_atomic_replace` ile tasiniyor -- atomiklik,
+        # nodata damgalama ve hizalama QA davranisi DEGISMEDI. Bilimsel
+        # icerik/reducer bu duzeltmeden ETKILENMEZ.
+        tmp_direct_path = direct_export_tmp_path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             geemap.ee_export_image(
@@ -794,7 +852,10 @@ def export_image_direct_or_tiled(
     if direct_ok:
         log.info("[%s] direkt export başarılı: %s (%d bytes)", label, out_path, out_path.stat().st_size)
         alignment_qa = (
-            _validate_export_alignment(out_path, region, scale, crs, expected_band_count=band_count)
+            _validate_export_alignment(
+                out_path, region, scale, crs, expected_band_count=band_count,
+                crs_equivalence_fn=crs_equivalence_fn,
+            )
             if run_alignment_qa else None
         )
         return {
@@ -832,7 +893,10 @@ def export_image_direct_or_tiled(
                     t.unlink()
                 log.info("[%s] --cleanup-tiles: %d tile dosyası silindi.", label, len(_tiles))
             alignment_qa = (
-                _validate_export_alignment(result_path, region, scale, crs, expected_band_count=band_count)
+                _validate_export_alignment(
+                    result_path, region, scale, crs, expected_band_count=band_count,
+                    crs_equivalence_fn=crs_equivalence_fn,
+                )
                 if run_alignment_qa else None
             )
             return {

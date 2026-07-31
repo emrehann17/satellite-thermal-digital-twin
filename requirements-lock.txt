@@ -27,6 +27,7 @@ future==1.0.0
 gdown==6.1.0
 geemap==0.38.3
 geocoder==1.38.1
+geographiclib==2.1
 google-api-core==2.31.0
 google-api-python-client==2.198.0
 google-auth==2.55.2

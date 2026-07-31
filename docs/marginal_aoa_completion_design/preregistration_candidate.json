@@ -1,0 +1,978 @@
+{
+  "schema_version": "marginal_aoa_completion.v1",
+  "preregistration_document_version": "design_candidate.v2_contract_finalised",
+  "status": "design_candidate",
+  "created_at_utc": "2026-08-02T10:22:29Z",
+  "current_git_head": "19d825bb7dc21459aebe0870828cb25d8fc2a892",
+  "current_git_branch": "main",
+  "analysis_run": false,
+  "model_fitted": false,
+  "gee_query_issued": false,
+  "bootstrap_performed": false,
+  "nearest_neighbour_search_performed": false,
+  "distance_computed": false,
+  "experiments": [
+    "bejis_2022",
+    "evia_2021_extended",
+    "manavgat_2021",
+    "mugla_2021"
+  ],
+  "primary_population": "burnable_tree_shrub_grass",
+  "canonical_step8a_hashes": {
+    "bejis_2022": "3dec785a7d8e31db2d67ed283546bbfbca1559f56df46663488d0afc24d9e393",
+    "evia_2021_extended": "bdce859cf482f575d0f273174b157f47efd61779953fdd23d9486c5face5e553",
+    "manavgat_2021": "054a1961fc0582a33d36413263668b63074b21ae8b03d12269b6e228787f3439",
+    "mugla_2021": "c4ab107db2207f9f20775ccc0b3bf39381173fd07d4e82f6821ce7f40be7db8e"
+  },
+  "canonical_step8a_hash_verification": {
+    "verified_at_utc": "2026-08-02T10:22:29Z",
+    "method": "sha256sum recomputed on disk",
+    "all_four_match": true,
+    "mismatches": []
+  },
+  "primary_population_rows": {
+    "bejis_2022": 15190,
+    "evia_2021_extended": 9298,
+    "manavgat_2021": 20555,
+    "mugla_2021": 41731
+  },
+  "existing_marginal_aoa_analysis_id": "4a5b8c80489933ba501394d237b2f3d41d96c4a62ad6388a5f1264cc6b545dee",
+  "existing_marginal_aoa_schema": "marginal_aoa.v1",
+  "existing_marginal_aoa_support_definition": "source_observed_range_and_levels_v1",
+  "existing_marginal_aoa_namespace": "outputs/diagnostics/marginal_area_of_applicability/",
+  "existing_marginal_aoa_must_remain_unchanged": true,
+  "predictor_contract": {
+    "source": "src/step9a_audit_cross_region_inputs.SHARED_THERMAL_MODEL_FEATURES",
+    "numeric_features": [
+      "ndvi_mean",
+      "elevation_mean",
+      "slope_mean",
+      "lst_anomaly_mean",
+      "current_lst_mean",
+      "current_tvdi_mean",
+      "tvdi_difference_mean",
+      "downscaled_lst_mean",
+      "fused_lst_mean"
+    ],
+    "categorical_features": [
+      "landcover_dominant"
+    ],
+    "numeric_feature_count": 9,
+    "categorical_feature_count": 1,
+    "decision_status": "accepted",
+    "requires_user_confirmation": false
+  },
+  "target_label_firewall": {
+    "target_label_used": false,
+    "target_burn_date_used": false,
+    "target_transfer_metric_used": false,
+    "target_label_columns_loaded": [],
+    "rule": "Every parquet read passes an explicit columns= allow-list containing only predictor, grid, population-mask and eligibility columns. No target label or outcome column is loaded at any point.",
+    "decision_status": "accepted",
+    "requires_user_confirmation": false
+  },
+  "source_label_policy": {
+    "source_label_used": true,
+    "source_label_read_directly_by_completion_module": false,
+    "mechanism": "Feature weights are RandomForest impurity importances from a Step8B model fitted on the source `burned` label. The completion module reads the frozen importance CSV, never a label column.",
+    "diagnostic_class": "target_label_blind_source_model_informed",
+    "forbidden_description": "label-blind",
+    "required_description": "target-label-blind, source-model-informed diagnostic",
+    "decision_status": "accepted",
+    "requires_user_confirmation": false
+  },
+  "importance_source_candidate": {
+    "artifact_path_pattern": "outputs/experiments/<experiment_id>/step8b/step8b_feature_importance.csv",
+    "population_filter": "burnable_tree_shrub_grass",
+    "model_filter": "thermal",
+    "importance_method": "impurity_gini_in_sample_whole_population_v1",
+    "importance_method_class": "impurity_gain",
+    "model_algorithm": "RandomForestClassifier",
+    "model_hyperparameters": {
+      "n_estimators": 300,
+      "max_depth": null,
+      "min_samples_leaf": 3,
+      "class_weight": "balanced",
+      "random_state": 42
+    },
+    "fold_repeat_structure": "none_single_final_refit_on_whole_population",
+    "out_of_fold": false,
+    "normalized": true,
+    "negative_values_possible": false,
+    "categorical_representation_in_artifact": "one_hot_dummy_level",
+    "artifact_sha256": {
+      "bejis_2022": "abc2a3b771d464dfac38597bbe6a0b425e6bec175bad860cc7a954fa005a3d49",
+      "evia_2021_extended": "81995a6088f13b2d115a23be13917f561af264b5bdf1ef98b4fb940a15b6bf5a",
+      "manavgat_2021": "24a18effd1b7828d48f2d1507dec982111364d637cee2bb884e4b7178aa72ec5",
+      "mugla_2021": "9077eb95f928e9d0a575d658c9c03fe5cb8ffa485b04ebddafc08b102451e3ce"
+    },
+    "present_in_all_four_aois": true,
+    "mandatory_limitation": "Feature weights come from RandomForest mean-decrease-in-impurity (Gini) importance, computed on a final model refit on the whole source population. Impurity importance is computed in-sample rather than on held-out data, and is known to be biased toward continuous and high-cardinality predictors relative to low-cardinality categorical ones. It is used here as a source-model relevance weighting, not as an unbiased estimate of a predictor's causal or generalisation importance. A held-out permutation importance would be the preferred weighting and does not exist in this repository.",
+    "preferred_alternative_not_available": "out_of_fold_permutation_importance",
+    "preferred_alternative_requires": "new model fits; not performed in this design task",
+    "decision_status": "accepted",
+    "requires_user_confirmation": false,
+    "implementation_blocker": false,
+    "decision_id": "B-1"
+  },
+  "feature_weight_policy_candidate": {
+    "derivation": [
+      "filter importance CSV to (burnable_tree_shrub_grass, thermal)",
+      "assert the row set equals the 9 num__ features plus the observed cat__landcover_dominant_* levels",
+      "assert every importance is finite and non-negative",
+      "w[f] = importance of num__<f> for each numeric feature",
+      "w[landcover_dominant] = sum of all cat__landcover_dominant_* importances",
+      "assert the sum is 1.0 within 1e-9",
+      "renormalise defensively (a no-op under the adopted source)"
+    ],
+    "categorical_weight_treatment": "group_sum_single_feature_weight",
+    "negative_importance_policy": "fail_closed_assert_nonnegative",
+    "negative_importance_reachable_under_adopted_source": false,
+    "negative_importance_fallback_if_source_changes": "clip_at_zero_renormalise_and_record_clipped_features",
+    "negative_importance_rejected_options": {
+      "absolute_importance": "A negative permutation importance means shuffling the feature improved held-out performance. Treating that as strong importance has the wrong sign of information.",
+      "drop_feature_entirely": "Removing a dimension changes the geometry of the space, not just the weight. Weight zero is the correct representation."
+    },
+    "zero_weight_policy": "permitted_and_recorded_never_silently_dropped",
+    "observed_zero_weight_features_after_group_sum": [],
+    "weight_constraints": {
+      "finite": true,
+      "nonnegative": true,
+      "sums_to_one_tolerance": 1e-09
+    },
+    "reported_diagnostics": [
+      "n_features_with_positive_weight",
+      "effective_feature_count_perplexity",
+      "feature_weight_entropy",
+      "zero_weight_features",
+      "dummy_level_contributions"
+    ],
+    "decision_status": "accepted",
+    "requires_user_confirmation": false,
+    "implementation_blocker": false,
+    "decision_id": "B-1b"
+  },
+  "numeric_scaling_candidate": {
+    "method": "source_mean_and_population_sd",
+    "implementation": "core.step10_shared.compute_regionwise_zscore_stats reused verbatim",
+    "ddof": 0,
+    "constant_feature_guard": "EPSILON_STD from core/step10_shared.py; scale set to 1.0 and constant_feature_guard_used recorded per feature per source AOI",
+    "statistics_computed_from": "source_primary_population_only",
+    "statistics_applied_to": "both source reference cells and target cells",
+    "target_statistics_computed": false,
+    "imputation": "none",
+    "imputation_explicitly_rejected": "core.step10_shared.apply_regionwise_zscore fills missing values with the region mean. Using it would either make target coordinates depend on the target distribution, or place every incomplete target cell at the source centroid -- the most-supported point in the space. Both are wrong.",
+    "missing_value_policy": {
+      "source_cell_with_any_missing_predictor": "excluded_from_reference_set_and_counted",
+      "target_cell_with_any_missing_predictor": "not_assessable_never_outside",
+      "source_feature_with_no_finite_value": "fail_closed"
+    },
+    "robust_scale_alternative": "source median and IQR",
+    "robust_scale_alternative_status": "not_run_available_only_as_a_preregistered_sensitivity",
+    "decision_status": "accepted",
+    "requires_user_confirmation": false,
+    "implementation_blocker": false,
+    "decision_id": "B-4"
+  },
+  "weighted_distance_formula": {
+    "formula": "d_w(x, x_i) = sqrt( sum_j w_j * (z_j(x) - z_j(x_i))^2 + w_landcover * 1[level(x) != level(x_i)] )",
+    "numeric_term": "weighted squared Euclidean on source-standardised coordinates",
+    "categorical_term": "Gower categorical mismatch penalty, binary, K-invariant",
+    "equivalent_implementation": "multiply standardised numeric features by sqrt(w_j) before nearest-neighbour search; the categorical term is handled by partitioning the reference set on level",
+    "exactness_note": "d_w(x) = min( nn over same-level reference cells, sqrt( nn over different-level reference cells squared + w_landcover ) ). This is an identity, not an approximation, because the categorical term takes only two values.",
+    "nearest_neighbour_tie_break": "min_source_row_500m_then_col_500m",
+    "directed": true,
+    "decision_status": "accepted",
+    "requires_user_confirmation": false
+  },
+  "distance_normaliser_candidate": {
+    "definition": "mean weighted distance over all DISTINCT source reference cell pairs; self-distance excluded; categorical mismatch term included",
+    "field_name": "source_pairwise_mean_distance",
+    "normaliser_method": "source_pairwise_mean_distance_v1",
+    "equivalent_reproducible_form": "for every source reference cell s compute m(s) = mean of d_w(s, s') over all s' != s; then source_distance_normaliser = mean of m(s)",
+    "self_distance_excluded": true,
+    "categorical_term_included": true,
+    "n_distinct_pairs_formula": "n * (n - 1) / 2",
+    "uses_folds": false,
+    "uses_labels": false,
+    "uses_target_data": false,
+    "identical_across_a_sources_three_targets": true,
+    "computation": "exact, deterministic chunked accumulation; never materialises the full n x n matrix",
+    "precomputed_in_this_design_task": false,
+    "supersedes": "mean source spatial-fold holdout nearest-neighbour distance",
+    "supersession_reason": "A nearest-neighbour distance on a dense, autocorrelated 500 m grid is dominated by grid spacing rather than by the spread of the source distribution. Spatial folds mitigate but do not remove this: at approximately 5 km blocks a held-out cell's nearest out-of-fold neighbour still sits just across a block boundary. The resulting denominator shrinks as an AOI is sampled more densely, which would make DI incomparable between a 9298-cell AOI (evia_2021_extended) and a 41731-cell AOI (mugla_2021) purely through sample size. The mean pairwise distance is the expected weighted distance between two randomly drawn source cells: a genuine scale statistic of the source distribution, essentially insensitive to sampling density.",
+    "decision_status": "accepted",
+    "requires_user_confirmation": false,
+    "implementation_blocker": false,
+    "decision_id": "B-5"
+  },
+  "source_threshold_candidate": {
+    "training_di_definition": "training_DI(s) = holdout_nearest_distance(s) / source_pairwise_mean_distance",
+    "holdout_nearest_distance_definition": "nearest weighted distance from source cell s to a source reference cell outside s's fold; full mixed distance including the categorical term",
+    "training_di_denominator": "source_pairwise_mean_distance",
+    "primary_threshold_formula": "source_aoa_threshold = min( max(training_DI), Q3(training_DI) + 1.5 * IQR(training_DI) )",
+    "primary_threshold_field": "training_di_upper_whisker_threshold",
+    "primary_threshold_method": "source_spatial_fold_holdout_di_upper_whisker_v1",
+    "classification_boundary": "DI <= threshold is inside; a cell exactly at the threshold is inside",
+    "clamp_flag_field": "whisker_clamped_to_max",
+    "secondary_thresholds_reported": [
+      "training_di_q50_threshold",
+      "training_di_q90_threshold",
+      "training_di_q95_threshold",
+      "training_di_q99_threshold",
+      "training_di_max_threshold"
+    ],
+    "secondary_q95_method": "source_spatial_fold_holdout_di_q95_v1",
+    "q95_is_operative": false,
+    "q95_may_replace_primary": false,
+    "whisker_inputs_stored": [
+      "training_di_q1",
+      "training_di_q3",
+      "training_di_iqr"
+    ],
+    "quantile_method": "numpy.quantile method=linear",
+    "derived_from_target_data": false,
+    "supersedes": "0.95 quantile of the source spatial-fold holdout DI as the operative threshold",
+    "supersession_reason": "The upper whisker adapts to the shape of the training-DI distribution, whereas a fixed quantile declares about 5 percent of source holdout cells outside by construction whether or not the distribution has a tail. The min(max(training_DI), whisker) clamp additionally guarantees the threshold never exceeds anything observed in the source.",
+    "decision_status": "accepted",
+    "requires_user_confirmation": false,
+    "implementation_blocker": false,
+    "decision_id": "B-6"
+  },
+  "categorical_policy_candidate": {
+    "policy_id": "weighted_mismatch_penalty_gower_v1",
+    "formula": "d_cat^2 = w_landcover * 1[level(x) != level(x_i)]",
+    "weight_source": "sum of the source model's cat__landcover_dominant_* importances",
+    "k_invariant": true,
+    "rejected_one_hot": "With per-dummy weight w_lc/K, two different levels differ in exactly two one-hot coordinates by 1 each, giving a squared contribution of 2*w_lc/K. The penalty would depend on K -- 7 for manavgat and bejis, 8 for mugla and evia -- which is an encoding artefact, not a scientific signal.",
+    "unseen_target_level_policy": "mismatches every source reference cell, adds w_landcover to every candidate distance, can never be the reason a cell is classified inside, and is counted and reported",
+    "missing_category_policy": "not_assessable",
+    "observed_missing_categories": 0,
+    "observed_unseen_level_cells_across_all_12_pairs": 7,
+    "numeric_categorical_scale_note": "The numeric block is unbounded above while the categorical term is bounded by w_landcover. This is the standard Gower mixed-type asymmetry and must be disclosed in the limitations block.",
+    "original_unweighted_categorical_diagnostic_retained": true,
+    "original_unweighted_categorical_diagnostic_modified": false,
+    "sidecar_linkage": "weighted_predictor_space/directed_pair_summary.csv carries unweighted_categorical_sidecar_path and an echoed unweighted_fraction_target_unseen_level, validated against the marginal_aoa.v1 original",
+    "observed_levels_per_aoi": {
+      "bejis_2022": [
+        10,
+        20,
+        30,
+        40,
+        50,
+        60,
+        80
+      ],
+      "evia_2021_extended": [
+        10,
+        20,
+        30,
+        40,
+        50,
+        60,
+        80,
+        90
+      ],
+      "manavgat_2021": [
+        10,
+        20,
+        30,
+        40,
+        50,
+        60,
+        80
+      ],
+      "mugla_2021": [
+        10,
+        20,
+        30,
+        40,
+        50,
+        60,
+        80,
+        90
+      ]
+    },
+    "decision_status": "accepted",
+    "requires_user_confirmation": false,
+    "implementation_blocker": false,
+    "decision_id": "B-7"
+  },
+  "computational_contract": {
+    "reference_set": "all source primary-population cells with complete predictors",
+    "nearest_neighbour_method": "exact",
+    "subsampling": "none",
+    "approximate_nearest_neighbours": false,
+    "random_seed": null,
+    "approximation_error_audit": "not_applicable_exact_computation",
+    "subsample_contract": "not_applicable_no_subsampling_used",
+    "subsample_contract_note": "If a future AOI makes the exact computation infeasible, a subsample contract must be preregistered at that time. It is not pre-authorised here.",
+    "implementation_primary": "sklearn.neighbors KDTree on sqrt(w)-scaled numeric coordinates, one tree over the full reference set plus one per source landcover level",
+    "implementation_fallback": "chunked brute force via scipy.spatial.distance.cdist",
+    "both_routes_must_agree_within": 1e-12,
+    "new_runtime_dependency_required": false,
+    "decision_status": "accepted",
+    "requires_user_confirmation": false
+  },
+  "climate_input_candidate": {
+    "status": "authorised_pending_export",
+    "exists_in_repository": false,
+    "search_performed": "rg for ERA5, WorldClim, TerraClimate, CHIRPS, CHELSA, IDAHO_EPSCOR, precipitation, aridity, koppen and climate_zone across the repository excluding venv, old_codes and docs -- no matches",
+    "collections_ever_exported_by_this_project": [
+      "MODIS/061/MOD11A1",
+      "LANDSAT/LC08/C02/T1_L2",
+      "COPERNICUS/DEM/GLO30",
+      "USGS/SRTMGL1_003",
+      "ESA/WorldCover/v200",
+      "MODIS MCD64A1 (labels)"
+    ],
+    "proposed_variable_count": 6,
+    "spatial_summary": "arithmetic mean over valid TerraClimate land pixels inside the canonical AOI bbox",
+    "land_mask_rationale": "TerraClimate is a terrestrial product and is undefined over water, so its own valid-data mask IS the land mask. Using it avoids a second, independently-defined landmask that could disagree with it. The mask matters because mugla_2021's bbox is 38.9 percent permanent water and evia_2021_extended's is 57.7 percent.",
+    "rejected_repository_candidates": {
+      "step5_baseline_lst_mean": "4 years not 30; bejis_2022 uses 2018-2021 while the others use 2017-2020; anniversary dates differ (07-27 / 08-14 / 07-28 / 08-02); window widths differ (56 / 60 / 57 / 58 days); cloud coverage 47.8-77.3 percent; single variable; clear-sky surface temperature confounded with the land cover and vegetation state the AoA already measures",
+      "step5c_baseline_tvdi_mean": "inherits every defect above and adds full dependence on the AOI-internal NDVI-LST feature space",
+      "data_modis_lst_mean": "the artifact metadata states verbatim: experiment predictor window (single-season mean/std over daily MODIS scenes within the window), NOT a multi-year baseline",
+      "event_period_predictors": "current_lst_mean, current_tvdi_mean, downscaled_lst_mean, fused_lst_mean and lst_anomaly_mean are model predictors already inside the weighted dissimilarity",
+      "elevation_and_landcover": "static covariates already in the predictor contract; elevation is the top-weighted feature in three of four AOIs",
+      "domain_classifier_audit": "a learned separability measure over the same predictors, not an independent climatic axis; only 3 of 6 unordered pairs, evia_2021_extended absent"
+    },
+    "forbidden_substitution": "No distance built from any of the rejected repository candidates may be published under a climate_* field name. Enforced as a path-provenance assertion, not a naming convention.",
+    "requires_new_gee_export": true,
+    "decision_status": "accepted",
+    "requires_user_confirmation": false,
+    "implementation_blocker": false,
+    "decision_id": "C-9",
+    "export_authorised": true,
+    "collection": "IDAHO_EPSCOR/TERRACLIMATE",
+    "reference_period": "1991-01-01/2020-12-31",
+    "season_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "season_months_provenance": "core/config.py SUMMER_MONTH_START=6, SUMMER_MONTH_END=9 -- reused, not invented",
+    "month_count": 360,
+    "year_count": 30,
+    "climate_feature_count": 4,
+    "variables": [
+      {
+        "field": "annual_mean_temperature_c",
+        "band_expression": "(tmmx + tmmn) / 2",
+        "aggregation": "mean over all 360 months of 1991-2020",
+        "units": "degC"
+      },
+      {
+        "field": "annual_precipitation_mm",
+        "band_expression": "pr",
+        "aggregation": "yearly sum, then mean of the 30 yearly sums",
+        "units": "mm"
+      },
+      {
+        "field": "warm_season_climatic_water_deficit_mm",
+        "band_expression": "def",
+        "aggregation": "Jun-Sep yearly sum, then mean of the 30 yearly sums",
+        "units": "mm"
+      },
+      {
+        "field": "warm_season_vpd_kpa",
+        "band_expression": "vpd",
+        "aggregation": "mean of the Jun-Sep months over 1991-2020",
+        "units": "kPa"
+      }
+    ],
+    "removed_duplicate_axes": {
+      "removed": [
+        "warm_season_mean_temperature",
+        "warm_season_precipitation"
+      ],
+      "reason": "Near-duplicates of the annual axes beside them. In a Mediterranean climate the warm-season and annual temperature signals are strongly collinear, as are the two precipitation measures. Including both pairs would have weighted the temperature and precipitation directions twice each in an equally-weighted metric, quietly downweighting the deficit and VPD axes that carry the fire-relevant information."
+    },
+    "bands": [
+      "tmmx",
+      "tmmn",
+      "pr",
+      "def",
+      "vpd"
+    ],
+    "resolution_m": 4638,
+    "crs": "EPSG:4326",
+    "era5_land_cross_check": {
+      "in_initial_run": false,
+      "status": "deferred_later_sensitivity_requires_its_own_preregistration",
+      "collection_if_ever_run": "ECMWF/ERA5_LAND/MONTHLY_AGGR",
+      "why_deferred": "At ~11 km the smallest AOI (bejis_2022, ~60x52 km) spans only about 5x5 cells, too coarse to resolve the coastal/inland contrast that drives the Bejis result."
+    },
+    "land_mask": "terraclimate_native_valid_land_support",
+    "land_mask_applied_to": [
+      "every AOI climate summary",
+      "the Mediterranean reference window"
+    ],
+    "land_mask_supersedes": "the earlier proposal to reuse the per-AOI ESA WorldCover raster with class 80 excluded",
+    "band_scale_factors_rule": "Scale factors must come from the pinned export contract, be read from the collection's band metadata at export time, and be recorded truthfully in climate_export_metadata.json. They must not be hard-coded from memory, and the recorded values must match what was actually applied.",
+    "fields_until_export_runs": {
+      "climate_distance": null,
+      "climate_data_completeness": null,
+      "climate_component_contributions": null,
+      "climate_status": "authorised_pending_export"
+    },
+    "descriptive_fields_known_in_advance": [
+      "climate_distance_metric",
+      "climate_feature_count",
+      "climate_features",
+      "climate_reference_period",
+      "climate_season_months",
+      "climate_scaling_contract",
+      "climate_source_version",
+      "climate_land_mask"
+    ]
+  },
+  "climatic_distance_metric_candidate": {
+    "metric_id": "standardised_euclidean_mediterranean_reference_v1",
+    "formula": "climate_distance(A,B) = sqrt( (1/4) * sum_v ( s_v(A) - s_v(B) )^2 ), V = 4",
+    "standardisation": "s_v(aoi) = ( climate_value(aoi,v) - ref_mean_v ) / ref_sd_v",
+    "reference_window": {
+      "lon_min": -10.0,
+      "lat_min": 30.0,
+      "lon_max": 42.0,
+      "lat_max": 47.0,
+      "land_support": "terraclimate_native_valid_land_support",
+      "rationale": "The scale comes from a broad Mediterranean reference distribution rather than from the four AOIs, so a single AOI cannot define the metric and existing distances do not change when a fifth AOI is added. All four AOIs lie strictly inside this window."
+    },
+    "symmetric": true,
+    "dimensionless": true,
+    "variable_weighting": "equal",
+    "variable_weighting_is_a_choice_not_a_derivation": true,
+    "rejected_metrics": {
+      "mahalanobis": "The covariance would have to be estimated from 4 points in 6 dimensions. The sample covariance has rank at most 3 and is non-invertible; regularising it would make the metric depend entirely on an arbitrary ridge parameter.",
+      "gower": "All six variables are continuous, so Gower reduces to a range-normalised Manhattan distance with the range again estimated from 4 points."
+    },
+    "component_contributions_must_sum_to": "climate_distance squared, within 1e-12",
+    "uncertainty": "deterministic_aoi_level_value_no_interval",
+    "decision_status": "accepted",
+    "requires_user_confirmation": false,
+    "implementation_blocker": false,
+    "decision_id": "C-8",
+    "variable_count": 4,
+    "reference_sd_ddof": 0
+  },
+  "geographic_geometry_source": {
+    "path": "core/regions.py",
+    "sha256": "980eb5d4cf459ee52bf065f3b2fb2d644fb72449d62c0f8dfba1c58c93396275",
+    "commit": "0a3c5fe85926a3ec3204c810fc72d2fe93afe923",
+    "git_tracked": true,
+    "git_clean": true,
+    "resolvable_at_head": true,
+    "layer_used": "module-level bbox constants and inline literals, never build_regions() or ee.Geometry.getInfo()",
+    "requires_gee_session": false,
+    "aoi_bboxes_lon_min_lat_min_lon_max_lat_max": {
+      "bejis_2022": [
+        -1.05,
+        39.68,
+        -0.35,
+        40.15
+      ],
+      "evia_2021_extended": [
+        23.05,
+        38.55,
+        23.85,
+        39.15
+      ],
+      "manavgat_2021": [
+        31.05,
+        36.72,
+        31.85,
+        37.35
+      ],
+      "mugla_2021": [
+        27.1,
+        36.6,
+        28.9,
+        37.45
+      ]
+    },
+    "aoi_bbox_centres_lon_lat": {
+      "bejis_2022": [
+        -0.7,
+        39.915
+      ],
+      "evia_2021_extended": [
+        23.45,
+        38.85
+      ],
+      "manavgat_2021": [
+        31.45,
+        37.035
+      ],
+      "mugla_2021": [
+        28.0,
+        37.025
+      ]
+    },
+    "geometry_kind": "axis_aligned_rectangle",
+    "crs": "EPSG:4326",
+    "must_not_resolve_to": {
+      "evia_2021": [
+        23.12,
+        38.68,
+        23.52,
+        39.08
+      ],
+      "reason": "evia_2021 is a separate registered experiment and is NOT in this analysis set. The extended bbox contains it on all four sides."
+    },
+    "bbox_read_method": "hard-pinned mapping in the completion module with a test asserting agreement against core/regions.py",
+    "bbox_read_method_rationale": "mugla_2021 and evia_2021_extended are named module constants, but manavgat_2021 and bejis_2022 are inline ee.Geometry.BBox literals inside build_regions() and are unreachable without a GEE session. Promoting them to module constants would be a production edit and is out of scope for this design task.",
+    "geometry_contract_hash_format": "sha256_bytes(canonical_json({experiment_id, crs, kind, coordinates}))",
+    "decision_status": "accepted",
+    "requires_user_confirmation": false,
+    "implementation_blocker": false,
+    "decision_id": "C-10/A-10a/A-10b",
+    "centroid_definition": "bbox_centre_planar_epsg4326",
+    "centroid_is_the_only_centroid": true
+  },
+  "geographic_distance_metric": {
+    "primary_metric": "centroid_geodesic_distance_km",
+    "method_id": "wgs84_geodesic_inverse_km",
+    "ellipsoid": "WGS84",
+    "semi_major_axis_m": 6378137.0,
+    "inverse_flattening": 298.257223563,
+    "units": "kilometres",
+    "stored_precision": "full float64, never rounded in storage",
+    "centroid_definition": "bbox_centre_planar_epsg4326",
+    "centroid_definition_note": "For an axis-aligned rectangle the planar geometry centroid IS the bbox centre exactly. A spherical area-weighted centroid would differ by well under 100 m at these latitudinal extents and is not computed.",
+    "secondary_metrics": [
+      "optional_minimum_boundary_distance_km"
+    ],
+    "primary_uses_target_predictor_values": false,
+    "symmetric": true,
+    "deterministic": true,
+    "uncertainty": "deterministic_aoi_level_value_no_interval",
+    "available_relevant_packages": [
+      "numpy 2.5.1",
+      "scipy 1.18.0",
+      "scikit-learn 1.9.0",
+      "rasterio 1.5.0",
+      "pyarrow 24.0.0"
+    ],
+    "required_tests": [
+      "at least three published WGS84 reference pairs agree to <= 1 mm",
+      "d(A,B) == d(B,A) exactly",
+      "d(A,A) == 0.0 exactly",
+      "absence of geographiclib raises rather than falling back"
+    ],
+    "decision_status": "accepted",
+    "requires_user_confirmation": false,
+    "implementation_blocker": false,
+    "decision_id": "C-11",
+    "geodesic_implementation": "geographiclib_wgs84",
+    "geodesic_api": "geographiclib.geodesic.Geodesic.WGS84.Inverse(lat1, lon1, lat2, lon2)['s12'] / 1000.0",
+    "custom_vincenty_forbidden": true,
+    "haversine_forbidden": true,
+    "fallback_forbidden": "A missing geographiclib must fail closed with a clear message, never degrade to haversine or a local approximation.",
+    "vincenty_supersession_reason": "An earlier draft recommended an in-repo Vincenty inverse. Vincenty fails to converge for near-antipodal pairs and would require a hand-written iteration cap, a fail-closed branch and its own reference-pair suite -- numerical code to own and maintain in exchange for avoiding one small pure-Python dependency. Karney's algorithm, which geographiclib implements, supersedes Vincenty precisely on that point.",
+    "dependency_status": "geographiclib is NOT currently installed and is NOT in requirements.txt / requirements-lock.txt, as are pyproj, geopy and shapely. Verified by inspecting venv/lib/python*/site-packages/ and grepping the lock file.",
+    "dependency_process": {
+      "implementation_may_update": [
+        "requirements.txt",
+        "requirements-lock.txt"
+      ],
+      "installation_is_user_run": true,
+      "installation_reviewed_separately": true,
+      "auto_install_forbidden": true
+    },
+    "population_centroid_reported": false,
+    "population_centroid_removal_reason": "Computing a population centroid means opening the target Step8A frame and reading lon/lat. Dropping it lets the firewall statement for this component be unconditional -- the geographic distance reads no target data of any kind -- instead of carrying an exemption clause for one secondary column. Consequence disclosed in the limitations: for mugla_2021 (38.9 percent water) and evia_2021_extended (57.7 percent water) the bbox centre is not where the modelled cells are.",
+    "geographic_component_reads_step8a": false
+  },
+  "pair_cardinality": {
+    "directed_pairs": 12,
+    "unordered_pairs": 6,
+    "generation": "itertools.permutations over the sorted resolved experiment ids",
+    "pair_token": "f\"{source}__{target}\", never sorted",
+    "diagonal_pairs": 0,
+    "duplicate_pairs_permitted": false,
+    "target_cell_dissimilarity_expected_rows": 260322,
+    "target_cell_dissimilarity_row_derivation": "3 * (20555 + 15190 + 41731 + 9298)",
+    "decision_status": "accepted",
+    "requires_user_confirmation": false
+  },
+  "component_symmetry": {
+    "weighted_predictor_space_dissimilarity": "directed",
+    "climatic_distance": "symmetric",
+    "geographic_distance": "symmetric",
+    "note": "The three components are deliberately not required to share a symmetry property, and the artifact records which is which."
+  },
+  "composite_index_policy": {
+    "composite_produced": false,
+    "primary_recommendation": "separate diagnostics, one directed-pair table",
+    "rationale": "A composite would require an exact normalisation across three incomparable scales (a dimensionless DI ratio, a reference-SD climate distance, and kilometres), component weights with no derivation available from four AOIs, and a scientific justification for adding them at all. None exists. Additionally the weighted DI is directed (12 distinct values) while the other two are symmetric (6 distinct values each); averaging them would half-symmetrise the result and destroy the directionality that is the most striking finding in the existing artifact.",
+    "advisor_request_interpretation": "The advisor asked for the three parts to be computed together, not for them to be forced into a single score.",
+    "future_composite_requires": [
+      "exact normalisation",
+      "component weights",
+      "scientific justification",
+      "its own preregistration",
+      "a new schema version"
+    ],
+    "decision_status": "accepted",
+    "requires_user_confirmation": false
+  },
+  "proposed_output_schema": "marginal_aoa_completion.v1",
+  "proposed_output_namespace": "outputs/diagnostics/marginal_aoa_completion/<analysis_id>/",
+  "namespace_rationale": "The analysis_id in the path follows the four_aoi_transfer_decomposition convention, so a re-run with different inputs lands elsewhere instead of colliding and no force flag is needed.",
+  "schema_name_rejected": {
+    "marginal_aoa.v2": "implies a replacement for marginal_aoa.v1, which it is not; the unweighted range-and-level diagnostic remains valid and remains fully label-blind in both directions"
+  },
+  "proposed_output_files": [
+    "config/preregistration.json",
+    "config/frozen_input_inventory.json",
+    "config/feature_importance_inventory.json",
+    "config/climate_input_inventory.json",
+    "config/geometry_inventory.json",
+    "weighted_predictor_space/source_feature_weights.csv",
+    "weighted_predictor_space/directed_pair_summary.csv",
+    "weighted_predictor_space/target_cell_dissimilarity.parquet",
+    "weighted_predictor_space/source_threshold_diagnostics.csv",
+    "climate_distance/aoi_climate_vectors.csv",
+    "climate_distance/pairwise_climate_distance.csv",
+    "geographic_distance/aoi_geometry_summary.csv",
+    "geographic_distance/pairwise_geographic_distance.csv",
+    "comparison/marginal_diagnostics_with_transfer.csv",
+    "comparison/ranking_summary.csv",
+    "comparison/scientific_summary.md",
+    "completion_metadata.json"
+  ],
+  "output_directory_created": false,
+  "uncertainty_policy_candidate": {
+    "rationale": "marginal_aoa.v1 produces no intervals; all 12 of its evidence rows carry descriptive_no_interval. Matching it keeps the two artifacts directly comparable.",
+    "climate_distance_uncertainty": "deterministic_aoi_level_value_no_interval",
+    "geographic_distance_uncertainty": "deterministic_aoi_level_value_no_interval",
+    "artificial_interval_forbidden": "Climate and geographic distances are deterministic AOI-level values computed from fixed geometry and a fixed climatology. There is no resampling unit and manufacturing one would produce a fake interval.",
+    "decision_status": "accepted",
+    "requires_user_confirmation": false,
+    "implementation_blocker": false,
+    "decision_id": "B-11",
+    "policy": "point_estimate_only",
+    "bootstrap_performed": false,
+    "deferred_bootstrap": {
+      "block_source": "Step8A row_500m/col_500m via add_spatial_block_id",
+      "block_size_cells": 10,
+      "block_nominal_scale": "approximately_5_km",
+      "requested_replicates": 1000,
+      "seed": 42,
+      "resampled_unit": "target spatial blocks, sampled with replacement",
+      "source_reference_held_fixed": true,
+      "feature_weights_held_fixed": true,
+      "threshold_held_fixed": true,
+      "normaliser_held_fixed": true,
+      "target_cells_only_resampled": true,
+      "invalid_replicate_policy": "a replicate with zero assessable target cells is excluded and counted; never silently retried",
+      "ci_method": "percentile",
+      "ci_lower": 2.5,
+      "ci_upper": 97.5,
+      "minimum_valid_replicates": 900,
+      "reported_counts": [
+        "n_replicates_requested",
+        "n_replicates_valid",
+        "n_replicates_invalid"
+      ],
+      "bootstrapped_quantities": [
+        "target_mean_dissimilarity",
+        "target_median_dissimilarity",
+        "target_p90_dissimilarity",
+        "target_p95_dissimilarity",
+        "fraction_target_cells_inside_weighted_aoa",
+        "fraction_target_cells_outside_weighted_aoa"
+      ]
+    },
+    "deferred_bootstrap_status": "May be added later ONLY through a separately preregistered sensitivity analysis, never as an unannounced addition to this run. The contract is recorded now so that, if it is ever run, it is run as specified rather than designed after the fact."
+  },
+  "transfer_binding_policy": {
+    "transfer_metrics_readable_by": "post-analysis comparison layer only",
+    "transfer_metrics_readable_during_aoa_computation": false,
+    "written_in": "a separate directory, after every component artifact exists and is hashed, with its own provenance record",
+    "source_artifact": "outputs/diagnostics/four_aoi_transfer_decomposition/bejis_2022__evia_2021_extended__manavgat_2021__mugla_2021/four_aoi_decomposition.csv",
+    "source_artifact_sha256": "6b071b3ef7e93e0ae9d889ccfa98b852f9fc531b110df59e66f460ff2392c0d9",
+    "source_artifact_rows": 96,
+    "source_artifact_structure": "12 directions x 2 model families x 2 adaptation methods x 2 metrics",
+    "preregistered_selection": {
+      "model_family": "thermal",
+      "transfer_state": "raw",
+      "metric": "roc_auc",
+      "field": "raw_auc",
+      "rationale": "raw_auc is the model's untransformed cross-region performance, and it is what an applicability diagnostic should be compared against: the AoA describes how far the target is from the source's support, BEFORE any adaptation is applied. thermal is the model family the AoA feature contract belongs to.",
+      "regionwise_zscore_as_primary_forbidden": true,
+      "regionwise_zscore_rejection_reason": "An adapted metric measures performance AFTER an alignment step that itself removes part of the distribution shift the AoA is quantifying. Ranking a shift diagnostic against a shift-corrected metric would partially cancel the very effect under study, and would make a weak association look like evidence about the diagnostic rather than about the adaptation.",
+      "supersedes": "the earlier primary selection (thermal, regionwise_zscore, roc_auc)",
+      "selection_after_seeing_associations_forbidden": true
+    },
+    "descriptive_comparisons": [
+      "metric-specific Spearman rank correlation",
+      "metric-specific Kendall rank correlation",
+      "ordered-pair ranking table",
+      "top-3 and bottom-3 ordering overlap",
+      "Bejis-source direction audit",
+      "directed versus symmetric diagnostic split"
+    ],
+    "p_values_forbidden": true,
+    "hypothesis_tests_forbidden": true,
+    "correlation_confidence_intervals_forbidden": true,
+    "structural_attenuation_note": "climate_distance and centroid_geodesic_distance_km take only 6 distinct values across the 12 rows, so their rank correlation against a directed transfer metric is structurally attenuated. This must be stated in the same table.",
+    "permitted_wording": "In this four-AOI set, the diagnostic ordering does or does not reproduce the observed raw-transfer ordering.",
+    "forbidden_wording": "Marginal diagnostics can never rank transfer.",
+    "sample_size_caveat": "12 directed pairs built from four non-independent AOIs in one season support description, not inference, and must not be read as a general law.",
+    "decision_status": "accepted",
+    "requires_user_confirmation": false,
+    "implementation_blocker": false,
+    "decision_id": "B-12",
+    "secondary_comparison_block": {
+      "always_reported_in_full": true,
+      "quantities": [
+        "raw_thermal_pr_auc",
+        "thermal_roc_auc_gap",
+        "thermal_pr_auc_gap",
+        "adapted_thermal_roc_auc_regionwise_zscore",
+        "adapted_thermal_pr_auc_regionwise_zscore",
+        "adapted_thermal_roc_auc_coral",
+        "adapted_thermal_pr_auc_coral",
+        "recovered_fraction"
+      ],
+      "rationale": "Reporting the whole block every time is what makes post-hoc selection impossible rather than merely discouraged."
+    }
+  },
+  "unresolved_decisions": [],
+  "implementation_blockers": [],
+  "blocker_count": 0,
+  "decision_count_task_numbering": 12,
+  "decision_count_split": 17,
+  "decision_count_split_note": "The task numbers 12 decisions. Five of them separate into two independently answerable choices each (B-1/B-1b, C-8/C-9, A-10a/A-10b), giving 17 rows in unresolved_decisions. The headline count of 12 decisions and 4 blockers refers to the task's own numbering.",
+  "prohibitions_carried_from_the_existing_artifact": [
+    "outputs/diagnostics/marginal_area_of_applicability/ must not be written to, moved or modified",
+    "the four canonical Step8A parquets must be byte-identical before and after the run",
+    "no target label, burn date or transfer metric may be read during the AoA computation",
+    "no event-period predictor may be published under a climate_* field name",
+    "the phrase 'label-blind' must not appear unqualified in the new artifact, report or advisor text",
+    "no p-value, hypothesis test or correlation confidence interval in the comparison layer",
+    "the wording 'Marginal diagnostics can never rank transfer' is forbidden"
+  ],
+  "design_document_set": [
+    "docs/marginal_aoa_completion_design/README.md",
+    "docs/marginal_aoa_completion_design/01_existing_artifact_audit.md",
+    "docs/marginal_aoa_completion_design/02_feature_importance_audit.md",
+    "docs/marginal_aoa_completion_design/03_weighted_dissimilarity_design.md",
+    "docs/marginal_aoa_completion_design/04_climate_input_audit.md",
+    "docs/marginal_aoa_completion_design/05_climatic_distance_design.md",
+    "docs/marginal_aoa_completion_design/06_geographic_distance_design.md",
+    "docs/marginal_aoa_completion_design/07_integrated_schema_and_namespace.md",
+    "docs/marginal_aoa_completion_design/08_validation_and_test_contract.md",
+    "docs/marginal_aoa_completion_design/09_implementation_plan.md",
+    "docs/marginal_aoa_completion_design/10_decisions_required.md",
+    "docs/marginal_aoa_completion_design/source_artifact_inventory.csv",
+    "docs/marginal_aoa_completion_design/candidate_feature_importances.csv",
+    "docs/marginal_aoa_completion_design/candidate_climate_inputs.csv",
+    "docs/marginal_aoa_completion_design/canonical_geometry_inventory.csv",
+    "docs/marginal_aoa_completion_design/preregistration_candidate.json"
+  ],
+  "source_fold_contract": {
+    "purpose": "training DI and the AOA threshold ONLY; the normaliser does not use folds",
+    "block_size_cells": 10,
+    "block_nominal_scale": "approximately_5_km",
+    "block_construction": "src/step8b_train_baseline_vs_thermal_model.add_spatial_block_id, fixed origin (0,0), assigned before population filtering",
+    "fold_count": 5,
+    "fold_assignment_method": "lexicographically sorted block ids assigned round-robin to 5 folds",
+    "block_wholly_in_one_fold": true,
+    "fold_assignment_reads_label": false,
+    "fold_assignment_requires_seed": false,
+    "step8b_fold_id_explicitly_not_reused": "step8b_predictions.parquet fold_id comes from StratifiedGroupKFold, which consumes y. Reusing it would push source-label information into the threshold.",
+    "decision_status": "accepted",
+    "requires_user_confirmation": false
+  },
+  "proposed_output_schema_required_fields": {
+    "source_pairwise_mean_distance": "mean weighted distance over all distinct source reference cell pairs",
+    "source_distance_normaliser": "equals source_pairwise_mean_distance",
+    "normaliser_method": "source_pairwise_mean_distance_v1",
+    "normaliser_uses_folds": false,
+    "training_di_upper_whisker_threshold": "the operative threshold",
+    "training_di_q95_threshold": "secondary, reported, never operative",
+    "primary_threshold_method": "source_spatial_fold_holdout_di_upper_whisker_v1",
+    "training_di_q95_method": "source_spatial_fold_holdout_di_q95_v1",
+    "whisker_clamped_to_max": "records which branch of the min() won",
+    "climate_feature_count": 4,
+    "climate_features": [
+      "annual_mean_temperature_c",
+      "annual_precipitation_mm",
+      "warm_season_climatic_water_deficit_mm",
+      "warm_season_vpd_kpa"
+    ],
+    "climate_land_mask": "terraclimate_native_valid_land_support",
+    "climate_export_authorised": true,
+    "geodesic_implementation": "geographiclib_wgs84",
+    "centroid_definition": "bbox_centre_planar_epsg4326",
+    "population_centroid_reported": false,
+    "geographic_component_reads_step8a": false,
+    "primary_transfer_comparison": "raw_thermal_roc_auc",
+    "uncertainty_policy": "point_estimate_only",
+    "bootstrap_performed": false
+  },
+  "contract_finalised_at_utc": "2026-08-02",
+  "analysis_id": null,
+  "analysis_id_note": "Not assigned. The analysis identity is frozen at the implementation-plan stage, when preregistration.json is written into the output namespace and hashed.",
+  "implementation_blocker_count": 0,
+  "run_requirements": {
+    "new_gee_export_required": true,
+    "new_gee_export_scope": "climate component only; AUTHORISED",
+    "new_model_fit_required": false,
+    "new_bootstrap_required": false,
+    "new_dependency_required": true,
+    "new_dependency": "geographiclib",
+    "new_dependency_installation": "user-run step, reviewed separately; auto-install forbidden"
+  },
+  "decision_record": [
+    {
+      "id": "B-1",
+      "question": "Which source feature importance?",
+      "outcome": "Step8B RandomForest impurity, (burnable_tree_shrub_grass, thermal), with the mandatory limitation. No new permutation fit.",
+      "was_blocker": true
+    },
+    {
+      "id": "A-2",
+      "question": "Which model family supplies the weights?",
+      "outcome": "thermal",
+      "was_blocker": false
+    },
+    {
+      "id": "B-1b",
+      "question": "Negative-importance policy?",
+      "outcome": "fail-closed assert; clip-at-zero only if the weighting source changes",
+      "was_blocker": false
+    },
+    {
+      "id": "A-3",
+      "question": "Numeric standardisation statistic source?",
+      "outcome": "reuse compute_regionwise_zscore_stats; never apply_regionwise_zscore",
+      "was_blocker": false
+    },
+    {
+      "id": "B-4",
+      "question": "Source SD or a robust scale?",
+      "outcome": "source SD, ddof=0, EPSILON_STD guard",
+      "was_blocker": false
+    },
+    {
+      "id": "B-5",
+      "question": "DI normaliser construction?",
+      "outcome": "mean pairwise distance over all distinct source reference cell pairs; SUPERSEDES the holdout nearest-neighbour mean",
+      "was_blocker": false
+    },
+    {
+      "id": "B-6",
+      "question": "AOA threshold?",
+      "outcome": "upper whisker min(max(training_DI), Q3+1.5*IQR); q95 demoted to reported secondary",
+      "was_blocker": false
+    },
+    {
+      "id": "B-7",
+      "question": "Landcover handling?",
+      "outcome": "Gower mismatch penalty plus a retained unweighted sidecar",
+      "was_blocker": false
+    },
+    {
+      "id": "C-8",
+      "question": "Climate collection, period, variable set?",
+      "outcome": "TerraClimate, 1991-2020, months 6-9, FOUR variables; no ERA5 cross-check in this run",
+      "was_blocker": true
+    },
+    {
+      "id": "C-9",
+      "question": "Is the climate export authorised?",
+      "outcome": "AUTHORISED; not yet run",
+      "was_blocker": true
+    },
+    {
+      "id": "C-10",
+      "question": "Geographic centroid definition?",
+      "outcome": "bbox centre only; population centroid removed entirely",
+      "was_blocker": false
+    },
+    {
+      "id": "C-11",
+      "question": "Geodesic implementation?",
+      "outcome": "geographiclib; user-run install reviewed separately; no custom Vincenty, no haversine fallback",
+      "was_blocker": true
+    },
+    {
+      "id": "B-11",
+      "question": "Bootstrap the weighted summaries?",
+      "outcome": "point estimate only; bootstrap deferred to a separate preregistration",
+      "was_blocker": false
+    },
+    {
+      "id": "B-12",
+      "question": "Which transfer metrics for the ranking comparison?",
+      "outcome": "primary = raw thermal ROC-AUC (NOT regionwise_zscore); complete secondary block always reported",
+      "was_blocker": false
+    },
+    {
+      "id": "A-7",
+      "question": "Output namespace convention?",
+      "outcome": "analysis_id as a path segment",
+      "was_blocker": false
+    },
+    {
+      "id": "A-10a",
+      "question": "Geometry contract hash format?",
+      "outcome": "canonical_json plus sha256_bytes",
+      "was_blocker": false
+    },
+    {
+      "id": "A-10b",
+      "question": "How are the four bboxes read?",
+      "outcome": "hard-pin in the completion module with a drift test",
+      "was_blocker": false
+    }
+  ],
+  "all_decisions_accepted": true,
+  "superseded_by_this_revision": [
+    {
+      "field": "distance_normaliser_candidate",
+      "was": "mean source spatial-fold holdout nearest-neighbour distance",
+      "now": "mean pairwise distance over all distinct source reference cell pairs"
+    },
+    {
+      "field": "source_threshold_candidate",
+      "was": "0.95 quantile of source holdout DI as the operative threshold",
+      "now": "upper whisker min(max(training_DI), Q3 + 1.5*IQR); q95 reported secondary only"
+    },
+    {
+      "field": "climate_input_candidate.variables",
+      "was": "six variables including warm-season mean temperature and warm-season precipitation",
+      "now": "four variables"
+    },
+    {
+      "field": "climate_input_candidate.land_mask",
+      "was": "ESA WorldCover v200 with class 80 excluded",
+      "now": "TerraClimate native valid-land support"
+    },
+    {
+      "field": "climate_input_candidate.era5_land_cross_check",
+      "was": "preregistered cross-check in the primary run",
+      "now": "deferred later sensitivity, not in the initial run"
+    },
+    {
+      "field": "geographic_distance_metric.geodesic_implementation",
+      "was": "in-repo Vincenty inverse",
+      "now": "geographiclib"
+    },
+    {
+      "field": "geographic_distance_metric.secondary_metrics",
+      "was": "included a Step8A population-centroid distance",
+      "now": "removed; the component reads no Step8A data"
+    },
+    {
+      "field": "transfer_binding_policy.preregistered_selection",
+      "was": "(thermal, regionwise_zscore, roc_auc)",
+      "now": "(thermal, raw, roc_auc)"
+    }
+  ]
+}

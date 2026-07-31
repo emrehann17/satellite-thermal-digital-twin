@@ -781,6 +781,166 @@ def run_marginal_aoa_stage(
     )
 
 
+def run_marginal_aoa_completion_stage(
+    experiments: Optional[list[str]] = None,
+    from_stage: str = "plan", to_stage: str = "compare",
+    dry_run: bool = False, resume: bool = False, allow_earth_engine: bool = False,
+    output_root: Optional[str] = None, experiments_root: Optional[str] = None,
+) -> dict:
+    """Dispatch the marginal AoA COMPLETION analysis.
+
+    Produces the three components `marginal_aoa.v1` lacks: an
+    importance-weighted predictor-space dissimilarity (DIRECTED), a climatic
+    distance (SYMMETRIC) and a geographic distance (SYMMETRIC), over 12
+    directed pairs.
+
+    The diagnostic is `target-label-blind, source-model-informed`: feature
+    weights come from a Step8B model fitted on the SOURCE label, while the
+    target label, target burn date and every transfer metric stay outside the
+    computation. Fits no model, runs no bootstrap, produces no composite
+    scalar index, and writes only under
+    outputs/diagnostics/marginal_aoa_completion/<analysis_id>/.
+
+    Only the `climate-export` stage may contact Earth Engine, and only when
+    `allow_earth_engine` is explicitly set -- it is never started implicitly.
+    Every other stage is local and read-only against frozen inputs.
+
+    `output_root`/`experiments_root` are programmatic injection points for
+    tests and alternative namespaces; None means the canonical roots."""
+    from scripts.run_marginal_aoa_completion import main as run_completion
+
+    return run_completion(
+        experiments=experiments, from_stage=from_stage, to_stage=to_stage,
+        dry_run=dry_run, resume=resume, allow_earth_engine=allow_earth_engine,
+        output_root=output_root, experiments_root=experiments_root,
+    )
+
+
+def run_coral_lambda_sensitivity_stage(
+    from_stage: str = "plan", to_stage: str = "summarize",
+    dry_run: bool = False, resume: bool = False, force: bool = False,
+    output_root: Optional[str] = None, experiments_root: Optional[str] = None,
+) -> dict:
+    """Dispatch the local, frozen CORAL additive-ridge sensitivity analysis."""
+    from scripts.run_coral_lambda_sensitivity import main as run_sensitivity
+    return run_sensitivity(
+        from_stage=from_stage, to_stage=to_stage, dry_run=dry_run,
+        resume=resume, force=force, output_root=output_root,
+        experiments_root=experiments_root,
+    )
+
+
+def run_few_shot_recovery_stage(
+    experiments: Optional[list[str]] = None,
+    from_stage: str = "plan", to_stage: str = "summarize",
+    dry_run: bool = False, resume: bool = False, force: bool = False,
+    output_root: Optional[str] = None, experiments_root: Optional[str] = None,
+) -> dict:
+    """Dispatch the few-shot recovery curve analysis.
+
+    Answers: when k labeled target spatial blocks are supplied, how much of the
+    gap between zero-shot raw transfer and the target-only within-region
+    ceiling is recovered? Runs over 6 directed pairs of the three primary AOIs
+    on population `burnable_tree_shrub_grass`, with budgets
+    {0, 1, 2, 4, 8, 16, 32} and 10 deterministic repeats for every k > 0.
+
+    DIAGNOSTIC CLASS: `target_label_supervised_few_shot_adaptation_sensitivity`.
+    Target labels ARE used, deliberately, for adaptation and evaluation. This
+    is NOT an operational deployment claim, NOT active learning, NOT a causal
+    decomposition and NOT target-label-free adaptation (that is Step10).
+
+    Evaluation blocks never enter any training frame; adaptation blocks are
+    drawn only from the target training pool of the outer fold. Recovery
+    fractions are signed and unclipped, Brier is oriented by negation, and the
+    only interval reported is a repeat-based selection interval -- no
+    bootstrap, no p-value, no significance claim. `evia_2021_extended` is
+    excluded by design. Contacts no Earth Engine and writes only under
+    outputs/diagnostics/few_shot_recovery/<analysis_id>/.
+
+    `output_root`/`experiments_root` are programmatic injection points for
+    tests and alternative namespaces; None means the canonical roots."""
+    from scripts.run_few_shot_recovery import main as run_few_shot
+
+    return run_few_shot(
+        experiments=experiments, from_stage=from_stage, to_stage=to_stage,
+        dry_run=dry_run, resume=resume, force=force,
+        output_root=output_root, experiments_root=experiments_root,
+    )
+
+
+def run_mugla_subsampling_stage(
+    experiments: Optional[list[str]] = None,
+    from_stage: str = "plan", to_stage: str = "summarize",
+    dry_run: bool = False, resume: bool = False, force: bool = False,
+    output_root: Optional[str] = None, experiments_root: Optional[str] = None,
+) -> dict:
+    """Dispatch the Muğla size-matched subsampling sensitivity analysis.
+
+    Answers: when the Muğla modeling population (41,730 primary cells) is
+    reduced to exactly Manavgat's cell count (20,511), how do within-region
+    performance, Muğla-as-source raw transfer and Muğla-as-target evaluation
+    move relative to their full-population references? 20 deterministic
+    repeats on population `burnable_tree_shrub_grass`, over the three primary
+    AOIs.
+
+    DIAGNOSTIC CLASS: `population_size_matched_subsampling_sensitivity`. This is
+    a TOTAL-SAMPLE-SIZE sensitivity analysis and nothing else. Prevalence is
+    preserved within integer rounding limits; the Muğla positive count is NOT
+    equalised to Manavgat's; no predictor or label structure is altered. It is
+    NOT a causal decomposition, NOT proof of a regional effect and NOT an
+    operational deployment claim.
+
+    Cells are drawn without replacement from ~5 km (10-cell) block x label
+    strata under an integer-exact Hamilton largest-remainder allocation, so the
+    allocation and the per-fold composition are identical in every repeat. The
+    5-fold spatial fold mapping is inherited unchanged from the frozen
+    full-Muğla 10-cell artifact and is never re-optimised. One Muğla-as-source
+    fit serves both targets; the Muğla-as-target arm reuses frozen raw-transfer
+    predictions and fits nothing. No bootstrap, no threshold selection and no
+    probability statement of any kind. `evia_2021` and `evia_2021_extended` are
+    excluded by design. Contacts no Earth Engine and writes only under
+    outputs/diagnostics/mugla_subsampling/<analysis_id>/.
+
+    `output_root`/`experiments_root` are programmatic injection points for
+    tests and alternative namespaces; None means the canonical roots."""
+    from scripts.run_mugla_subsampling import main as run_mugla_subsampling
+
+    return run_mugla_subsampling(
+        experiments=experiments, from_stage=from_stage, to_stage=to_stage,
+        dry_run=dry_run, resume=resume, force=force,
+        output_root=output_root, experiments_root=experiments_root,
+    )
+
+
+def run_window_closure_sensitivity_stage(
+    experiment_id: str, shifts: Optional[list[int]] = None,
+    from_stage: str = "plan", to_stage: str = "compare",
+    dry_run: bool = False, force: bool = False, resume: bool = False,
+    output_root: Optional[str] = None, experiments_root: Optional[str] = None,
+) -> dict:
+    """Dispatch the window-closure sensitivity analysis.
+
+    Shifts the canonical predictor window earlier by preregistered day counts
+    while preserving its LENGTH, so every predictor derived from that window
+    (current Landsat LST/NDVI, each baseline year, current-window MODIS and
+    the Step5/5C/7/8A products above them) is rebuilt coherently. The label
+    window, DEM, slope, landcover, grid, feature registry, hyper-parameters,
+    seed and spatial block definition are all frozen.
+
+    Writes only under outputs/diagnostics/window_closure_sensitivity/; never
+    touches the canonical production namespace. Live Earth Engine work
+    happens only when an export stage is explicitly selected and dry_run is
+    False. No AOI name is hard-coded here or in the underlying module."""
+    from scripts.run_window_closure_sensitivity import main as run_window_closure
+
+    return run_window_closure(
+        experiment_id=experiment_id, shifts=shifts,
+        from_stage=from_stage, to_stage=to_stage,
+        dry_run=dry_run, force=force, resume=resume,
+        output_root=output_root, experiments_root=experiments_root,
+    )
+
+
 def run_domain_classifier_audit_stage(
     experiments: Optional[list[str]], all_enabled: bool, dry_run: bool, force: bool,
 ) -> dict:

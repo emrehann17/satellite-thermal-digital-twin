@@ -1,0 +1,8 @@
+item,value,source
+Final Git commit,483027a38148319099b20b97f2307d5457c51260,git rev-parse HEAD
+Git branch and sync,main; local HEAD matches upstream; tracking upstream not configured,read-only Git refs
+Evia gate,wildfire_candidate_pass,final_step8_report.json
+Evia out_of_window,0,step8a_dataset_stats.json
+Last region ETA,All regional runs completed; no remaining ETA.,final artifacts complete
+Evia AOI expansion,Technically expanded and rerun from Step1; no further expansion this cycle.,Evia extended artifacts
+Export versions,See GIT_AND_EXPORT_PROVENANCE.md,provenance manifests

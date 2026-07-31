@@ -9,6 +9,14 @@ rasterio>=1.5,<2
 scikit-learn>=1.9,<2
 pyarrow>=24,<25
 openpyxl>=3.1,<4
+geographiclib>=2.0,<3
+
+# geographiclib: WGS84 geodesic inverse (Karney) for the marginal AoA
+# completion geographic-distance component. It is the ONLY permitted route --
+# there is no haversine, pyproj or custom Vincenty fallback, and the module
+# fails closed when it is absent. Not installed in this environment yet; the
+# lock file is deliberately NOT given an entry until the exact installed
+# version can be observed locally.
 
 # Optional dependency.
 # Required only when explicitly using --model xgboost in Step7C/Step8B.

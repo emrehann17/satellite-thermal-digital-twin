@@ -10,7 +10,7 @@ runner'lara devredilir (bkz. core/pipeline_orchestrator.py):
 
     experiment   -> gate / predictors / step7 / seam-audit / step8 asama zinciri
                     (core/pipeline_orchestrator.py -> scripts/run_label_gate_only.py,
-                    scripts/run_predictors_only.py,
+                    cscripts/run_predictors_only.py,
                     scripts/run_step7_downscaling_only.py,
                     scripts/run_step8_modeling.py)
     transfer     -> Step9A-D cross-region transfer
@@ -29,7 +29,7 @@ CLI:
 
     python scripts/main.py experiment \\
       --experiment manavgat_2021 --from-stage predictors --to-stage step8 \\
-      --predictor-mode local-only --dry-run
+      --predictor-mode local-only --dry-run 
 
     python scripts/main.py experiment \\
       --experiment bejis_2022 --from-stage predictors --to-stage step8 \\
@@ -256,6 +256,19 @@ def cmd_step10(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001
         return _fail("step10", exc)
     log.info("[step10] tamamlandı: ran=%s", result.get("ran"))
+    return 0
+
+
+def cmd_coral_lambda_sensitivity(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_coral_lambda_sensitivity_stage(
+            from_stage=args.from_stage, to_stage=args.to_stage,
+            dry_run=args.dry_run, resume=args.resume, force=args.force,
+            output_root=args.output_root, experiments_root=args.experiments_root,
+        )
+    except (SystemExit, ValueError, OSError) as exc:
+        return _fail("coral-lambda-sensitivity", exc)
+    log.info("[coral-lambda-sensitivity] tamamlandı: ran=%s", result.get("ran"))
     return 0
 
 
@@ -503,6 +516,177 @@ def cmd_marginal_aoa(args: argparse.Namespace) -> int:
     return 0
 
 
+from src.marginal_aoa_completion import STAGES as _AOA_COMPLETION_STAGES
+from src.few_shot_recovery import STAGES as _FEW_SHOT_RECOVERY_STAGES
+from src.mugla_subsampling import STAGES as _MUGLA_SUBSAMPLING_STAGES
+from src.window_closure_sensitivity import (
+    DEFAULT_SHIFTS as _WINDOW_CLOSURE_DEFAULT_SHIFTS,
+    STAGES as _WINDOW_CLOSURE_STAGES,
+)
+
+
+def cmd_few_shot_recovery(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_few_shot_recovery_stage(
+            experiments=args.experiments,
+            from_stage=args.from_stage,
+            to_stage=args.to_stage,
+            dry_run=args.dry_run,
+            resume=args.resume,
+            force=args.force,
+            output_root=args.output_root,
+            experiments_root=args.experiments_root,
+        )
+    except SystemExit as exc:
+        return _fail("few-shot-recovery", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("few-shot-recovery", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info(
+        "[few-shot-recovery] tamamlandı: ran=%s stages=%s analysis_id=%s",
+        result.get("ran"), result.get("stages_executed"), result.get("analysis_id"),
+    )
+    return 0
+
+
+def cmd_mugla_subsampling(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_mugla_subsampling_stage(
+            experiments=args.experiments,
+            from_stage=args.from_stage,
+            to_stage=args.to_stage,
+            dry_run=args.dry_run,
+            resume=args.resume,
+            force=args.force,
+            output_root=args.output_root,
+            experiments_root=args.experiments_root,
+        )
+    except SystemExit as exc:
+        return _fail("mugla-subsampling", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("mugla-subsampling", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info(
+        "[mugla-subsampling] tamamlandı: ran=%s stages=%s analysis_id=%s",
+        result.get("ran"), result.get("stages_executed"), result.get("analysis_id"),
+    )
+    return 0
+
+
+def cmd_marginal_aoa_completion(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_marginal_aoa_completion_stage(
+            experiments=args.experiments,
+            from_stage=args.from_stage,
+            to_stage=args.to_stage,
+            dry_run=args.dry_run,
+            resume=args.resume,
+            allow_earth_engine=args.allow_earth_engine,
+            output_root=args.output_root,
+            experiments_root=args.experiments_root,
+        )
+    except SystemExit as exc:
+        return _fail("marginal-aoa-completion", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("marginal-aoa-completion", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info(
+        "[marginal-aoa-completion] tamamlandı: ran=%s stages=%s analysis_id=%s",
+        result.get("ran"), result.get("stages_executed"), result.get("analysis_id"),
+    )
+    return 0
+
+
+def cmd_window_closure_sensitivity(args: argparse.Namespace) -> int:
+    try:
+        result = orch.run_window_closure_sensitivity_stage(
+            experiment_id=args.experiment,
+            shifts=args.shifts,
+            from_stage=args.from_stage,
+            to_stage=args.to_stage,
+            dry_run=args.dry_run,
+            force=args.force,
+            resume=args.resume,
+        )
+    except SystemExit as exc:
+        return _fail("window-closure-sensitivity", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("window-closure-sensitivity", exc)
+    if args.dry_run:
+        print(json.dumps(result, indent=2, default=str))
+    log.info(
+        "[window-closure-sensitivity] tamamlandı: ran=%s experiment=%s shifts=%s",
+        result.get("ran"), args.experiment, args.shifts,
+    )
+    if result.get("ran"):
+        log.info(
+            "[window-closure-sensitivity] stages=%s analysis_id=%s "
+            "files_written=%s reused=%s",
+            result.get("stages_run"), result.get("analysis_id"),
+            result.get("files_written_count"), result.get("reused"),
+        )
+        if result.get("exported_variants") is not None:
+            log.info(
+                "[window-closure-sensitivity] predictor-export: processed=%s "
+                "exported=%s reused=%s roles=%s rasters=%s "
+                "canonical_export_attempted=%s",
+                result.get("processed_variants"), result.get("exported_variants"),
+                result.get("reused_variants"), result.get("logical_roles_produced"),
+                result.get("predictor_rasters_produced"),
+                result.get("canonical_export_attempted"),
+            )
+        if result.get("completed_variants") is not None:
+            log.info(
+                "[window-closure-sensitivity] local-downstream: processed=%s "
+                "completed=%s reused=%s artifacts=%s step8a_datasets=%s "
+                "canonical_downstream_attempted=%s common_cohort_created=%s "
+                "model_fit=%s bootstrap_run=%s",
+                result.get("processed_variants"), result.get("completed_variants"),
+                result.get("reused_variants"),
+                result.get("downstream_artifacts_produced"),
+                result.get("step8a_datasets_produced"),
+                result.get("canonical_downstream_attempted"),
+                result.get("common_cohort_created"),
+                result.get("model_fit"), result.get("bootstrap_run"),
+            )
+        if result.get("model_stage_metadata") is not None:
+            metadata = result.get("model_stage_metadata") or {}
+            log.info(
+                "[window-closure-sensitivity] model: reused=%s evaluations=%s "
+                "cohort_rows=%s prevalence=%s folds=%s "
+                "fire_risk_model_fit=%s downscaling_model_fit=%s "
+                "bootstrap_run=%s compare_run=%s",
+                result.get("model_reused"),
+                metadata.get("model_evaluation_count"),
+                (metadata.get("common_cohort") or {}).get("final_common_cohort_rows"),
+                (metadata.get("common_cohort") or {}).get("prevalence"),
+                (metadata.get("shared_folds") or {}).get("fold_count"),
+                result.get("fire_risk_model_fit"),
+                result.get("downscaling_model_fit"),
+                result.get("bootstrap_run"), result.get("compare_run"),
+            )
+        if result.get("compare_stage_metadata") is not None:
+            metadata = result.get("compare_stage_metadata") or {}
+            log.info(
+                "[window-closure-sensitivity] compare: reused=%s "
+                "point_metrics=%s contributions=%s bootstrap_rows=%s "
+                "evidence=%s model_fit=%s bootstrap_run=%s compare_run=%s",
+                result.get("compare_reused"),
+                metadata.get("point_metric_row_count"),
+                metadata.get("thermal_contribution_row_count"),
+                metadata.get("bootstrap_summary_row_count"),
+                metadata.get("evidence_status_counts"),
+                result.get("model_fit"), result.get("bootstrap_run"),
+                result.get("compare_run"),
+            )
+        for path in result.get("files_written") or []:
+            log.info("[window-closure-sensitivity]   %s", path)
+    return 0
+
+
 def cmd_domain_classifier_audit(args: argparse.Namespace) -> int:
     try:
         result = orch.run_domain_classifier_audit_stage(
@@ -590,7 +774,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=EPILOG_EXAMPLES,
     )
-    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,step10,step8-robustness,large-block-robustness,step8-big-block-robustness,concept-shift,concept-shift-compare,transfer-synthesis,evia-signed-auc,transfer-decomposition,frozen-hash-inventory,manavgat-step8a-hash-audit,old-new-deltas,burned-pattern-audit,marginal-aoa,domain-classifier-audit,legacy}")
+    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,step10,step8-robustness,large-block-robustness,step8-big-block-robustness,concept-shift,concept-shift-compare,transfer-synthesis,evia-signed-auc,transfer-decomposition,frozen-hash-inventory,manavgat-step8a-hash-audit,old-new-deltas,burned-pattern-audit,marginal-aoa,marginal-aoa-completion,few-shot-recovery,window-closure-sensitivity,domain-classifier-audit,legacy}")
 
     # --- experiment ---
     p_exp = subparsers.add_parser(
@@ -764,6 +948,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_step10.add_argument("--bootstrap-replicates", type=int, default=1000, help="Hedef-bölge eşli spatial-block bootstrap replika sayısı (varsayılan: 1000).")
     p_step10.add_argument("--seed", type=int, default=42, help="Rastgele seed (varsayılan: STEP10_RANDOM_STATE=42).")
     p_step10.set_defaults(func=cmd_step10)
+
+    # --- frozen CORAL lambda sensitivity ---
+    p_coral_lambda = subparsers.add_parser(
+        "coral-lambda-sensitivity",
+        help="Frozen local sensitivity of Step10 CORAL additive covariance ridge.",
+    )
+    p_coral_lambda.add_argument("--from-stage", choices=("plan", "fit", "bootstrap", "summarize"), default="plan")
+    p_coral_lambda.add_argument("--to-stage", choices=("plan", "fit", "bootstrap", "summarize"), default="summarize")
+    p_coral_lambda.add_argument("--dry-run", action="store_true")
+    p_coral_lambda.add_argument("--resume", action="store_true")
+    p_coral_lambda.add_argument("--force", action="store_true")
+    p_coral_lambda.add_argument("--output-root")
+    p_coral_lambda.add_argument("--experiments-root")
+    p_coral_lambda.set_defaults(func=cmd_coral_lambda_sensitivity)
 
     # --- large-block-robustness ---
     p_large_block = subparsers.add_parser(
@@ -1168,6 +1366,262 @@ def build_parser() -> argparse.ArgumentParser:
     p_marginal_aoa.add_argument("--force", action="store_true", help="Overwrite existing marginal AoA outputs produced by a different analysis_id (this namespace only).")
     p_marginal_aoa.add_argument("--dry-run", action="store_true", help="Resolve inputs/schema, list every directed pair and planned output path; no analysis, no files written.")
     p_marginal_aoa.set_defaults(func=cmd_marginal_aoa)
+
+    # --- marginal-aoa-completion ---
+    p_aoa_completion = subparsers.add_parser(
+        "marginal-aoa-completion",
+        help="Marginal AoA completion: weighted dissimilarity + climatic and geographic distance.",
+        description=(
+            "Scientific purpose: complete the marginal Area-of-Applicability "
+            "request with the three components marginal_aoa.v1 does not "
+            "provide -- an importance-weighted predictor-space dissimilarity "
+            "(DIRECTED), a climatic distance (SYMMETRIC) and a geographic "
+            "distance (SYMMETRIC) -- over exactly 12 directed pairs. "
+            "DIAGNOSTIC CLASS: target-label-blind, source-model-informed. "
+            "Feature weights come from a Step8B RandomForest fitted on the "
+            "SOURCE label, so this is NOT described as label-blind; the target "
+            "label, target burn date and every transfer metric stay outside "
+            "the computation. The DI denominator is the MEAN PAIRWISE weighted "
+            "distance over all distinct source-reference pairs (not a "
+            "nearest-neighbour mean), and the operative threshold is the upper "
+            "whisker min(max(training_DI), Q3+1.5*IQR); the 0.95 quantile is "
+            "reported as a secondary sensitivity value and never classifies. "
+            "Fits no model, runs no bootstrap and produces no composite scalar "
+            "index. Only the 'climate-export' stage may contact Earth Engine. "
+            "Writes exclusively under "
+            "outputs/diagnostics/marginal_aoa_completion/<analysis_id>/. "
+            "Delegates to scripts/run_marginal_aoa_completion.py / "
+            "src/marginal_aoa_completion.py."
+        ),
+    )
+    p_aoa_completion.add_argument(
+        "--experiments", nargs="+", default=None,
+        help="Experiment IDs; defaults to the four canonical AOIs of this frozen analysis.",
+    )
+    p_aoa_completion.add_argument(
+        "--from-stage", default="plan", choices=list(_AOA_COMPLETION_STAGES),
+        help=f"First stage to run. Stage order: {list(_AOA_COMPLETION_STAGES)}.",
+    )
+    p_aoa_completion.add_argument(
+        "--to-stage", default="compare", choices=list(_AOA_COMPLETION_STAGES),
+        help="Last stage to run (inclusive).",
+    )
+    p_aoa_completion.add_argument(
+        "--dry-run", action="store_true",
+        help=(
+            "Print the exact plan and prerequisite state. Creates no directory, "
+            "writes no file, contacts no Earth Engine, fits no model and "
+            "computes no distance."
+        ),
+    )
+    p_aoa_completion.add_argument(
+        "--resume", action="store_true",
+        help="Verify and reuse an existing namespace instead of refusing to overwrite it.",
+    )
+    p_aoa_completion.add_argument(
+        "--allow-earth-engine", action="store_true",
+        help=(
+            "Authorise LIVE Earth Engine queries and the climate export. The "
+            "'climate-export' stage is never started implicitly; without this "
+            "flag a range that reaches it fails closed."
+        ),
+    )
+    p_aoa_completion.add_argument(
+        "--output-root", default=None,
+        help="Alternative outputs/ root (dependency injection).",
+    )
+    p_aoa_completion.add_argument(
+        "--experiments-root", default=None,
+        help="Alternative outputs/experiments/ root (dependency injection).",
+    )
+    p_aoa_completion.set_defaults(func=cmd_marginal_aoa_completion)
+
+    # --- few-shot-recovery ---
+    p_few_shot = subparsers.add_parser(
+        "few-shot-recovery",
+        help="Few-shot recovery curve: raw transfer -> k labeled target blocks -> ceiling.",
+        description=(
+            "Scientific purpose: quantify how much of the gap between zero-shot "
+            "raw transfer and the target-only within-region ceiling is recovered "
+            "when a limited number of labeled target spatial blocks is supplied, "
+            "over exactly 6 directed pairs of the three primary AOIs. "
+            "DIAGNOSTIC CLASS: target-label-supervised few-shot adaptation "
+            "sensitivity. Target labels ARE used, deliberately -- this is NOT an "
+            "operational deployment claim, NOT active learning, NOT a causal "
+            "decomposition and NOT target-label-free adaptation (that is Step10). "
+            "Population burnable_tree_shrub_grass; 10-cell (~5 km) evaluation "
+            "blocks via the canonical large-block utility; strict 5-fold "
+            "StratifiedGroupKFold; budgets 0,1,2,4,8,16,32 with 10 deterministic "
+            "repeats for every k>0, nested so each budget is a prefix of the same "
+            "ordering. Evaluation blocks never enter any training frame. Recovery "
+            "fractions are signed and UNCLIPPED, Brier is oriented by negation, "
+            "and the only interval reported is a repeat-based SELECTION INTERVAL "
+            "-- no bootstrap, no p-value, no significance claim. "
+            "evia_2021_extended is excluded by design. Contacts no Earth Engine "
+            "and writes exclusively under "
+            "outputs/diagnostics/few_shot_recovery/<analysis_id>/. "
+            "Delegates to scripts/run_few_shot_recovery.py / "
+            "src/few_shot_recovery.py."
+        ),
+    )
+    p_few_shot.add_argument(
+        "--experiments", nargs="+", default=None,
+        help="Experiment IDs; defaults to the three canonical AOIs of this frozen analysis.",
+    )
+    p_few_shot.add_argument(
+        "--from-stage", default="plan", choices=list(_FEW_SHOT_RECOVERY_STAGES),
+        help=f"First stage to run. Stage order: {list(_FEW_SHOT_RECOVERY_STAGES)}.",
+    )
+    p_few_shot.add_argument(
+        "--to-stage", default="summarize", choices=list(_FEW_SHOT_RECOVERY_STAGES),
+        help="Last stage to run (inclusive).",
+    )
+    p_few_shot.add_argument(
+        "--dry-run", action="store_true",
+        help=(
+            "Print the plan, the resolved input hashes, the expected fit budget and "
+            "every planned output path. Creates no directory, writes no file and "
+            "fits no model."
+        ),
+    )
+    p_few_shot.add_argument(
+        "--resume", action="store_true",
+        help=(
+            "Verify and reuse complete, hash-bound stages and direction partitions. "
+            "A partially written direction is never accepted."
+        ),
+    )
+    p_few_shot.add_argument(
+        "--force", action="store_true",
+        help="Quarantine an existing namespace under _quarantine/ and start fresh. Never deletes.",
+    )
+    p_few_shot.add_argument(
+        "--output-root", default=None,
+        help="Alternative outputs/ root (dependency injection).",
+    )
+    p_few_shot.add_argument(
+        "--experiments-root", default=None,
+        help="Alternative outputs/experiments/ root (dependency injection).",
+    )
+    p_few_shot.set_defaults(func=cmd_few_shot_recovery)
+
+    # --- mugla-subsampling ---
+    p_mugla_subsampling = subparsers.add_parser(
+        "mugla-subsampling",
+        help="Mugla size-matched subsampling sensitivity of within/source/target results.",
+        description=(
+            "Scientific purpose: when the Mugla modeling population (41,730 "
+            "primary cells) is reduced to exactly Manavgat's cell count (20,511), "
+            "how do (a) within-Mugla 5-fold spatial OOF performance, (b) "
+            "Mugla -> Manavgat/Bejis raw transfer with Mugla as SOURCE, and (c) "
+            "Manavgat/Bejis -> Mugla evaluation with Mugla as TARGET move "
+            "relative to their full-population references? "
+            "DIAGNOSTIC CLASS: population-size-matched subsampling sensitivity. "
+            "This is a TOTAL-SAMPLE-SIZE sensitivity analysis and nothing else: "
+            "prevalence is preserved within integer rounding limits, the Mugla "
+            "positive count is NOT equalised to Manavgat's, no predictor or "
+            "label structure is altered, and no causal decomposition or "
+            "operational deployment claim is made. "
+            "Population burnable_tree_shrub_grass; 20 deterministic repeats of "
+            "20,511 unique cells drawn without replacement from 10-cell (~5 km) "
+            "block x label strata under an integer-exact Hamilton "
+            "largest-remainder allocation, so the allocation and the per-fold "
+            "composition are identical in every repeat. The 5-fold spatial fold "
+            "mapping is INHERITED unchanged from the frozen full-Mugla 10-cell "
+            "artifact and is never re-optimised per repeat. One Mugla-as-source "
+            "fit serves both targets and the Mugla-as-target arm reuses frozen "
+            "raw-transfer predictions, so the whole analysis is 240 unique fits. "
+            "Brier is oriented by negation, the only range reported is a "
+            "repeat-based SUBSAMPLING INTERVAL, and no bootstrap or probability "
+            "statement of any kind is produced. evia_2021 and "
+            "evia_2021_extended are excluded by design. Contacts no Earth Engine "
+            "and writes exclusively under "
+            "outputs/diagnostics/mugla_subsampling/<analysis_id>/. "
+            "Delegates to scripts/run_mugla_subsampling.py / "
+            "src/mugla_subsampling.py."
+        ),
+    )
+    p_mugla_subsampling.add_argument(
+        "--experiments", nargs="+", default=None,
+        help="Experiment IDs; defaults to the three canonical AOIs of this frozen analysis.",
+    )
+    p_mugla_subsampling.add_argument(
+        "--from-stage", default="plan", choices=list(_MUGLA_SUBSAMPLING_STAGES),
+        help=f"First stage to run. Stage order: {list(_MUGLA_SUBSAMPLING_STAGES)}.",
+    )
+    p_mugla_subsampling.add_argument(
+        "--to-stage", default="summarize", choices=list(_MUGLA_SUBSAMPLING_STAGES),
+        help="Last stage to run (inclusive).",
+    )
+    p_mugla_subsampling.add_argument(
+        "--dry-run", action="store_true",
+        help=(
+            "Print the plan, the resolved input hashes, the expected fit budget and "
+            "every planned output path. Creates no directory, writes no file and "
+            "fits no model."
+        ),
+    )
+    p_mugla_subsampling.add_argument(
+        "--resume", action="store_true",
+        help=(
+            "Verify and reuse only complete, hash-bound stages. A partially written "
+            "stage or arm partition is never accepted."
+        ),
+    )
+    p_mugla_subsampling.add_argument(
+        "--force", action="store_true",
+        help="Quarantine an existing namespace under _quarantine/ and start fresh. Never deletes.",
+    )
+    p_mugla_subsampling.add_argument(
+        "--output-root", default=None,
+        help="Alternative outputs/ root (dependency injection).",
+    )
+    p_mugla_subsampling.add_argument(
+        "--experiments-root", default=None,
+        help="Alternative outputs/experiments/ root (dependency injection).",
+    )
+    p_mugla_subsampling.set_defaults(func=cmd_mugla_subsampling)
+
+    # --- window-closure-sensitivity ---
+    p_window_closure = subparsers.add_parser(
+        "window-closure-sensitivity",
+        help="Predictor window-closure sensitivity of within-AOI baseline/thermal results.",
+        description=(
+            "Scientific purpose: shift the canonical predictor window EARLIER "
+            "by preregistered day counts (default 0/7/14) while preserving its "
+            "LENGTH exactly, and measure how the within-AOI baseline and "
+            "thermal model results -- and the thermal contribution between "
+            "them -- respond to the predictor closure date. Both window ends "
+            "move together, so duration is invariant; the label window never "
+            "moves. Every predictor derived from the window is rebuilt "
+            "coherently (current Landsat LST and NDVI, each baseline year's "
+            "LST and NDVI, current-window MODIS mean/std/valid-observation "
+            "support, and the Step5/5C/7/8A products above them) -- moving "
+            "only current LST while freezing NDVI/baseline/MODIS is refused. "
+            "DEM, slope, landcover, grid, feature registry, hyper-parameters, "
+            "seed and spatial block definition are held fixed. A single shared "
+            "pre-label censoring interval and a single shared spatial fold "
+            "assignment are applied identically to every variant, and all "
+            "comparisons are made on the exact common cohort. Results are "
+            "DESCRIPTIVE predictor-timing sensitivity: closing the window "
+            "earlier is not an operational forecasting validation, and an "
+            "interval containing zero is not evidence of equivalence. Writes "
+            "only under outputs/diagnostics/window_closure_sensitivity/. "
+            "Delegates to scripts/run_window_closure_sensitivity.py / "
+            "src/window_closure_sensitivity.py."
+        ),
+    )
+    p_window_closure.add_argument("--experiment", required=True, help="Experiment ID (core/regions.py registry entry).")
+    p_window_closure.add_argument(
+        "--shifts", nargs="+", type=int, default=list(_WINDOW_CLOSURE_DEFAULT_SHIFTS),
+        help="Preregistered closure shifts in days (default: 0 7 14). Shifts move the window earlier; they are never window lengths.",
+    )
+    p_window_closure.add_argument("--from-stage", default="plan", choices=list(_WINDOW_CLOSURE_STAGES))
+    p_window_closure.add_argument("--to-stage", default="compare", choices=list(_WINDOW_CLOSURE_STAGES))
+    p_window_closure.add_argument("--force", action="store_true", help="Overwrite the dedicated window-closure namespace only; never canonical outputs or another diagnostics namespace.")
+    p_window_closure.add_argument("--resume", action="store_true", help="Reuse completed stages whose recorded input hashes still match.")
+    p_window_closure.add_argument("--dry-run", action="store_true", help="Print the full plan (windows, censor interval, export roles, planned paths); write no files, run no GEE query/export, no model fit, no bootstrap.")
+    p_window_closure.set_defaults(func=cmd_window_closure_sensitivity)
 
     # --- domain-classifier-audit ---
     p_domain_classifier = subparsers.add_parser(
