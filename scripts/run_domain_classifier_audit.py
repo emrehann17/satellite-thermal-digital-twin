@@ -21,8 +21,15 @@ def main(
     all_enabled: bool = False,
     dry_run: bool = False,
     force: bool = False,
+    output_root: str | Path | None = None,
+    scope: str | None = None,
 ) -> dict:
-    return run_analysis(experiments=experiments, all_enabled=all_enabled, dry_run=dry_run, force=force)
+    # No output path is spelled out here: `src.domain_classifier_audit` owns the
+    # canonical root and every namespace under it (see `resolve_layout`).
+    return run_analysis(
+        experiments=experiments, all_enabled=all_enabled, dry_run=dry_run, force=force,
+        output_root=Path(output_root) if output_root is not None else None, scope=scope,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +52,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--all-enabled", action="store_true",
         help="Resolve every enabled, non-legacy registry experiment with a canonical Step8A dataset.",
     )
+    parser.add_argument(
+        "--output-root", default=None,
+        help=(
+            "Alternative output root. Defaults to the canonical "
+            "outputs/diagnostics/domain_classifier_audit/. Each analysis scope "
+            "gets its own namespace UNDER the root, so scopes never collide and "
+            "a previous result never has to be preserved by renaming the root."
+        ),
+    )
+    parser.add_argument(
+        "--scope", default=None,
+        help=(
+            "Namespace under the output root. Derived from the selection when "
+            "omitted ('all_enabled', or the sorted experiment IDs). Pass an "
+            "empty string for the legacy flat layout."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="Resolve experiments/pairs and print the plan; no model fitting, no files written.")
     parser.add_argument("--force", action="store_true", help="Overwrite existing outputs produced by a different analysis_id.")
     return parser
@@ -53,6 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
 if __name__ == "__main__":
     args = build_parser().parse_args()
     print(json.dumps(
-        main(experiments=args.experiments, all_enabled=args.all_enabled, dry_run=args.dry_run, force=args.force),
+        main(
+            experiments=args.experiments, all_enabled=args.all_enabled,
+            dry_run=args.dry_run, force=args.force,
+            output_root=args.output_root, scope=args.scope,
+        ),
         indent=2, default=str,
     ))

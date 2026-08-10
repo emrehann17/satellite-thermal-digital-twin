@@ -13,7 +13,7 @@ Bu rapor, el kitabının kapsam iddiasını destekler: her Python modülü, her 
 |---|---|---|---|
 | `core/config.py` | 698 | canonical | Bölüm 19 |
 | `core/cross_region_experiment.py` | 328 | canonical | Bölüm 19 |
-| `core/drive_downloader.py` | 372 | legacy yardımcı | Bölüm 5.7, 19 |
+| `core/drive_downloader.py` | 372 | **SİLİNDİ (2026-08-10 cleanup)** — zero-caller orphan; legacy Drive akışı `src/step4b_download_drive_export.py` üzerinden sürüyor | Bölüm 5.7, 19 (tarihsel) |
 | `core/experiment_context.py` | 246 | canonical | Bölüm 19 |
 | `core/gee_utils.py` | 9 | canonical | Bölüm 19 |
 | `core/io_utils.py` | 35 | canonical | Bölüm 19 |
@@ -42,7 +42,7 @@ Bu rapor, el kitabının kapsam iddiasını destekler: her Python modülü, her 
 | `scripts/run_exploratory_transfer_features.py` | 181 | canonical | Bölüm 19 |
 | `scripts/run_label_gate_only.py` | 709 | canonical | Bölüm 19 |
 | `scripts/run_predictors_only.py` | 1144 | canonical | Bölüm 19 |
-| `scripts/run_prefire_experiment.py` | 134 | legacy yardımcı | Bölüm 5.7, 19 |
+| `scripts/run_prefire_experiment.py` | 134 | **SİLİNDİ (2026-08-10 cleanup)** — zero-caller orphan | Bölüm 5.7, 19 (tarihsel) |
 | `scripts/run_seam_audit.py` | 453 | canonical (QA) | Bölüm 5.7, 9.5, 19 |
 | `scripts/run_seam_audit_v2.py` | 590 | canonical (QA) | Bölüm 5.7, 9.5, 19 |
 | `scripts/run_seam_localization.py` | 111 | canonical (QA) | Bölüm 5.7, 9.5, 19 |
@@ -53,9 +53,9 @@ Bu rapor, el kitabının kapsam iddiasını destekler: her Python modülü, her 
 | `scripts/run_step8_large_block_robustness.py` | 60 | canonical | Bölüm 19 |
 | `scripts/run_step8_large_block_robustness_primary_all_valid.py` | 51 | canonical | Bölüm 19 |
 | `scripts/run_step8_modeling.py` | 728 | canonical | Bölüm 19 |
-| `scripts/run_step9g_integration_correction_v2.py` | 15 | canonical | Bölüm 19 |
-| `scripts/run_step9g_univariate_feature_auc_direction_reversal.py` | 15 | canonical | Bölüm 19 |
-| `scripts/standalone_step5-6.py` | 67 | legacy yardımcı | Bölüm 5.7, 19 |
+| `scripts/run_step9g_integration_correction_v2.py` | 15 | **SİLİNDİ (2026-08-10 cleanup)** — canonical yol `scripts/main.py concept-shift` | Bölüm 19 (tarihsel) |
+| `scripts/run_step9g_univariate_feature_auc_direction_reversal.py` | 15 | **SİLİNDİ (2026-08-10 cleanup)** — canonical yol `scripts/main.py concept-shift` | Bölüm 19 (tarihsel) |
+| `scripts/standalone_step5-6.py` | 67 | **SİLİNDİ (2026-08-10 cleanup)** — zero-caller orphan | Bölüm 5.7, 19 (tarihsel) |
 | `src/burned_pattern_audit.py` | 1257 | canonical | Bölüm 19 |
 | `src/domain_classifier_audit.py` | 820 | canonical | Bölüm 19 |
 | `src/multi_aoi_transfer_synthesis/__init__.py` | 27 | canonical | Bölüm 19 |
@@ -139,8 +139,8 @@ Bu rapor, el kitabının kapsam iddiasını destekler: her Python modülü, her 
 | `tests/test_step8_large_block_robustness.py` | 321 | Bölüm 19.4 |
 | `tests/test_step8_large_block_robustness_primary_all_valid.py` | 529 | Bölüm 19.4 |
 | `tests/test_step8a_pre_label_exclusion.py` | 264 | Bölüm 19.4 |
-| `tests/test_step8e_report_fix.py` | 310 | Bölüm 19.4 |
-| `tests/test_step9e_report_fix.py` | 509 | Bölüm 19.4 |
+| `tests/test_step8e_report_population_accounting.py` (eski ad: `test_step8e_report_fix.py`) | 310 | Bölüm 19.4 |
+| `tests/test_step9e_report_wording_and_provenance.py` (eski ad: `test_step9e_report_fix.py`) | 509 | Bölüm 19.4 |
 | `tests/test_step9f.py` | 390 | Bölüm 19.4 |
 | `tests/test_step9g_integration_correction_v2.py` | 303 | Bölüm 19.4 |
 | `tests/test_step9g_multi_aoi_comparison.py` | 317 | Bölüm 19.4 |
@@ -242,7 +242,7 @@ Not: README'nin bahsettiği `zamora_2022` registry'de bir DENEY olarak YOKTUR (y
 
 ## 9. Olası stale/orphan dosyalar (kanıt vs. tahmin)
 
-- `scripts/run_prefire_experiment.py`, `scripts/standalone_step5-6.py`: canonical CLI'dan çağrılmaz (legacy yardımcı; tahmin: kullanılmıyor).
+- `scripts/run_prefire_experiment.py`, `scripts/standalone_step5-6.py`: canonical CLI'dan çağrılmaz (legacy yardımcı). **2026-08-10 cleanup'ında silindi** — zero-caller oldukları doğrulandı.
 - README'de belgelenen `outputs/step5/` vb. legacy yollar: gerçekte `outputs/kozan-legacy/` kullanılıyor (kanıt).
 - `core/seam_audit_config.py` (v1) vs `seam_audit_v2_config.py`: v2 aktif; v1 audit kaydı olarak korunur.
 

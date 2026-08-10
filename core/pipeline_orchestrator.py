@@ -623,6 +623,17 @@ def run_multi_aoi_transfer_synthesis_stage(
     from src.multi_aoi_transfer_synthesis.build import SynthesisBuildError, build_synthesis
     from src.multi_aoi_transfer_synthesis import manifest as multi_aoi_manifest
     from src.multi_aoi_transfer_synthesis import render as multi_aoi_render
+    from core.regions import assert_not_superseded_experiments
+
+    # Generic, fail-closed variant guard on the CALLER-SUPPLIED AOI list: a
+    # superseded legacy AOI variant (e.g. an old, narrower AOI replaced by a
+    # wider one) must never silently enter a new canonical synthesis set. No
+    # canonical AOI list is hard-coded here -- any canonical registry entry,
+    # current or future, is accepted.
+    try:
+        assert_not_superseded_experiments(aois, context="multi-AOI transfer synthesis")
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     try:
         aoi_set = validate_aoi_set(aois)
@@ -742,17 +753,24 @@ def run_transfer_decomposition_stage(
 
 def run_burned_pattern_audit_stage(
     experiments: Optional[list[str]], all_enabled: bool, dry_run: bool, force: bool,
+    allow_superseded_sensitivity: bool = False,
 ) -> dict:
     """Dispatch the generic multi-experiment burned-area spatial-structure
     and descriptive comparison audit (connected components, patch-size
     distribution, elevation, land-cover composition). Read-only against
     Step8A; no AOI name is hard-coded anywhere in this dispatch or in the
     underlying module -- experiment IDs are resolved through
-    core.regions/core.pipeline_orchestrator.LEGACY_EXPERIMENT_ID only."""
+    core.regions/core.pipeline_orchestrator.LEGACY_EXPERIMENT_ID only.
+
+    `allow_superseded_sensitivity` (default False, i.e. the unchanged
+    default rejection of superseded IDs) is forwarded untouched to the
+    audit's resolver, which alone decides whether the permission is
+    admissible."""
     from scripts.run_burned_pattern_audit import main as run_burned_pattern_audit
 
     return run_burned_pattern_audit(
         experiments=experiments, all_enabled=all_enabled, dry_run=dry_run, force=force,
+        allow_superseded_sensitivity=allow_superseded_sensitivity,
     )
 
 
@@ -927,10 +945,20 @@ def run_window_closure_sensitivity_stage(
     window, DEM, slope, landcover, grid, feature registry, hyper-parameters,
     seed and spatial block definition are all frozen.
 
-    Writes only under outputs/diagnostics/window_closure_sensitivity/; never
-    touches the canonical production namespace. Live Earth Engine work
-    happens only when an export stage is explicitly selected and dry_run is
-    False. No AOI name is hard-coded here or in the underlying module."""
+    Writes only under the `output_root` it is given, defaulting to the RETIRED
+    outputs/diagnostics/window_closure_sensitivity/ namespace; it never touches
+    the canonical production namespace. Live Earth Engine work happens only when
+    an export stage is explicitly selected and dry_run is False. No AOI name is
+    hard-coded here or in the underlying module.
+
+    Namespace status (2026-08-10): every completed window-closure result now
+    lives under outputs/diagnostics/window_closure_region/<aoi>/<analysis_id>/,
+    and the historical per-AOI output namespace was retired. This entry point is
+    kept because src/window_closure_sensitivity.py remains the scientific backend
+    driven by ProductionRegionalEngine with an explicit output_root. Invoking it
+    standalone WITHOUT an output_root would recreate the retired namespace rather
+    than publish into the regional family, so prefer
+    scripts/run_window_closure_region.py for any new regional work."""
     from scripts.run_window_closure_sensitivity import main as run_window_closure
 
     return run_window_closure(

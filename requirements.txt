@@ -14,9 +14,8 @@ geographiclib>=2.0,<3
 # geographiclib: WGS84 geodesic inverse (Karney) for the marginal AoA
 # completion geographic-distance component. It is the ONLY permitted route --
 # there is no haversine, pyproj or custom Vincenty fallback, and the module
-# fails closed when it is absent. Not installed in this environment yet; the
-# lock file is deliberately NOT given an entry until the exact installed
-# version can be observed locally.
+# fails closed when it is absent. Its resolved version is pinned in
+# requirements-lock.txt for reproducible installs.
 
 # Optional dependency.
 # Required only when explicitly using --model xgboost in Step7C/Step8B.

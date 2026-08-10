@@ -68,13 +68,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def blocked_cli_entry() -> int:
+    """Refuse manual/CLI execution of the retired per-AOI entry point.
+
+    `main()` above stays fully functional as a PROGRAMMATIC entry point: it
+    takes an explicit `output_root`, which is how the orchestrator and the tests
+    drive it into a namespace of their own choosing. What is blocked here is the
+    command-line form, which has no `--output-root` and therefore always
+    defaults to the retired
+    `outputs/diagnostics/window_closure_sensitivity/` root.
+
+    Only the CLI is blocked; nothing about the module's importability, its
+    helpers, or `src.window_closure_sensitivity` changes.
+    """
+    from src.multi_region_window_closure.contract import RETIRED_CLI_MESSAGE
+
+    print(RETIRED_CLI_MESSAGE, file=sys.stderr)
+    print(
+        "Refused: scripts/run_window_closure_sensitivity.py has no --output-root, "
+        "so a command-line run would always target the retired namespace. Use "
+        "scripts/run_window_closure_region.py, or call main(..., output_root=...) "
+        "programmatically with an explicit namespace.",
+        file=sys.stderr,
+    )
+    return 2
+
+
 if __name__ == "__main__":
-    args = build_parser().parse_args()
-    print(json.dumps(
-        main(
-            experiment_id=args.experiment, shifts=args.shifts,
-            from_stage=args.from_stage, to_stage=args.to_stage,
-            dry_run=args.dry_run, force=args.force, resume=args.resume,
-        ),
-        indent=2, default=str,
-    ))
+    raise SystemExit(blocked_cli_entry())

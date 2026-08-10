@@ -46,6 +46,7 @@ No experiment ID is hard-coded anywhere in this module.
 from __future__ import annotations
 
 import importlib.metadata
+from dataclasses import dataclass
 import itertools
 import json
 from datetime import datetime, timezone
@@ -153,16 +154,92 @@ PROHIBITED_ACTIONS = (
     "rerun transfer models",
     "modify Step9E or Step9G",
     "run or modify Step10",
-    "include Evia in this canonical run",
+    # Registry-driven, not AOI-specific: any experiment whose registry record
+    # carries variant_status='legacy_superseded' (e.g. the superseded legacy
+    # North Evia 2021 AOI variant) is barred from this canonical run; only its
+    # `superseded_by` successor may enter. Enforced -- not merely declared --
+    # by resolve_experiments(), which fails closed on superseded IDs instead
+    # of silently dropping them. Successor experiments that are themselves
+    # variant_status='canonical' (the extended North Evia AOI among them)
+    # remain fully permitted.
+    "use a legacy/superseded experiment_id (variant_status="
+    "'legacy_superseded') in this canonical run instead of the canonical "
+    "successor named by its registry 'superseded_by' pointer",
     "use burned labels for classifier fitting",
     "use row-random results as though they were spatially robust",
     "relax methodology after seeing results",
     "invent a fallback legacy method and call it comparable",
 )
 
+#: The ONE canonical output root of this analysis family. Every other path in
+#: this module is derived from it through `resolve_layout()`; no output path
+#: string is spelled out a second time here or in the runner.
 OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "diagnostics" / "domain_classifier_audit"
+
+#: Legacy FLAT layout, kept as the default for direct calls to `analyze_pair()`
+#: / `run_comparison()` so existing programmatic callers and their
+#: monkeypatches keep working unchanged.
 PAIRS_OUTPUT_ROOT = OUTPUT_ROOT / "pairs"
 COMPARISON_OUTPUT_DIR = OUTPUT_ROOT / "comparison"
+
+
+@dataclass(frozen=True)
+class AuditLayout:
+    """Resolved output paths for one run. The single path authority.
+
+    Different analysis SCOPES get their own namespace UNDER `root` rather than
+    a sibling root beside it. Sibling roots are what produced the hand-renamed
+    `domain_classifier_audit_archive_*` directory: with no `--output-root` and
+    a hardcoded default, preserving a previous result meant renaming the whole
+    root by hand.
+    """
+
+    root: Path
+    pairs: Path
+    comparison: Path
+    scope: Optional[str] = None
+
+
+def default_layout() -> AuditLayout:
+    """The legacy flat layout, read from the module constants at call time."""
+    return AuditLayout(
+        root=OUTPUT_ROOT,
+        pairs=PAIRS_OUTPUT_ROOT,
+        comparison=COMPARISON_OUTPUT_DIR,
+        scope=None,
+    )
+
+
+def scope_key(resolution: ExperimentResolution) -> str:
+    """Deterministic namespace name for one analysis scope.
+
+    Delegates to `burned_pattern_audit.scope_key`, which both families share so
+    the canonical-cohort rule cannot drift between them: a selection resolving
+    to exactly the current `--all-enabled` cohort is named `all_enabled`
+    however it was requested; any other selection keeps its own sorted name.
+    """
+    from src.burned_pattern_audit import scope_key as generic_scope_key
+
+    return generic_scope_key(resolution)
+
+
+def resolve_layout(
+    output_root: Optional[Path] = None, scope: Optional[str] = None,
+) -> AuditLayout:
+    """Resolve the output layout for a run. The ONLY place paths are built."""
+    if output_root is None and scope is None:
+        return default_layout()
+    # Implicit base is the PARENT of the legacy pairs directory, not
+    # `OUTPUT_ROOT`: callers that redirect this analysis override the leaf
+    # constants, and deriving from `OUTPUT_ROOT` would escape their sandbox.
+    base = Path(output_root) if output_root is not None else PAIRS_OUTPUT_ROOT.parent
+    namespace = base / scope if scope else base
+    return AuditLayout(
+        root=base,
+        pairs=namespace / "pairs",
+        comparison=namespace / "comparison",
+        scope=scope,
+    )
 
 
 class DomainClassifierAuditError(SystemExit):
@@ -185,9 +262,11 @@ def generate_pairs(resolved_ids: tuple[str, ...]) -> list[tuple[str, str]]:
     return list(itertools.combinations(sorted(resolved_ids), 2))
 
 
-def pair_output_dir(experiment_a: str, experiment_b: str) -> Path:
+def pair_output_dir(
+    experiment_a: str, experiment_b: str, layout: Optional[AuditLayout] = None,
+) -> Path:
     a, b = sorted((experiment_a, experiment_b))
-    return PAIRS_OUTPUT_ROOT / f"{a}__{b}"
+    return (layout or default_layout()).pairs / f"{a}__{b}"
 
 
 # =============================================================================
@@ -463,10 +542,16 @@ def _guard_force(output_dir: Path, analysis_id: str, force: bool, label: str) ->
 # =============================================================================
 # Per-pair orchestration
 # =============================================================================
-def analyze_pair(experiment_a: str, experiment_b: str, dry_run: bool = False, force: bool = False) -> dict[str, Any]:
+def analyze_pair(
+    experiment_a: str, experiment_b: str, dry_run: bool = False, force: bool = False,
+    layout: Optional[AuditLayout] = None,
+) -> dict[str, Any]:
+    """`layout=None` keeps the legacy flat default, so existing callers are
+    unaffected."""
+    layout = layout or default_layout()
     a, b = sorted((experiment_a, experiment_b))
     pair_id = f"{a}__{b}"
-    output_dir = pair_output_dir(a, b)
+    output_dir = pair_output_dir(a, b, layout)
     input_path_a = canonical_step8a_path(a)
     input_path_b = canonical_step8a_path(b)
     planned_paths = {
@@ -734,35 +819,40 @@ def render_comparison_markdown(resolution: ExperimentResolution, results: dict[s
     return "\n".join(lines)
 
 
-def run_comparison(resolution: ExperimentResolution, dry_run: bool, force: bool) -> dict[str, Any]:
+def run_comparison(
+    resolution: ExperimentResolution, dry_run: bool, force: bool,
+    layout: Optional[AuditLayout] = None,
+) -> dict[str, Any]:
+    layout = layout or default_layout()
+    comparison_dir = layout.comparison
     pairs = generate_pairs(resolution.resolved_ids)
     planned_paths = {
-        "multi_aoi_domain_classifier_comparison_json": str(COMPARISON_OUTPUT_DIR / "multi_aoi_domain_classifier_comparison.json"),
-        "multi_aoi_domain_classifier_comparison_csv": str(COMPARISON_OUTPUT_DIR / "multi_aoi_domain_classifier_comparison.csv"),
-        "multi_aoi_domain_classifier_comparison_md": str(COMPARISON_OUTPUT_DIR / "multi_aoi_domain_classifier_comparison.md"),
-        "manifest_json": str(COMPARISON_OUTPUT_DIR / "manifest.json"),
+        "multi_aoi_domain_classifier_comparison_json": str(comparison_dir / "multi_aoi_domain_classifier_comparison.json"),
+        "multi_aoi_domain_classifier_comparison_csv": str(comparison_dir / "multi_aoi_domain_classifier_comparison.csv"),
+        "multi_aoi_domain_classifier_comparison_md": str(comparison_dir / "multi_aoi_domain_classifier_comparison.md"),
+        "manifest_json": str(comparison_dir / "manifest.json"),
     }
 
     if dry_run:
-        pair_plans = {f"{a}__{b}": analyze_pair(a, b, dry_run=True, force=force) for a, b in pairs}
+        pair_plans = {f"{a}__{b}": analyze_pair(a, b, dry_run=True, force=force, layout=layout) for a, b in pairs}
         return {
             "ran": False, "dry_run": True,
             "resolved_experiment_ids": list(resolution.resolved_ids),
             "generated_pairs": [f"{a}__{b}" for a, b in pairs],
             "pair_plans": pair_plans,
-            "output_root": str(COMPARISON_OUTPUT_DIR),
+            "output_root": str(comparison_dir),
             "planned_output_paths": planned_paths,
         }
 
     pair_results: dict[str, dict[str, Any]] = {}
     input_hashes: dict[str, str] = {}
     for a, b in pairs:
-        result = analyze_pair(a, b, dry_run=False, force=force)
+        result = analyze_pair(a, b, dry_run=False, force=force, layout=layout)
         pair_results[result["pair_id"]] = result
         input_hashes.update(result["manifest"]["input_sha256"])
 
     analysis_id = build_analysis_id(resolution.resolved_ids, input_hashes)
-    _guard_force(COMPARISON_OUTPUT_DIR, analysis_id, force, label="domain-classifier-audit[comparison]")
+    _guard_force(comparison_dir, analysis_id, force, label="domain-classifier-audit[comparison]")
 
     manifest = {
         "analysis_id": analysis_id,
@@ -790,20 +880,20 @@ def run_comparison(resolution: ExperimentResolution, dry_run: bool, force: bool)
         "limitations": list(SCIENTIFIC_LIMITATIONS),
     }
 
-    COMPARISON_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    (COMPARISON_OUTPUT_DIR / "multi_aoi_domain_classifier_comparison.json").write_text(json.dumps(comparison_json, indent=2, default=str))
-    comparison_df.to_csv(COMPARISON_OUTPUT_DIR / "multi_aoi_domain_classifier_comparison.csv", index=False)
-    (COMPARISON_OUTPUT_DIR / "multi_aoi_domain_classifier_comparison.md").write_text(
+    comparison_dir.mkdir(parents=True, exist_ok=True)
+    (comparison_dir / "multi_aoi_domain_classifier_comparison.json").write_text(json.dumps(comparison_json, indent=2, default=str))
+    comparison_df.to_csv(comparison_dir / "multi_aoi_domain_classifier_comparison.csv", index=False)
+    (comparison_dir / "multi_aoi_domain_classifier_comparison.md").write_text(
         render_comparison_markdown(resolution, pair_results, manifest)
     )
-    (COMPARISON_OUTPUT_DIR / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+    (comparison_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
 
     return {
         "ran": True, "dry_run": False,
         "resolved_experiment_ids": sorted(resolution.resolved_ids),
         "generated_pairs": [f"{a}__{b}" for a, b in pairs],
         "analysis_id": analysis_id,
-        "output_dir": str(COMPARISON_OUTPUT_DIR),
+        "output_dir": str(comparison_dir),
         "pair_analysis_ids": manifest["pair_analysis_ids"],
     }
 
@@ -811,9 +901,19 @@ def run_comparison(resolution: ExperimentResolution, dry_run: bool, force: bool)
 def run_analysis(
     experiments: Optional[list[str]] = None, all_enabled: bool = False,
     dry_run: bool = False, force: bool = False,
+    output_root: Optional[Path] = None, scope: Optional[str] = None,
 ) -> dict[str, Any]:
     """Top-level entry point: resolve experiments, generate all unordered
     pairs, then run (or dry-run) each pair and the multi-experiment
-    comparison in one pass."""
+    comparison in one pass.
+
+    `output_root` overrides the canonical root. `scope` names the namespace
+    under it; when left None it is DERIVED from the resolved selection, so two
+    different analysis scopes get two namespaces under the one canonical root
+    instead of two sibling roots beside it. Pass `scope=""` to opt back into
+    the legacy flat layout."""
     resolution = resolve_experiments(experiments=experiments, all_enabled=all_enabled)
-    return run_comparison(resolution, dry_run=dry_run, force=force)
+    layout = resolve_layout(
+        output_root, scope_key(resolution) if scope is None else (scope or None),
+    )
+    return run_comparison(resolution, dry_run=dry_run, force=force, layout=layout)

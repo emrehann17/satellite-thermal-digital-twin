@@ -513,7 +513,8 @@ venv/     # sanal ortam; kaynak değil
 | `cross_region_experiment.py` | Step9F paylaşılan yardımcıları |
 | `step10_shared.py` | Step10 z-score/CORAL/bootstrap/hashing |
 | `validation_burned_area.py` | burned-area doğrulama yardımcıları |
-| `drive_downloader.py`, `gee_utils.py` | legacy Drive + GEE yardımcıları |
+| `gee_utils.py` | canonical GEE oturum başlatıcı (`init_gee`); Step1/2/2b/3/4/6/6a dahil 17 production modülü kullanır |
+| `drive_downloader.py` | legacy Drive yardımcısı — **2026-08-10 cleanup'ında silindi** (zero-caller); legacy Drive indirme akışı `src/step4b_download_drive_export.py` üzerinden sürüyor |
 | `utils/tiling.py`, `utils/geotiff_validation.py` | jenerik raster yardımcıları |
 | `seam_audit*_config.py`, `source_scene_provenance_config.py`, `seam_localization_config.py` | QA altyapı konfigürasyonları |
 
@@ -555,7 +556,7 @@ Bilimsel mantık asla yukarı doğru (main.py'ye) sızmaz; orkestratör asla bil
 
 - **Kanıt (yinelenen isim):** `outputs/` altında Kozan hem `outputs/kozan-legacy/` hem (README'ye göre) `outputs/step5/` gibi legacy yollar bekler; gerçekte `kozan-legacy/` kullanılır. README yolları stale.
 - **Kanıt (robustness üçlemesi):** `src/step8_large_block_robustness.py`, `..._primary_all_valid.py`, `step8_big_block_robustness.py` — üçü de benzer amaç taşır ama farklı kontratlarla (frozen pair vs. all_valid vs. tek-deney). Kod yinelemesi değil, bilinçli varyantlardır (bkz. Bölüm 9/11).
-- **Tahmin (kullanılmıyor olabilir):** `scripts/run_prefire_experiment.py`, `scripts/standalone_step5-6.py` yalnızca legacy Kozan yardımcılarıdır; canonical CLI'dan çağrılmazlar. Silinmemiştir, tarihsel amaçla korunur.
+- **Doğrulandı (kullanılmıyordu):** `scripts/run_prefire_experiment.py`, `scripts/standalone_step5-6.py` yalnızca legacy Kozan yardımcılarıydı; canonical CLI'dan çağrılmıyorlardı. **2026-08-10 cleanup'ında silindiler** (zero importer, zero caller); geçmişleri git history'de korunur.
 - **Kanıt (seam/QA altyapısı):** `seam_audit`, `seam_audit_v2`, `seam_localization`, `source_scene_provenance` — README'de belgeli değil (23 Tem'den önceki commit); `experiment` alt-komutunun stage'lerine entegre.
 
 ## 5.8 Bölüm özdeğerlendirmesi
@@ -1602,9 +1603,9 @@ Bu bölüm, `venv/` ve `old_codes/` dışındaki **tüm** izlenen ve yeni (untra
   - `paired_spatial_block_bootstrap(df_group: pd.DataFrame, block_col: str, y_col: str, candidate_prob_col: str, reference_...)` — Hedef-bolge spatial_block_id'lerini yerine-koyarak (with replacement)
   - `bootstrap_support_category(lo: float | None, hi: float | None, higher_is_better: bool)` — positive_support / negative_support / uncertain -- p-value DEGILDIR.
 
-### `core/drive_downloader.py`
+### `core/drive_downloader.py` *(SİLİNDİ — 2026-08-10)*
 
-- **Durum:** legacy yardımcı · **LOC:** 372 · **public fonksiyon:** 2 · **sınıf:** 1 · **sabit:** 0
+- **Durum:** **SİLİNDİ (2026-08-10 cleanup)** — repo genelinde tek bir çağıranı yoktu. Legacy Kozan Drive indirme akışı `src/step4b_download_drive_export.py` üzerinden sürüyor (`pipeline_orchestrator` STEP 4B). Aşağıdaki envanter tarihseldir. · **LOC:** 372 · **public fonksiyon:** 2 · **sınıf:** 1 · **sabit:** 0
 - **Amaç:** (kısa docstring; ayrıntı kod başında)
 - **class `TaskPoller`**: GEE task'lerinin durumunu izler ve tamamlanınca dosyaları indirir.
 - **Public fonksiyonlar:**
@@ -3229,9 +3230,9 @@ Bu bölüm, `venv/` ve `old_codes/` dışındaki **tüm** izlenen ve yeni (untra
   - `main(experiment_id: str='kozan_2023', dry_run: bool=False, export: bool=False, local_only: b...)`
   - `parse_args(argv=None)`
 
-### `scripts/run_prefire_experiment.py`
+### `scripts/run_prefire_experiment.py` *(SİLİNDİ — 2026-08-10)*
 
-- **Durum:** legacy yardımcı · **LOC:** 134 · **public fonksiyon:** 1 · **sınıf:** 0 · **sabit:** 1
+- **Durum:** **SİLİNDİ (2026-08-10 cleanup)** — zero importer, zero caller, canonical CLI yolu yoktu. Aşağıdaki envanter tarihseldir. · **LOC:** 134 · **public fonksiyon:** 1 · **sınıf:** 0 · **sabit:** 1
 - **Amaç:** (kısa docstring; ayrıntı kod başında)
 - **İç bağımlılıklar:** `core`, `core.io_utils`
 - **Önemli sabitler:** `_PROJECT_ROOT`
@@ -3351,23 +3352,23 @@ Bu bölüm, `venv/` ve `old_codes/` dışındaki **tüm** izlenen ve yeni (untra
   - `main(experiment_id: str='kozan_2023', dry_run: bool=False, force: bool=False, allow_no_step7...)`
   - `parse_args(argv=None)`
 
-### `scripts/run_step9g_integration_correction_v2.py`
+### `scripts/run_step9g_integration_correction_v2.py` *(SİLİNDİ — 2026-08-10)*
 
-- **Durum:** canonical · **LOC:** 15 · **public fonksiyon:** 0 · **sınıf:** 0 · **sabit:** 1
+- **Durum:** **SİLİNDİ (2026-08-10 cleanup).** 15 satırlık ince wrapper'dı; hiçbir Python importer'ı ve CLI yolu yoktu. Canonical yol: `python scripts/main.py concept-shift` → `orch.run_concept_shift_integration_stage` → `src.step9g_integration_correction_v2`. Aşağıdaki envanter tarihseldir. · **LOC:** 15 · **public fonksiyon:** 0 · **sınıf:** 0 · **sabit:** 1
 - **Amaç:** Single runner for the Step9G report-integration correction (v2). No
 - **İç bağımlılıklar:** `src.step9g_integration_correction_v2`
 - **Önemli sabitler:** `_PROJECT_ROOT`
 
-### `scripts/run_step9g_univariate_feature_auc_direction_reversal.py`
+### `scripts/run_step9g_univariate_feature_auc_direction_reversal.py` *(SİLİNDİ — 2026-08-10)*
 
-- **Durum:** canonical · **LOC:** 15 · **public fonksiyon:** 0 · **sınıf:** 0 · **sabit:** 1
+- **Durum:** **SİLİNDİ (2026-08-10 cleanup).** 15 satırlık ince wrapper'dı; hiçbir Python importer'ı ve CLI yolu yoktu. Canonical yol: `python scripts/main.py concept-shift` → orchestrator → `src.step9g_univariate_feature_auc_direction_reversal`. Aşağıdaki envanter tarihseldir. · **LOC:** 15 · **public fonksiyon:** 0 · **sınıf:** 0 · **sabit:** 1
 - **Amaç:** Single runner for the Step9G univariate feature-AUC direction-reversal
 - **İç bağımlılıklar:** `src.step9g_univariate_feature_auc_direction_reversal`
 - **Önemli sabitler:** `_PROJECT_ROOT`
 
-### `scripts/standalone_step5-6.py`
+### `scripts/standalone_step5-6.py` *(SİLİNDİ — 2026-08-10)*
 
-- **Durum:** legacy yardımcı · **LOC:** 67 · **public fonksiyon:** 2 · **sınıf:** 0 · **sabit:** 2
+- **Durum:** **SİLİNDİ (2026-08-10 cleanup)** — zero importer, zero caller, canonical CLI yolu yoktu. Aşağıdaki envanter tarihseldir. · **LOC:** 67 · **public fonksiyon:** 2 · **sınıf:** 0 · **sabit:** 2
 - **Amaç:** standalone_step5.py
 - **İç bağımlılıklar:** `core.io_utils`, `core.paths`, `src.step5_preprocess_timeseries`, `src.step5b_diagnostic_report`, `src.step5c_tvdi`, `src.step6_validate_fire_relation`
 - **Önemli sabitler:** `_PROJECT_ROOT`, `BASE_DIR`
@@ -3849,8 +3850,9 @@ Bu bölüm, `venv/` ve `old_codes/` dışındaki **tüm** izlenen ve yeni (untra
 - **class `TestBuildDatasetPreLabelJoin`** (_Step8ASyntheticFixture, unittest.TestCase): test_06_excluded_cell_marked_correctly, test_05_none_cell_ids_behaves_like_before, test_08_raw_vs_eligible_vs_final_counts
 - **class `TestStep8BNeverSeesExcludedCells`** (unittest.TestCase): test_07_filter_valid_for_modeling_drops_excluded_cells
 
-### `tests/test_step8e_report_fix.py`
+### `tests/test_step8e_report_population_accounting.py`
 
+- **Not:** 2026-08-10 cleanup'ında `tests/test_step8e_report_fix.py` adından yeniden adlandırıldı; test gövdeleri ve semantiği değişmedi.
 - **Durum:** test-only · **LOC:** 310 · **public fonksiyon:** 0 · **sınıf:** 3 · **sabit:** 1
 - **Amaç:** (kısa docstring; ayrıntı kod başında)
 - **İç bağımlılıklar:** `scripts.run_step8_modeling`
@@ -3859,8 +3861,9 @@ Bu bölüm, `venv/` ve `old_codes/` dışındaki **tüm** izlenen ve yeni (untra
 - **class `TestCrossCheckAgainstStep8B`** (unittest.TestCase): test_matching_counts_pass, test_mismatched_counts_raise, test_missing_step8b_all_valid_is_skipped_not_an_error
 - **class `TestWriteFinalReportEndToEnd`** (unittest.TestCase): setUp, tearDown, test_step8b_c_d_metrics_passed_through_unchanged, test_step8a_dataset_section_is_correct_in_final_report, test_markdown_lab
 
-### `tests/test_step9e_report_fix.py`
+### `tests/test_step9e_report_wording_and_provenance.py`
 
+- **Not:** 2026-08-10 cleanup'ında `tests/test_step9e_report_fix.py` adından yeniden adlandırıldı; test gövdeleri ve semantiği değişmedi.
 - **Durum:** test-only · **LOC:** 509 · **public fonksiyon:** 0 · **sınıf:** 7 · **sabit:** 1
 - **Amaç:** (kısa docstring; ayrıntı kod başında)
 - **İç bağımlılıklar:** `src.step9e_distribution_shift_audit`
@@ -4061,7 +4064,7 @@ Bu bölüm depo durumunu inceler ve işleri üç kategoriye ayırır: bilimsel o
 
 - **README senkronizasyonu:** README (16 Tem) Muğla/Evia/5 yeni CLI komutu/kozan-legacy yolu için stale (Bölüm 4.5). Bilimsel çerçeve doğru; kapsam bölümleri güncellenebilir.
 - **Robustness modül üçlemesi:** `step8_large_block_robustness.py`, `..._primary_all_valid.py`, `step8_big_block_robustness.py` — ortak yardımcılar bir modüle çekilebilir (bilinçli varyantlar; acil değil).
-- **Legacy yardımcılar:** `run_prefire_experiment.py`, `standalone_step5-6.py` — kullanılmıyorsa arşivlenebilir (tarihsel; silme aceleye getirilmemeli).
+- **Legacy yardımcılar:** `run_prefire_experiment.py`, `standalone_step5-6.py` — **2026-08-10 cleanup'ında silindi** (zero-caller doğrulandıktan sonra). Bu madde tamamlanmıştır.
 - **Residual spatial dependence diagnostiği:** mevcut large-block desteğini "spatial autocorrelation eliminated" olarak yeniden adlandırmadan, artık mekansal bağımlılığı ayrıca ölçen bir diagnostic eklenebilir.
 
 ## 21.3 Spekülatif araştırma (öncelik değil)

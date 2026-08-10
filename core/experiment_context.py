@@ -61,6 +61,19 @@ def _current_period_days(predictor_start_date: str, predictor_end_date: str) -> 
     return (end_dt - start_dt).days
 
 
+def _resolve_historical_contract(exp: dict) -> dict | None:
+    """Resolve the generic historical-burn exclusion contract, or None.
+
+    Imported lazily so core.experiment_context keeps no hard dependency on
+    src/ (and so experiments that do not opt in never load it at all).
+    """
+    if not exp.get("exclude_historical_burns", False):
+        return None
+    from src.historical_burn_exclusion import resolve_historical_burn_contract
+
+    return resolve_historical_burn_contract(exp)
+
+
 def build_experiment_context(experiment_id: str) -> dict:
     """
     Bir deney icin Step1-Step5/5C predictor uretiminde kullanilacak TUM
@@ -131,6 +144,17 @@ def build_experiment_context(experiment_id: str) -> dict:
         # missing) -- see src/step8a_prepare_500m_modeling_dataset.py
         # read_pre_label_exclusion_manifest().
         "exclude_pre_label_burns": bool(exp.get("exclude_pre_label_burns", False)),
+        # Historical burn exclusion (SEPARATE, independent axis; opt-in per
+        # experiment). Same declarative pattern as above: Step8A reads these
+        # to decide whether the gate's historical exclusion manifest is
+        # REQUIRED (fail-fast if missing) -- see
+        # src/historical_burn_exclusion.py. The resolved contract dict is
+        # attached too so downstream provenance can record the source
+        # experiment/kind without re-reading the registry. Resolution is
+        # deferred to a helper so an invalid declaration fails closed here
+        # rather than deep inside Step8A.
+        "exclude_historical_burns": bool(exp.get("exclude_historical_burns", False)),
+        "historical_burn_exclusion": _resolve_historical_contract(exp),
         "current_period_days": current_period_days,
         "current_period_end_date": current_period_end_date,
         "output_root": output_root,
@@ -230,6 +254,18 @@ def log_context_summary(ctx: dict, log) -> None:
     log.info("[ExperimentContext] step5_output_dir: %s", ctx["step5_output_dir"])
     log.info("[ExperimentContext] step5c_output_dir: %s", ctx["step5c_output_dir"])
     log.info("[ExperimentContext] gate_labels_dir: %s", ctx["gate_labels_dir"])
+    log.info(
+        "[ExperimentContext] exclude_pre_label_burns=%s exclude_historical_burns=%s",
+        ctx["exclude_pre_label_burns"], ctx["exclude_historical_burns"],
+    )
+    if ctx.get("historical_burn_exclusion"):
+        contract = ctx["historical_burn_exclusion"]
+        log.info(
+            "[ExperimentContext] historical burn source: %s (kind=%s, "
+            "expected physical burned cells=%s)",
+            contract["source_experiment_id"], contract["source_kind"],
+            contract["source_expected_physical_burned_count"],
+        )
     log.info(
         "[ExperimentContext] dem_input_dir (%s): %s",
         "shared, read-only (Kozan legacy)" if ctx["is_kozan"] else "namespaced",

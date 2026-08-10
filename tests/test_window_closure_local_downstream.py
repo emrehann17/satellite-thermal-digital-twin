@@ -1235,6 +1235,114 @@ def test_the_model_feature_registry_is_the_production_one(tmp_path):
     assert contract["model_feature_columns_in_order"] == list(THERMAL_MODEL_FEATURES)
 
 
+def _legacy_audit_case(tmp_path):
+    _, _, lineage = _lineage(tmp_path)
+    modern = _canonical_frame()
+    legacy = modern.drop(columns=sorted(wcs.STEP8A_OPTIONAL_AUDIT_COLUMNS))
+    return legacy, _variant_frame(modern), lineage
+
+
+def test_legacy_canonical_accepts_exact_optional_audit_pair(tmp_path):
+    legacy, variant, lineage = _legacy_audit_case(tmp_path)
+    result = wcs.assert_step8a_feature_contract(variant, legacy, lineage)
+    assert result["legacy_canonical_audit_columns_absent"] is True
+    assert set(result["optional_audit_columns_present_in_variant"]) == wcs.STEP8A_OPTIONAL_AUDIT_COLUMNS
+    assert result["optional_audit_contract_passed"] is True
+    assert result["model_feature_registry_unchanged"] is True
+    assert result["canonical_bytes_unchanged"] is True
+
+
+def test_legacy_canonical_local_downstream_records_compatibility(tmp_path):
+    modern=_canonical_frame();legacy=modern.drop(columns=sorted(wcs.STEP8A_OPTIONAL_AUDIT_COLUMNS))
+    env=_predictor_env(tmp_path,canonical=legacy)
+    experiment_id,out,experiments=env
+    canonical_path=wcs.canonical_step8a_path(experiment_id,experiments)
+    before=wcs.sha256_file(canonical_path)
+    frames={variant:_variant_frame(modern) for variant in _NONZERO}
+    result,_,_,_=_run_local_downstream(
+        tmp_path,env=env,engine=_fake_downstream_engine(legacy,frames=frames),
+    )
+    assert result["completed_variants"]==list(_NONZERO)
+    for variant in _NONZERO:
+        metadata=_metadata(out,experiment_id,variant)
+        assert metadata["legacy_canonical_audit_columns_absent"] is True
+        assert metadata["optional_audit_contract_passed"] is True
+        assert metadata["model_feature_registry_unchanged"] is True
+        assert metadata["canonical_bytes_unchanged"] is True
+    assert wcs.sha256_file(canonical_path)==before
+
+
+def test_modern_canonical_and_variant_audit_pair_pass(tmp_path):
+    _, _, lineage = _lineage(tmp_path);canonical=_canonical_frame()
+    assert wcs.assert_step8a_feature_contract(_variant_frame(canonical),canonical,lineage)["optional_audit_contract_passed"]
+
+
+def test_partial_optional_audit_pair_fails(tmp_path):
+    legacy, variant, lineage = _legacy_audit_case(tmp_path)
+    variant=variant.drop(columns=["pre_label_burn_excluded"])
+    with pytest.raises(wcs.WindowClosureError,match="both columns are required together"):
+        wcs.assert_step8a_feature_contract(variant,legacy,lineage)
+
+
+@pytest.mark.parametrize("mutation",["null","string"])
+def test_invalid_optional_audit_values_fail(tmp_path,mutation):
+    legacy,variant,lineage=_legacy_audit_case(tmp_path)
+    if mutation=="null":
+        variant["analysis_eligible"]=variant["analysis_eligible"].astype("boolean")
+        variant.loc[0,"analysis_eligible"]=pd.NA
+    else:variant["analysis_eligible"]="yes"
+    with pytest.raises(wcs.WindowClosureError,match="optional audit contract failed"):
+        wcs.assert_step8a_feature_contract(variant,legacy,lineage)
+
+
+def test_optional_audit_columns_must_be_logical_inverses(tmp_path):
+    legacy,variant,lineage=_legacy_audit_case(tmp_path)
+    variant.loc[0,"analysis_eligible"]=False
+    with pytest.raises(wcs.WindowClosureError,match="must equal NOT"):
+        wcs.assert_step8a_feature_contract(variant,legacy,lineage)
+
+
+def test_unknown_column_still_fails_with_legacy_canonical(tmp_path):
+    legacy,variant,lineage=_legacy_audit_case(tmp_path);variant["unknown_predictor_mean"]=1.0
+    with pytest.raises(wcs.WindowClosureError,match="could not be classified"):
+        wcs.assert_step8a_feature_contract(variant,legacy,lineage)
+
+
+def test_optional_audit_patch_does_not_mutate_feature_registry_or_canonical_bytes(tmp_path):
+    import hashlib
+    from src.step8b_train_baseline_vs_thermal_model import BASELINE_FEATURES,THERMAL_MODEL_FEATURES
+    before=(tuple(BASELINE_FEATURES),tuple(THERMAL_MODEL_FEATURES))
+    legacy,variant,lineage=_legacy_audit_case(tmp_path);path=tmp_path/"canonical.parquet";legacy.to_parquet(path,index=False)
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    wcs.assert_step8a_feature_contract(variant,pd.read_parquet(path),lineage)
+    assert hashlib.sha256(path.read_bytes()).hexdigest()==digest
+    assert (tuple(BASELINE_FEATURES),tuple(THERMAL_MODEL_FEATURES))==before
+
+
+def test_common_cohort_applies_shifted_eligibility_to_all_arms(tmp_path):
+    legacy,shift7,lineage=_legacy_audit_case(tmp_path);shift14=shift7.copy()
+    excluded=str(shift7.loc[0,"cell_id"])
+    for frame in (shift7,shift14):
+        frame.loc[frame["cell_id"]==excluded,"analysis_eligible"]=False
+        frame.loc[frame["cell_id"]==excluded,"pre_label_burn_excluded"]=True
+    result=wcs.build_model_common_cohort(
+        {"canonical":legacy,"close_7d_earlier":shift7,"close_14d_earlier":shift14},
+        {"censored_cell_ids":[]},wcs.model_feature_registry(),lineage,
+    )
+    assert excluded not in result["cell_ids"]
+    assert all(excluded not in set(frame["cell_id"]) for frame in result["common"].values())
+
+
+def test_shifted_censor_decision_mismatch_fails_closed(tmp_path):
+    legacy,shift7,lineage=_legacy_audit_case(tmp_path);shift14=shift7.copy()
+    shift14.loc[0,"analysis_eligible"]=False;shift14.loc[0,"pre_label_burn_excluded"]=True
+    with pytest.raises(wcs.WindowClosureError,match="censor audit mismatch"):
+        wcs.build_model_common_cohort(
+            {"canonical":legacy,"close_7d_earlier":shift7,"close_14d_earlier":shift14},
+            {"censored_cell_ids":[]},wcs.model_feature_registry(),lineage,
+        )
+
+
 def test_the_primary_population_count_is_reported_and_not_filtered(tmp_path):
     _, experiment_id, out, _ = _run_local_downstream(tmp_path)
     metadata = _metadata(out, experiment_id, "close_7d_earlier")
@@ -2497,6 +2605,31 @@ def _dry_run_on(experiment_id: str, out: Path, experiments: Path) -> dict:
         output_root=out, experiments_root=experiments,
         local_downstream_engine=_exploding_engine,
     )
+
+
+def test_outer_recovery_quarantines_only_partial_local_downstream(tmp_path):
+    experiment_id,out,experiments=_predictor_env(tmp_path)
+    seeded=_seed_partial_downstream(experiment_id,out)
+    predictor_before={p:wcs.sha256_file(p) for variant in _NONZERO for p in (out/experiment_id/"variants"/variant/"data").rglob("*") if p.is_file()}
+    canonical_path=wcs.canonical_step8a_path(experiment_id,experiments)
+    canonical_before=wcs.sha256_file(canonical_path)
+    canonical=pd.read_parquet(canonical_path)
+    result=wcs.run_analysis(
+        experiment_id=experiment_id,shifts=list(_SHIFTS),dry_run=False,
+        from_stage="local-downstream",to_stage="local-downstream",
+        output_root=out,experiments_root=experiments,
+        recover_partial_local_downstream=True,
+        local_downstream_engine=_fake_downstream_engine(canonical),
+    )
+    assert result["completed_variants"]==list(_NONZERO)
+    quarantine=out/experiment_id/"variants"/"close_7d_earlier"/wcs.LOCAL_DOWNSTREAM_QUARANTINE_DIR/wcs.LOCAL_DOWNSTREAM_QUARANTINE_KIND
+    records=list(quarantine.rglob("quarantine_metadata.json"));assert len(records)==1
+    record=json.loads(records[0].read_text())
+    assert "outer stage resume recovery" in record["reason"] and record["deleted_files"]==[]
+    assert str(wcs.local_downstream_root(experiment_id,"close_7d_earlier",out)) in {item["source"] for item in record["moves"]}
+    assert all(any(path.name in str(candidate) for candidate in quarantine.rglob("*") if candidate.is_file()) for path in map(Path,seeded))
+    assert all(wcs.sha256_file(path)==digest for path,digest in predictor_before.items())
+    assert wcs.sha256_file(canonical_path)==canonical_before
 
 
 # --- 1. Clean tree ------------------------------------------------------------

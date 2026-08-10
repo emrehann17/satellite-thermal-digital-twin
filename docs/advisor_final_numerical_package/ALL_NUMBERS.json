@@ -35793,7 +35793,7 @@
       "analysis": "window_closure",
       "analysis_id": "fd115cf7092e88fd906e847bf405f0cb3b15dc096e281d395228225d25380caa",
       "schema_version": "window_closure_compare.v1",
-      "validator_path": "outputs/diagnostics/window_closure_sensitivity/manavgat_2021/compare/summaries/comparison_summary.json",
+      "validator_path": "outputs/diagnostics/window_closure_region/manavgat_2021/2d9c1ac92e7072d74f90c8f7ff6568b32eadf880ccc550f8f4a06f085571416b/_production/manavgat_2021/compare/summaries/comparison_summary.json",
       "status": "PASS (final artifact complete; no standalone validator token)",
       "final_source_used": true
     },

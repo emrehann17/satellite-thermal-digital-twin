@@ -15,6 +15,9 @@ Covers (task numbering):
     7  no resolved path leaks into the evia_2021 namespace
     8  the Step0 registry validator passes for evia_2021_extended
     9  a dry-run runs no real pipeline stage and no GEE call
+   10  the frozen variant decision: evia_2021 = legacy_superseded pointing at
+       evia_2021_extended, which is itself canonical (see also
+       tests/test_cohort_variant_selection.py for the selection behaviour)
 
 Run:
     python -m unittest tests.test_evia_2021_extended_registry
@@ -71,6 +74,22 @@ class TestEvia2021Unchanged(unittest.TestCase):
     def test_01_evia_2021_aoi_bbox_is_frozen(self):
         self.assertEqual(regions.NORTH_EVIA_AOI_BBOX, (23.12, 38.68, 23.52, 39.08))
 
+    def test_10_evia_2021_is_legacy_superseded_by_the_extended_variant(self):
+        exp = regions.get_experiment(OLD_ID)
+        self.assertEqual(exp["variant_status"], regions.VARIANT_STATUS_LEGACY_SUPERSEDED)
+        self.assertEqual(exp["superseded_by"], NEW_ID)
+        self.assertEqual(regions.get_variant_status(OLD_ID),
+                         regions.VARIANT_STATUS_LEGACY_SUPERSEDED)
+        self.assertEqual(regions.get_superseded_by(OLD_ID), NEW_ID)
+
+    def test_10_legacy_status_does_not_disable_or_unregister_the_record(self):
+        # The frozen decision retains evia_2021: still registered, still
+        # enabled, still resolvable. Only NEW canonical selections drop it.
+        exp = regions.get_experiment(OLD_ID)
+        self.assertTrue(exp["enabled"], "legacy_superseded must not imply enabled=False")
+        self.assertIn(OLD_ID, regions.EXPERIMENTS)
+        self.assertIn(OLD_ID, regions.list_experiments(include_disabled=False))
+
 
 # =============================================================================
 # New experiment registration (tests 2/3/6)
@@ -84,6 +103,17 @@ class TestEvia2021ExtendedRegistration(unittest.TestCase):
         self.assertIn(NEW_ID, regions.EXPERIMENTS)
         self.assertTrue(self.new["enabled"])
         self.assertIn(NEW_ID, regions.list_experiments(include_disabled=False))
+
+    def test_10_extended_variant_is_canonical_without_a_successor(self):
+        self.assertEqual(self.new["variant_status"], regions.VARIANT_STATUS_CANONICAL)
+        self.assertNotIn("superseded_by", self.new,
+                         "a canonical record must not point at a successor")
+        self.assertEqual(regions.get_variant_status(NEW_ID),
+                         regions.VARIANT_STATUS_CANONICAL)
+        self.assertIsNone(regions.get_superseded_by(NEW_ID))
+
+    def test_10_the_two_evia_variants_have_opposite_statuses(self):
+        self.assertNotEqual(self.new["variant_status"], self.old["variant_status"])
 
     def test_02_region_key_is_separate_and_resolvable(self):
         self.assertEqual(self.new["region_key"], "north_evia_extended")

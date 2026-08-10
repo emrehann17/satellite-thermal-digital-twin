@@ -44,6 +44,7 @@ def make_frame(
     landcover: list[int] | None = None,
     burnable: list[bool] | None = None,
     burn_date: list[float] | None = None,
+    valid_for_modeling: list[bool] | None = None,
 ) -> pd.DataFrame:
     n = len(rows)
     frame = pd.DataFrame({
@@ -53,6 +54,10 @@ def make_frame(
         "elevation_mean": elevation if elevation is not None else [float(i) for i in range(n)],
         "landcover_dominant": landcover if landcover is not None else [10] * n,
         "burnable_tree_shrub_grass": burnable if burnable is not None else [True] * n,
+        # Step8B final-model row eligibility, defaulted to True so every
+        # pre-existing fixture keeps its previous primary/sensitivity
+        # semantics; only tests that care set it explicitly.
+        "valid_for_modeling": valid_for_modeling if valid_for_modeling is not None else [True] * n,
     })
     if burn_date is not None:
         frame["burn_date"] = burn_date
@@ -223,7 +228,7 @@ def test_missing_step8a_input_fails_clearly(tmp_path):
 def test_resolve_experiments_explicit_missing_step8a_fails_clearly(tmp_path):
     missing_path = tmp_path / "nope" / "step8a_500m_modeling_dataset.parquet"
     with patch.object(bpa, "canonical_step8a_path", return_value=missing_path), \
-         patch.object(bpa, "get_experiment", return_value={"experiment_id": FAKE_EXP_ALPHA, "enabled": True}):
+         patch.object(bpa, "get_experiment", return_value={"experiment_id": FAKE_EXP_ALPHA, "enabled": True, "variant_status": "canonical"}):
         with pytest.raises(bpa.BurnedPatternAuditError, match="Missing canonical Step8A"):
             bpa.resolve_experiments(experiments=[FAKE_EXP_ALPHA])
 
@@ -276,6 +281,7 @@ def test_cli_dispatches_through_orchestrator():
         assert cmd_burned_pattern_audit(args) == 0
     mocked.assert_called_once_with(
         experiments=[FAKE_EXP_ALPHA, FAKE_EXP_BETA], all_enabled=False, dry_run=True, force=False,
+        allow_superseded_sensitivity=False,
     )
 
 
@@ -309,7 +315,7 @@ def test_dry_run_writes_no_files_and_computes_no_components(tmp_path):
     with patch.object(bpa, "canonical_step8a_path", return_value=path), \
          patch.object(bpa, "EXPERIMENTS_OUTPUT_ROOT", output_root), \
          patch.object(bpa, "COMPARISON_OUTPUT_DIR", comparison_dir), \
-         patch.object(bpa, "get_experiment", return_value={"experiment_id": FAKE_EXP_ALPHA, "enabled": True}):
+         patch.object(bpa, "get_experiment", return_value={"experiment_id": FAKE_EXP_ALPHA, "enabled": True, "variant_status": "canonical"}):
         result = bpa.run_analysis(experiments=[FAKE_EXP_ALPHA], dry_run=True)
 
     assert result["ran"] is False
@@ -366,6 +372,73 @@ def test_primary_and_sensitivity_populations_remain_distinct(tmp_path):
     assert all_valid["metrics"]["total_burned_cells"] == 4
     assert sensitivity["metrics"]["total_burned_cells"] == 2
     assert all_valid["metrics"]["total_burned_cells"] != sensitivity["metrics"]["total_burned_cells"]
+
+
+# ---------------------------------------------------------------------------
+# The sensitivity-population description must state the real frozen Step8A
+# rule -- a COMBINED tree+shrub+grass fraction threshold -- and must not
+# claim a dominant-land-cover-based selection.
+# ---------------------------------------------------------------------------
+def test_sensitivity_population_definition_states_combined_fraction_rule():
+    definition = bpa.POPULATION_DEFINITIONS[bpa.POPULATION_BURNABLE_TSG_BURNED]
+    normalized = " ".join(definition.split())
+
+    # The combined-fraction rule, with all three summed fractions named.
+    for fragment in (
+        "landcover_tree_cover_fraction",
+        "landcover_shrubland_fraction",
+        "landcover_grassland_fraction",
+    ):
+        assert fragment in normalized, f"Definition must name '{fragment}': {normalized!r}"
+    assert (
+        "(landcover_tree_cover_fraction + landcover_shrubland_fraction + "
+        "landcover_grassland_fraction) >= burnable_threshold"
+    ) in normalized, f"Definition must state the summed-fraction threshold rule: {normalized!r}"
+
+    # No dominant-class-based selection claim of any form.
+    lowered = normalized.lower()
+    for banned in (
+        "tree/shrub/grass dominant land cover",
+        "dominant land cover, per-cell fraction threshold",
+    ):
+        assert banned not in lowered, f"Stale dominant-class claim survives: {banned!r}"
+    assert "landcover_dominant" in normalized, (
+        "Definition must say explicitly that landcover_dominant is not the rule."
+    )
+    assert "no part of the selection rule" in lowered, (
+        f"Definition must disclaim landcover_dominant as a selection rule: {normalized!r}"
+    )
+
+    # Still reused verbatim from Step8A, never recomputed here.
+    assert bpa.BURNABLE_MASK_COLUMN in normalized
+    assert "reused verbatim" in lowered and "never recomputed" in lowered
+
+
+def test_sensitivity_population_selection_ignores_landcover_dominant(tmp_path):
+    """Behavioural counterpart: membership follows the frozen Step8A boolean
+    column verbatim, so a cropland-dominant cell whose combined fractions
+    cleared the Step8A threshold is IN, and a tree-dominant cell whose
+    combined fractions did not is OUT."""
+    frame = make_frame(
+        rows=[0, 5, 10],
+        cols=[0, 5, 10],
+        burned=[1, 1, 1],
+        # 40 = cropland-dominant, 10 = tree-cover-dominant.
+        landcover=[40, 10, 10],
+        burnable=[True, False, True],
+    )
+    path = write_fixture(tmp_path, FAKE_EXP_ALPHA, frame)
+
+    with patch.object(bpa, "canonical_step8a_path", return_value=path), \
+         patch.object(bpa, "EXPERIMENTS_OUTPUT_ROOT", tmp_path / "diagnostics" / "experiments"), \
+         patch.object(bpa, "COMPARISON_OUTPUT_DIR", tmp_path / "diagnostics" / "comparison"):
+        result = bpa.analyze_experiment(FAKE_EXP_ALPHA, dry_run=False)
+
+    sensitivity = result["populations"][bpa.POPULATION_BURNABLE_TSG_BURNED]
+    # 2 of 3 burned cells: the cropland-dominant True row is kept, the
+    # tree-dominant False row is dropped.
+    assert sensitivity["metrics"]["total_burned_cells"] == 2
+    assert result["populations"][bpa.POPULATION_ALL_VALID_BURNED]["metrics"]["total_burned_cells"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -642,9 +715,14 @@ def test_rerun_with_changed_input_requires_force(tmp_path):
 #     experiment resolved through the experiment registry (--all-enabled).
 # ---------------------------------------------------------------------------
 def test_all_enabled_comparison_includes_mocked_future_experiment(tmp_path):
+    # Synthetic registry records must declare variant_status: the resolver
+    # validates it fail-closed and never assumes "canonical" for a record
+    # that omits it.
     fake_registry = {
-        FAKE_EXP_ALPHA: {"experiment_id": FAKE_EXP_ALPHA, "enabled": True},
-        FAKE_EXP_FUTURE: {"experiment_id": FAKE_EXP_FUTURE, "enabled": True},
+        FAKE_EXP_ALPHA: {"experiment_id": FAKE_EXP_ALPHA, "enabled": True,
+                         "variant_status": "canonical"},
+        FAKE_EXP_FUTURE: {"experiment_id": FAKE_EXP_FUTURE, "enabled": True,
+                          "variant_status": "canonical"},
     }
     fixture_paths = {
         FAKE_EXP_ALPHA: write_fixture(
@@ -670,7 +748,12 @@ def test_all_enabled_comparison_includes_mocked_future_experiment(tmp_path):
     assert FAKE_EXP_FUTURE in result["resolved_experiment_ids"]
     assert FAKE_EXP_ALPHA in result["resolved_experiment_ids"]
 
-    comparison_csv = pd.read_csv(comparison_dir / "multi_aoi_burned_pattern_comparison.csv")
+    # The run namespaces itself by scope under the canonical root, so the
+    # comparison directory is read from the result rather than assumed.
+    resolved_comparison = Path(result["comparison"]["output_dir"])
+    assert resolved_comparison == comparison_dir.parent / "all_enabled" / "comparison"
+    assert str(resolved_comparison).startswith(str(tmp_path))  # never the real root
+    comparison_csv = pd.read_csv(resolved_comparison / "multi_aoi_burned_pattern_comparison.csv")
     assert FAKE_EXP_FUTURE in set(comparison_csv["experiment_id"])
     for column in (
         "experiment_id", "population", "burned_cell_count", "component_count",
@@ -686,8 +769,10 @@ def test_all_enabled_comparison_includes_mocked_future_experiment(tmp_path):
 
 def test_all_enabled_excludes_experiment_without_step8a(tmp_path):
     fake_registry = {
-        FAKE_EXP_ALPHA: {"experiment_id": FAKE_EXP_ALPHA, "enabled": True},
-        FAKE_EXP_BETA: {"experiment_id": FAKE_EXP_BETA, "enabled": True},
+        FAKE_EXP_ALPHA: {"experiment_id": FAKE_EXP_ALPHA, "enabled": True,
+                         "variant_status": "canonical"},
+        FAKE_EXP_BETA: {"experiment_id": FAKE_EXP_BETA, "enabled": True,
+                        "variant_status": "canonical"},
     }
     alpha_path = write_fixture(tmp_path, FAKE_EXP_ALPHA, make_frame([0], [0], [1]))
     beta_missing_path = tmp_path / FAKE_EXP_BETA / "step8a" / "step8a_500m_modeling_dataset.parquet"
@@ -725,13 +810,17 @@ def test_full_run_touches_only_its_own_output_tree(tmp_path):
     sentinel_dir = tmp_path / "diagnostics"
 
     with patch.object(bpa, "canonical_step8a_path", return_value=path), \
-         patch.object(bpa, "get_experiment", return_value={"experiment_id": FAKE_EXP_ALPHA, "enabled": True}), \
+         patch.object(bpa, "get_experiment", return_value={"experiment_id": FAKE_EXP_ALPHA, "enabled": True, "variant_status": "canonical"}), \
          patch.object(bpa, "EXPERIMENTS_OUTPUT_ROOT", output_root), \
          patch.object(bpa, "COMPARISON_OUTPUT_DIR", comparison_dir):
-        bpa.run_analysis(experiments=[FAKE_EXP_ALPHA], dry_run=False)
+        result = bpa.run_analysis(experiments=[FAKE_EXP_ALPHA], dry_run=False)
 
+    # Writes are namespaced by scope under the sandbox parent; nothing escapes it.
+    scope_dir = sentinel_dir / FAKE_EXP_ALPHA
     written = {p for p in sentinel_dir.rglob("*") if p.is_file()}
-    assert all(str(p).startswith(str(output_root)) or str(p).startswith(str(comparison_dir)) for p in written)
+    assert written
+    assert all(str(p).startswith(str(scope_dir)) for p in written)
+    assert Path(result["comparison"]["output_dir"]) == scope_dir / "comparison"
 
 
 # ---------------------------------------------------------------------------
@@ -762,3 +851,427 @@ def test_real_mugla_2021_corrected_primary_population_matches_expected_numbers()
     assert counts.get(80) == 75    # permanent_water
     assert counts.get(50) == 10    # built_up
     assert counts.get(60) == 2     # bare_sparse_vegetation
+
+
+# ===========================================================================
+# Superseded legacy-variant AOI-definition sensitivity permission
+# (--allow-superseded-sensitivity). Synthetic registry records only.
+# ===========================================================================
+FAKE_EXP_LEGACY = "aoi_legacy_2099"
+FAKE_EXP_SUCCESSOR = "aoi_successor_2099"
+
+
+def _synthetic_registry(**overrides) -> dict:
+    """Legacy variant + its canonical successor, as registry-shaped records."""
+    registry = {
+        FAKE_EXP_LEGACY: {
+            "experiment_id": FAKE_EXP_LEGACY, "enabled": True,
+            "variant_status": "legacy_superseded", "superseded_by": FAKE_EXP_SUCCESSOR,
+        },
+        FAKE_EXP_SUCCESSOR: {
+            "experiment_id": FAKE_EXP_SUCCESSOR, "enabled": True,
+            "variant_status": "canonical",
+        },
+        FAKE_EXP_ALPHA: {
+            "experiment_id": FAKE_EXP_ALPHA, "enabled": True,
+            "variant_status": "canonical",
+        },
+    }
+    registry.update(overrides)
+    return registry
+
+
+def _patch_registry(registry: dict, paths: dict[str, Path]):
+    """Patch the module's registry lookup and Step8A path resolution.
+    `validate_variant_record` is deliberately NOT patched: the real
+    fail-closed variant validation runs against the synthetic records."""
+    def _get_experiment(experiment_id: str) -> dict:
+        if experiment_id not in registry:
+            raise ValueError(f"unknown experiment_id: {experiment_id}")
+        return registry[experiment_id]
+
+    return (
+        patch.object(bpa, "get_experiment", side_effect=_get_experiment),
+        patch.object(bpa, "canonical_step8a_path", side_effect=lambda eid: paths[eid]),
+    )
+
+
+def _legacy_pair_fixtures(tmp_path: Path) -> dict[str, Path]:
+    return {
+        FAKE_EXP_LEGACY: write_fixture(
+            tmp_path, FAKE_EXP_LEGACY, make_frame([0, 0, 5], [0, 1, 5], [1, 1, 1]),
+        ),
+        FAKE_EXP_SUCCESSOR: write_fixture(
+            tmp_path, FAKE_EXP_SUCCESSOR, make_frame([0, 0, 1, 9], [0, 1, 1, 9], [1, 1, 1, 1]),
+        ),
+        FAKE_EXP_ALPHA: write_fixture(
+            tmp_path, FAKE_EXP_ALPHA, make_frame([0, 1], [0, 1], [1, 1]),
+        ),
+    }
+
+
+def test_default_explicit_superseded_selection_still_fails(tmp_path):
+    """Unchanged default behaviour: no flag -> superseded ID is refused with
+    the existing message, and it is never silently dropped."""
+    paths = _legacy_pair_fixtures(tmp_path)
+    get_exp, get_path = _patch_registry(_synthetic_registry(), paths)
+    with get_exp, get_path:
+        with pytest.raises(bpa.BurnedPatternAuditError, match="refusing superseded experiment"):
+            bpa.resolve_experiments(experiments=[FAKE_EXP_LEGACY, FAKE_EXP_SUCCESSOR])
+
+
+def test_force_does_not_bypass_the_superseded_resolver_policy(tmp_path):
+    """--force governs overwriting outputs only; it can never stand in for
+    the sensitivity permission."""
+    paths = _legacy_pair_fixtures(tmp_path)
+    get_exp, get_path = _patch_registry(_synthetic_registry(), paths)
+    with get_exp, get_path:
+        with pytest.raises(bpa.BurnedPatternAuditError, match="refusing superseded experiment"):
+            bpa.run_analysis(
+                experiments=[FAKE_EXP_LEGACY, FAKE_EXP_SUCCESSOR], dry_run=True, force=True,
+            )
+
+
+def test_flag_with_legacy_and_successor_resolves_both(tmp_path):
+    paths = _legacy_pair_fixtures(tmp_path)
+    get_exp, get_path = _patch_registry(_synthetic_registry(), paths)
+    with get_exp, get_path:
+        resolution = bpa.resolve_experiments(
+            experiments=[FAKE_EXP_LEGACY, FAKE_EXP_SUCCESSOR],
+            allow_superseded_sensitivity=True,
+        )
+
+    assert set(resolution.resolved_ids) == {FAKE_EXP_LEGACY, FAKE_EXP_SUCCESSOR}
+    assert resolution.selection_mode == bpa.SELECTION_MODE_EXPLICIT_SUPERSEDED_SENSITIVITY
+    assert resolution.selection_mode == "explicit_superseded_sensitivity"
+    assert resolution.allow_superseded_sensitivity is True
+    assert resolution.superseded_pairs == ((FAKE_EXP_LEGACY, FAKE_EXP_SUCCESSOR),)
+    assert resolution.excluded == {}
+
+
+def test_flag_with_legacy_but_no_successor_fails(tmp_path):
+    paths = _legacy_pair_fixtures(tmp_path)
+    get_exp, get_path = _patch_registry(_synthetic_registry(), paths)
+    with get_exp, get_path:
+        with pytest.raises(bpa.BurnedPatternAuditError, match="is not in the requested selection"):
+            bpa.resolve_experiments(
+                experiments=[FAKE_EXP_LEGACY], allow_superseded_sensitivity=True,
+            )
+
+
+def test_flag_with_all_enabled_fails(tmp_path):
+    with pytest.raises(bpa.BurnedPatternAuditError, match="cannot be combined with --all-enabled"):
+        bpa.resolve_experiments(all_enabled=True, allow_superseded_sensitivity=True)
+
+
+def test_flag_without_any_superseded_experiment_fails(tmp_path):
+    paths = _legacy_pair_fixtures(tmp_path)
+    get_exp, get_path = _patch_registry(_synthetic_registry(), paths)
+    with get_exp, get_path:
+        with pytest.raises(bpa.BurnedPatternAuditError, match="contains no superseded experiment"):
+            bpa.resolve_experiments(
+                experiments=[FAKE_EXP_ALPHA, FAKE_EXP_SUCCESSOR],
+                allow_superseded_sensitivity=True,
+            )
+
+
+def test_flag_fails_when_successor_is_not_canonical(tmp_path):
+    """The successor must itself validate as a canonical variant -- chaining
+    a legacy variant onto another legacy variant is refused."""
+    registry = _synthetic_registry()
+    registry[FAKE_EXP_SUCCESSOR] = {
+        "experiment_id": FAKE_EXP_SUCCESSOR, "enabled": True,
+        "variant_status": "legacy_superseded", "superseded_by": FAKE_EXP_ALPHA,
+    }
+    paths = _legacy_pair_fixtures(tmp_path)
+    get_exp, get_path = _patch_registry(registry, paths)
+    with get_exp, get_path:
+        with pytest.raises(bpa.BurnedPatternAuditError, match="variant_status"):
+            bpa.resolve_experiments(
+                experiments=[FAKE_EXP_LEGACY, FAKE_EXP_SUCCESSOR],
+                allow_superseded_sensitivity=True,
+            )
+
+
+def test_all_enabled_discovery_is_unchanged_and_still_excludes_legacy(tmp_path):
+    """(D) The permission cannot reach discovery, and discovery keeps
+    excluding the legacy variant with its superseded_by reason."""
+    registry = _synthetic_registry()
+    paths = _legacy_pair_fixtures(tmp_path)
+    get_exp, get_path = _patch_registry(registry, paths)
+    with get_exp, get_path, patch.object(bpa, "list_experiments", return_value=registry):
+        resolution = bpa.resolve_experiments(all_enabled=True)
+
+    assert FAKE_EXP_LEGACY not in resolution.resolved_ids
+    assert resolution.excluded[FAKE_EXP_LEGACY] == f"superseded_by_{FAKE_EXP_SUCCESSOR}"
+    assert resolution.selection_mode == "all_enabled"
+    assert resolution.allow_superseded_sensitivity is False
+    assert resolution.superseded_pairs == ()
+
+
+def test_explicit_canonical_selection_keeps_default_selection_mode(tmp_path):
+    """A plain canonical selection is untouched by the new field defaults --
+    this is the exact call shape src/domain_classifier_audit.py makes."""
+    paths = _legacy_pair_fixtures(tmp_path)
+    get_exp, get_path = _patch_registry(_synthetic_registry(), paths)
+    with get_exp, get_path:
+        resolution = bpa.resolve_experiments(experiments=[FAKE_EXP_ALPHA, FAKE_EXP_SUCCESSOR])
+
+    assert resolution.selection_mode == "explicit"
+    assert resolution.allow_superseded_sensitivity is False
+    assert resolution.superseded_pairs == ()
+
+
+# ---------------------------------------------------------------------------
+# CLI plumbing for the flag
+# ---------------------------------------------------------------------------
+def test_main_parser_parses_allow_superseded_sensitivity():
+    parser = build_parser()
+    args = parser.parse_args([
+        "burned-pattern-audit", "--experiments", FAKE_EXP_LEGACY, FAKE_EXP_SUCCESSOR,
+        "--allow-superseded-sensitivity", "--dry-run",
+    ])
+    assert args.allow_superseded_sensitivity is True
+
+    default_args = parser.parse_args([
+        "burned-pattern-audit", "--experiments", FAKE_EXP_ALPHA, "--dry-run",
+    ])
+    assert default_args.allow_superseded_sensitivity is False
+
+
+def test_orchestrator_dispatch_forwards_allow_superseded_sensitivity():
+    parser = build_parser()
+    args = parser.parse_args([
+        "burned-pattern-audit", "--experiments", FAKE_EXP_LEGACY, FAKE_EXP_SUCCESSOR,
+        "--allow-superseded-sensitivity", "--dry-run",
+    ])
+    with patch.object(sys.modules["scripts.main"].orch, "run_burned_pattern_audit_stage", return_value={"ran": False}) as mocked:
+        assert cmd_burned_pattern_audit(args) == 0
+    mocked.assert_called_once_with(
+        experiments=[FAKE_EXP_LEGACY, FAKE_EXP_SUCCESSOR], all_enabled=False,
+        dry_run=True, force=False, allow_superseded_sensitivity=True,
+    )
+
+
+def test_orchestrator_stage_forwards_flag_to_runner():
+    with patch("scripts.run_burned_pattern_audit.main", return_value={"ran": False}) as mocked:
+        from core import pipeline_orchestrator as orch_module
+        orch_module.run_burned_pattern_audit_stage(
+            experiments=[FAKE_EXP_LEGACY, FAKE_EXP_SUCCESSOR], all_enabled=False,
+            dry_run=True, force=False, allow_superseded_sensitivity=True,
+        )
+    mocked.assert_called_once_with(
+        experiments=[FAKE_EXP_LEGACY, FAKE_EXP_SUCCESSOR], all_enabled=False,
+        dry_run=True, force=False, allow_superseded_sensitivity=True,
+    )
+
+
+def test_direct_runner_parser_parses_flag_and_defaults_false():
+    parser = direct_runner.build_parser()
+    args = parser.parse_args([
+        "--experiments", FAKE_EXP_LEGACY, FAKE_EXP_SUCCESSOR, "--allow-superseded-sensitivity",
+    ])
+    assert args.allow_superseded_sensitivity is True
+    assert parser.parse_args(["--experiments", FAKE_EXP_ALPHA]).allow_superseded_sensitivity is False
+
+
+def test_direct_runner_main_defaults_to_no_permission():
+    with patch("scripts.run_burned_pattern_audit.run_analysis", return_value={"ran": False}) as mocked:
+        direct_runner.main(experiments=[FAKE_EXP_ALPHA], dry_run=True)
+    mocked.assert_called_once_with(
+        experiments=[FAKE_EXP_ALPHA], all_enabled=False, dry_run=True, force=False,
+        allow_superseded_sensitivity=False,
+        # Output-path arguments default to "canonical root, scope derived from
+        # the selection"; the runner spells out no path of its own.
+        output_root=None, scope=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Third population: final-model-population morphology comparison
+# ---------------------------------------------------------------------------
+def test_schema_version_is_v2_and_populations_are_ordered():
+    assert bpa.ANALYSIS_SCHEMA_VERSION == "burned_pattern_audit.v2"
+    assert bpa.VALID_FOR_MODELING_COLUMN == "valid_for_modeling"
+    assert bpa.POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED == (
+        "burnable_tree_shrub_grass_valid_for_modeling_burned"
+    )
+    assert bpa.POPULATIONS == (
+        bpa.POPULATION_ALL_VALID_BURNED,
+        bpa.POPULATION_BURNABLE_TSG_BURNED,
+        bpa.POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED,
+    )
+
+
+def test_new_population_definition_states_the_full_contract():
+    definition = " ".join(
+        bpa.POPULATION_DEFINITIONS[bpa.POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED].split()
+    )
+    for clause in (
+        "analysis_eligible == True",
+        "valid_for_modeling == True",
+        "burnable_tree_shrub_grass == True",
+        "burned == 1",
+        "non-null row_500m/col_500m",
+    ):
+        assert clause in definition, f"missing contract clause {clause!r}: {definition!r}"
+    assert "does NOT replace" in definition
+
+
+def test_new_population_excludes_invalid_for_modeling_burned_tsg_cell(tmp_path):
+    """One burned, TSG-True cell has valid_for_modeling=False: it stays in the
+    primary and TSG populations and is dropped only by the new population."""
+    frame = make_frame(
+        rows=[0, 0, 5],
+        cols=[0, 1, 5],
+        burned=[1, 1, 1],
+        burnable=[True, True, True],
+        valid_for_modeling=[True, True, False],
+    )
+    path = write_fixture(tmp_path, FAKE_EXP_ALPHA, frame)
+
+    with patch.object(bpa, "canonical_step8a_path", return_value=path), \
+         patch.object(bpa, "EXPERIMENTS_OUTPUT_ROOT", tmp_path / "d" / "experiments"), \
+         patch.object(bpa, "COMPARISON_OUTPUT_DIR", tmp_path / "d" / "comparison"):
+        result = bpa.analyze_experiment(FAKE_EXP_ALPHA, dry_run=False)
+
+    populations = result["populations"]
+    assert populations[bpa.POPULATION_ALL_VALID_BURNED]["metrics"]["total_burned_cells"] == 3
+    assert populations[bpa.POPULATION_BURNABLE_TSG_BURNED]["metrics"]["total_burned_cells"] == 3
+    assert populations[bpa.POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED]["metrics"]["total_burned_cells"] == 2
+
+
+def test_new_population_also_requires_the_burnable_mask(tmp_path):
+    """valid_for_modeling alone is not enough: the TSG mask still applies, and
+    the primary population keeps every burned cell."""
+    frame = make_frame(
+        rows=[0, 5, 10],
+        cols=[0, 5, 10],
+        burned=[1, 1, 1],
+        burnable=[True, False, True],
+        valid_for_modeling=[True, True, False],
+    )
+    path = write_fixture(tmp_path, FAKE_EXP_ALPHA, frame)
+
+    with patch.object(bpa, "canonical_step8a_path", return_value=path), \
+         patch.object(bpa, "EXPERIMENTS_OUTPUT_ROOT", tmp_path / "d" / "experiments"), \
+         patch.object(bpa, "COMPARISON_OUTPUT_DIR", tmp_path / "d" / "comparison"):
+        result = bpa.analyze_experiment(FAKE_EXP_ALPHA, dry_run=False)
+
+    populations = result["populations"]
+    assert populations[bpa.POPULATION_ALL_VALID_BURNED]["metrics"]["total_burned_cells"] == 3
+    assert populations[bpa.POPULATION_BURNABLE_TSG_BURNED]["metrics"]["total_burned_cells"] == 2
+    assert populations[bpa.POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED]["metrics"]["total_burned_cells"] == 1
+
+
+def test_missing_valid_for_modeling_column_fails_clearly():
+    columns = [
+        "burned", "row_500m", "col_500m", "elevation_mean", "landcover_dominant",
+        "burnable_tree_shrub_grass",
+    ]
+    with pytest.raises(bpa.BurnedPatternAuditError, match="valid_for_modeling"):
+        bpa.validate_required_columns(columns, FAKE_EXP_ALPHA)
+
+
+# ---------------------------------------------------------------------------
+# Component concentration metrics
+# ---------------------------------------------------------------------------
+def test_component_concentration_metrics_for_sizes_3_1_1():
+    components = [{"size": 3}, {"size": 1}, {"size": 1}]
+    metrics = bpa.component_population_metrics(components, burned_cell_count=5)
+
+    assert metrics["second_largest_component_cells"] == 1
+    assert metrics["second_largest_component_fraction"] == pytest.approx(1 / 5)
+    assert metrics["component_share_hhi"] == pytest.approx((3 / 5) ** 2 + (1 / 5) ** 2 + (1 / 5) ** 2)
+    assert metrics["component_share_hhi"] == pytest.approx(0.44)
+    assert metrics["effective_component_count"] == pytest.approx(1 / 0.44)
+    # Size-sum invariant is untouched by the new fields.
+    assert sum(c["size"] for c in components) == metrics["total_burned_cells"]
+
+
+def test_component_concentration_metrics_single_component():
+    metrics = bpa.component_population_metrics([{"size": 7}], burned_cell_count=7)
+    assert metrics["second_largest_component_cells"] == 0
+    assert metrics["second_largest_component_fraction"] == 0.0
+    assert metrics["component_share_hhi"] == pytest.approx(1.0)
+    assert metrics["effective_component_count"] == pytest.approx(1.0)
+
+
+def test_component_concentration_metrics_zero_components():
+    metrics = bpa.component_population_metrics([], burned_cell_count=0)
+    assert metrics["second_largest_component_fraction"] is None
+    assert metrics["component_share_hhi"] is None
+    assert metrics["effective_component_count"] is None
+    assert metrics["second_largest_component_cells"] == 0
+    assert metrics["component_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Comparison outputs carry the new population, the new metrics and the
+# sensitivity-permission provenance.
+# ---------------------------------------------------------------------------
+def test_comparison_outputs_record_new_population_metrics_and_permission(tmp_path):
+    paths = _legacy_pair_fixtures(tmp_path)
+    comparison_dir = tmp_path / "d" / "comparison"
+    get_exp, get_path = _patch_registry(_synthetic_registry(), paths)
+
+    with get_exp, get_path, \
+         patch.object(bpa, "EXPERIMENTS_OUTPUT_ROOT", tmp_path / "d" / "experiments"), \
+         patch.object(bpa, "COMPARISON_OUTPUT_DIR", comparison_dir):
+        result = bpa.run_analysis(
+            experiments=[FAKE_EXP_LEGACY, FAKE_EXP_SUCCESSOR],
+            dry_run=False,
+            allow_superseded_sensitivity=True,
+        )
+
+    assert result["selection_mode"] == "explicit_superseded_sensitivity"
+    assert result["allow_superseded_sensitivity"] is True
+    assert result["superseded_pairs"] == [{
+        "superseded_experiment_id": FAKE_EXP_LEGACY,
+        "canonical_successor_experiment_id": FAKE_EXP_SUCCESSOR,
+    }]
+    assert "NOT restored to the canonical cohort" in result["superseded_sensitivity_note"]
+
+    resolved_comparison = Path(result["comparison"]["output_dir"])
+    expected_scope = "__".join(sorted(result["resolved_experiment_ids"]))
+    assert resolved_comparison == comparison_dir.parent / expected_scope / "comparison"
+    assert str(resolved_comparison).startswith(str(tmp_path))  # never the real root
+    comparison_csv = pd.read_csv(resolved_comparison / "multi_aoi_burned_pattern_comparison.csv")
+    assert set(comparison_csv["population"]) == set(bpa.POPULATIONS)
+    for column in (
+        "second_largest_component_cells", "second_largest_component_fraction",
+        "component_share_hhi", "effective_component_count",
+    ):
+        assert column in comparison_csv.columns
+
+    manifest = json.loads((resolved_comparison / "manifest.json").read_text())
+    assert manifest["selection_mode"] == "explicit_superseded_sensitivity"
+    assert manifest["allow_superseded_sensitivity"] is True
+    assert manifest["superseded_pairs"] == [{
+        "superseded_experiment_id": FAKE_EXP_LEGACY,
+        "canonical_successor_experiment_id": FAKE_EXP_SUCCESSOR,
+    }]
+    assert "NOT restored to the canonical cohort" in manifest["superseded_sensitivity_note"]
+
+    comparison_md = (resolved_comparison / "multi_aoi_burned_pattern_comparison.md").read_text()
+    assert "allow_superseded_sensitivity: True" in comparison_md
+    assert "AOI-definition sensitivity comparator" in comparison_md
+    assert bpa.POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED in comparison_md
+    assert "Component-share HHI" in comparison_md
+    assert "Effective component count" in comparison_md
+
+
+def test_default_run_records_no_permission_and_no_pairs(tmp_path):
+    frame = make_frame([0, 1], [0, 1], [1, 1])
+    path = write_fixture(tmp_path, FAKE_EXP_ALPHA, frame)
+
+    with patch.object(bpa, "canonical_step8a_path", return_value=path), \
+         patch.object(bpa, "get_experiment", return_value={"experiment_id": FAKE_EXP_ALPHA, "enabled": True, "variant_status": "canonical"}), \
+         patch.object(bpa, "EXPERIMENTS_OUTPUT_ROOT", tmp_path / "d" / "experiments"), \
+         patch.object(bpa, "COMPARISON_OUTPUT_DIR", tmp_path / "d" / "comparison"):
+        result = bpa.run_analysis(experiments=[FAKE_EXP_ALPHA], dry_run=True)
+
+    assert result["allow_superseded_sensitivity"] is False
+    assert result["superseded_pairs"] == []
+    assert result["superseded_sensitivity_note"] is None
+    assert result["selection_mode"] == "explicit"

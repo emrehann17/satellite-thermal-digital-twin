@@ -1,0 +1,267 @@
+{
+  "schema_version": "evia.variant_prevalence_audit.v1",
+  "description": "Frozen, machine-readable comparison of the two North Evia AOI variants. Records that the ONLY contract difference is AOI geometry, and reports four DISTINCT prevalence definitions per variant so that quoting one number without its definition can be detected. Read-only: derived entirely from already-frozen Step8A/Step8B artifacts; no model, transfer, bootstrap or export was run to produce it, and no legacy output was deleted or overwritten.",
+  "canonical_variant": "evia_2021_extended",
+  "legacy_variant": "evia_2021",
+  "legacy_status": "legacy_superseded",
+  "superseded_by": "evia_2021_extended",
+  "contract_difference": "AOI geometry only",
+  "registry_source": "core/regions.py",
+  "shared_contract": {
+    "note": "Every field below is BIT-IDENTICAL between evia_2021 and evia_2021_extended; only region_key/AOI geometry, display_name and output_namespace differ.",
+    "predictor_start_date": "2021-06-05",
+    "predictor_end_date": "2021-08-02",
+    "label_start_date": "2021-08-03",
+    "label_end_date": "2021-09-30",
+    "baseline_years": [
+      2017,
+      2018,
+      2019,
+      2020
+    ],
+    "role": "mediterranean_transfer_wildfire",
+    "country": "Greece",
+    "label_source": "MCD64A1 in-window BurnDate; FIRMS is never used as a target",
+    "exclude_pre_label_burns": true,
+    "pre_label_burn_window": [
+      "2021-06-05",
+      "2021-08-02"
+    ],
+    "grid": {
+      "sample_unit": "reconstructed ~500 m MCD64A1 cell",
+      "block_size_pixels": 17,
+      "never_30m_pixels": true
+    },
+    "baseline_features": [
+      "ndvi_mean",
+      "elevation_mean",
+      "slope_mean",
+      "landcover_dominant"
+    ],
+    "thermal_features_added": [
+      "lst_anomaly_mean",
+      "current_lst_mean",
+      "current_tvdi_mean",
+      "tvdi_difference_mean",
+      "downscaled_lst_mean",
+      "fused_lst_mean"
+    ],
+    "model": {
+      "name": "random_forest",
+      "cross_validation": "StratifiedGroupKFold over 500 m spatial blocks",
+      "n_splits": 5,
+      "random_row_wise_split": false
+    },
+    "exclusion_rules": [
+      "valid_for_modeling == False cells are dropped from every model population",
+      "cells burned before label_start are excluded from the analysis universe (exclude_pre_label_burns=True), never counted as unburned negatives",
+      "cropland-dominant cells are excluded from the burnable_tree_shrub_grass mask"
+    ]
+  },
+  "population_scope_note": {
+    "step8b_module_primary": "all_valid",
+    "downstream_primary": "burnable_tree_shrub_grass",
+    "interpretation": "Both are active scope-specific definitions; downstream products explicitly reselect burnable_tree_shrub_grass.",
+    "step8b_module_primary_source": "core/config.py:STEP8B_PRIMARY_POPULATION",
+    "downstream_primary_source": "src/step9a_audit_cross_region_inputs.py:PRIMARY_POPULATIONS[0]",
+    "downstream_reselection_site": "src/multi_aoi_transfer_synthesis/schema_adapters.py:adapt_step8_within_region reads population_metrics['burnable_tree_shrub_grass'] and does not consult the step8b JSON's own 'primary_population' field"
+  },
+  "variants": {
+    "evia_2021": {
+      "experiment_id": "evia_2021",
+      "aoi_bbox_epsg4326": [
+        23.12,
+        38.68,
+        23.52,
+        39.08
+      ],
+      "aoi_bbox_order": "[lon_min, lat_min, lon_max, lat_max]",
+      "source_artifacts": {
+        "step8a_dataset_stats": {
+          "path": "outputs/experiments/evia_2021/step8a/step8a_dataset_stats.json",
+          "sha256": "a228a887c3b1e6c455bc785c1311ded2e8a7bdc6a8fafa615a7d33c94fbb9ab8"
+        },
+        "step8b_model_comparison_metrics": {
+          "path": "outputs/experiments/evia_2021/step8b/step8b_model_comparison_metrics.json",
+          "sha256": "289c842875571bc370a23933efdb9cf6720cb0f9233762539a5479a95b9856bc"
+        }
+      },
+      "prevalence": {
+        "raw_aoi_grid": {
+          "numerator": 2789,
+          "denominator": 7744,
+          "computed_fraction": 0.360149793388,
+          "definition": "Burned fraction of the ENTIRE reconstructed 500 m AOI grid, before any validity or landcover filtering. Denominator is every 500 m cell the AOI produces; numerator is every cell with an in-window MCD64A1 BurnDate.",
+          "filter": "no filter (whole Step8A 500 m grid)",
+          "source_path": "outputs/experiments/evia_2021/step8a/step8a_dataset_stats.json",
+          "source_sha256": "a228a887c3b1e6c455bc785c1311ded2e8a7bdc6a8fafa615a7d33c94fbb9ab8",
+          "source_json_fields": [
+            "burned_cell_count",
+            "total_500m_cells"
+          ]
+        },
+        "final_all_valid_model_population": {
+          "numerator": 2774,
+          "denominator": 7728,
+          "computed_fraction": 0.358954451346,
+          "definition": "Burned fraction of the Step8B `all_valid` population -- the raw AOI grid after Step8A's valid_for_modeling filter (which also drops pre-label-burn excluded cells). This is the Step8B MODULE-level primary population.",
+          "filter": "valid_for_modeling == True",
+          "source_path": "outputs/experiments/evia_2021/step8b/step8b_model_comparison_metrics.json",
+          "source_sha256": "289c842875571bc370a23933efdb9cf6720cb0f9233762539a5479a95b9856bc",
+          "source_json_fields": [
+            "population_metrics.all_valid.n_positives",
+            "population_counts.all_valid"
+          ]
+        },
+        "raw_burnable_tree_shrub_grass_mask": {
+          "numerator": 2674,
+          "denominator": 3957,
+          "computed_fraction": 0.675764468031,
+          "definition": "Burned fraction inside the raw cropland-excluded burnable (tree/shrub/grass) landcover mask, counted over ALL cells before the valid_for_modeling filter is applied.",
+          "filter": "burnable_tree_shrub_grass == True (no validity filter)",
+          "source_path": "outputs/experiments/evia_2021/step8a/step8a_dataset_stats.json",
+          "source_sha256": "a228a887c3b1e6c455bc785c1311ded2e8a7bdc6a8fafa615a7d33c94fbb9ab8",
+          "source_json_fields": [
+            "burned_count_within_each_burnable_mask.burnable_tree_shrub_grass",
+            "burnable_tree_shrub_grass_count"
+          ]
+        },
+        "final_downstream_primary_burnable_tree_shrub_grass_population": {
+          "numerator": 2663,
+          "denominator": 3946,
+          "computed_fraction": 0.674860618348,
+          "definition": "Burned fraction of the Step8B `burnable_tree_shrub_grass` population -- the burnable mask AFTER the valid_for_modeling filter. This is the population every DOWNSTREAM product (Step9/Step10/robustness/window-closure/multi-AOI synthesis) treats as primary.",
+          "filter": "valid_for_modeling == True AND burnable_tree_shrub_grass == True",
+          "source_path": "outputs/experiments/evia_2021/step8b/step8b_model_comparison_metrics.json",
+          "source_sha256": "289c842875571bc370a23933efdb9cf6720cb0f9233762539a5479a95b9856bc",
+          "source_json_fields": [
+            "population_metrics.burnable_tree_shrub_grass.n_positives",
+            "population_counts.burnable_tree_shrub_grass"
+          ]
+        }
+      },
+      "canonical_geometry_hash": "4f21ff93015ddc1642cea31d15886aeda5916f3d5a28f2c8db2afaae721123ca",
+      "bbox_tuple_sha256": "490291536a6e04279f5dcf3788be1b898de571eeef6a14216a6cef6ad4094def",
+      "verification_artifacts": {
+        "step8a_dataset_stats": {
+          "path": "outputs/experiments/evia_2021/step8a/step8a_dataset_stats.json",
+          "sha256": "a228a887c3b1e6c455bc785c1311ded2e8a7bdc6a8fafa615a7d33c94fbb9ab8"
+        },
+        "step8a_modeling_dataset": {
+          "path": "outputs/experiments/evia_2021/step8a/step8a_500m_modeling_dataset.parquet",
+          "sha256": "dd543544b6cd1b38c943ba54805c4832342294276c868ae3a2d6f61d8b329456"
+        },
+        "step8b_model_comparison_metrics": {
+          "path": "outputs/experiments/evia_2021/step8b/step8b_model_comparison_metrics.json",
+          "sha256": "289c842875571bc370a23933efdb9cf6720cb0f9233762539a5479a95b9856bc"
+        },
+        "step8b_delta_auc_by_population": {
+          "path": "outputs/experiments/evia_2021/step8b/step8b_delta_auc_by_population.csv",
+          "sha256": "b1a1a49d8a9f1b1ce8cc0ef36788ba365cdcfe9e59943a5fceb80c72ca7329bd"
+        }
+      }
+    },
+    "evia_2021_extended": {
+      "experiment_id": "evia_2021_extended",
+      "aoi_bbox_epsg4326": [
+        23.05,
+        38.55,
+        23.85,
+        39.15
+      ],
+      "aoi_bbox_order": "[lon_min, lat_min, lon_max, lat_max]",
+      "source_artifacts": {
+        "step8a_dataset_stats": {
+          "path": "outputs/experiments/evia_2021_extended/step8a/step8a_dataset_stats.json",
+          "sha256": "8ba510dacff226db389a406f736372fedf511e83edc95a8f4cec332a72aef74f"
+        },
+        "step8b_model_comparison_metrics": {
+          "path": "outputs/experiments/evia_2021_extended/step8b/step8b_model_comparison_metrics.json",
+          "sha256": "7a5b2b97a4bfe32202a982b5f411cbd01bbcf8075970e8790ccebf27498eeef1"
+        }
+      },
+      "prevalence": {
+        "raw_aoi_grid": {
+          "numerator": 2803,
+          "denominator": 22925,
+          "computed_fraction": 0.122268266085,
+          "definition": "Burned fraction of the ENTIRE reconstructed 500 m AOI grid, before any validity or landcover filtering. Denominator is every 500 m cell the AOI produces; numerator is every cell with an in-window MCD64A1 BurnDate.",
+          "filter": "no filter (whole Step8A 500 m grid)",
+          "source_path": "outputs/experiments/evia_2021_extended/step8a/step8a_dataset_stats.json",
+          "source_sha256": "8ba510dacff226db389a406f736372fedf511e83edc95a8f4cec332a72aef74f",
+          "source_json_fields": [
+            "burned_cell_count",
+            "total_500m_cells"
+          ]
+        },
+        "final_all_valid_model_population": {
+          "numerator": 2788,
+          "denominator": 22906,
+          "computed_fraction": 0.121714834541,
+          "definition": "Burned fraction of the Step8B `all_valid` population -- the raw AOI grid after Step8A's valid_for_modeling filter (which also drops pre-label-burn excluded cells). This is the Step8B MODULE-level primary population.",
+          "filter": "valid_for_modeling == True",
+          "source_path": "outputs/experiments/evia_2021_extended/step8b/step8b_model_comparison_metrics.json",
+          "source_sha256": "7a5b2b97a4bfe32202a982b5f411cbd01bbcf8075970e8790ccebf27498eeef1",
+          "source_json_fields": [
+            "population_metrics.all_valid.n_positives",
+            "population_counts.all_valid"
+          ]
+        },
+        "raw_burnable_tree_shrub_grass_mask": {
+          "numerator": 2675,
+          "denominator": 9309,
+          "computed_fraction": 0.287356321839,
+          "definition": "Burned fraction inside the raw cropland-excluded burnable (tree/shrub/grass) landcover mask, counted over ALL cells before the valid_for_modeling filter is applied.",
+          "filter": "burnable_tree_shrub_grass == True (no validity filter)",
+          "source_path": "outputs/experiments/evia_2021_extended/step8a/step8a_dataset_stats.json",
+          "source_sha256": "8ba510dacff226db389a406f736372fedf511e83edc95a8f4cec332a72aef74f",
+          "source_json_fields": [
+            "burned_count_within_each_burnable_mask.burnable_tree_shrub_grass",
+            "burnable_tree_shrub_grass_count"
+          ]
+        },
+        "final_downstream_primary_burnable_tree_shrub_grass_population": {
+          "numerator": 2664,
+          "denominator": 9298,
+          "computed_fraction": 0.286513228651,
+          "definition": "Burned fraction of the Step8B `burnable_tree_shrub_grass` population -- the burnable mask AFTER the valid_for_modeling filter. This is the population every DOWNSTREAM product (Step9/Step10/robustness/window-closure/multi-AOI synthesis) treats as primary.",
+          "filter": "valid_for_modeling == True AND burnable_tree_shrub_grass == True",
+          "source_path": "outputs/experiments/evia_2021_extended/step8b/step8b_model_comparison_metrics.json",
+          "source_sha256": "7a5b2b97a4bfe32202a982b5f411cbd01bbcf8075970e8790ccebf27498eeef1",
+          "source_json_fields": [
+            "population_metrics.burnable_tree_shrub_grass.n_positives",
+            "population_counts.burnable_tree_shrub_grass"
+          ]
+        }
+      },
+      "canonical_geometry_hash": "7fce7b58dd3b9a185ac7211f20606758bb01cf3a145dbf56f11ff2d5a8d21b8a",
+      "bbox_tuple_sha256": "12c5cc24aa3495bbf9bfb10cb395f741f0e1db0bfc9334c4c194d399b2cf171c",
+      "verification_artifacts": {
+        "step8a_dataset_stats": {
+          "path": "outputs/experiments/evia_2021_extended/step8a/step8a_dataset_stats.json",
+          "sha256": "8ba510dacff226db389a406f736372fedf511e83edc95a8f4cec332a72aef74f"
+        },
+        "step8a_modeling_dataset": {
+          "path": "outputs/experiments/evia_2021_extended/step8a/step8a_500m_modeling_dataset.parquet",
+          "sha256": "bdce859cf482f575d0f273174b157f47efd61779953fdd23d9486c5face5e553"
+        },
+        "step8b_model_comparison_metrics": {
+          "path": "outputs/experiments/evia_2021_extended/step8b/step8b_model_comparison_metrics.json",
+          "sha256": "7a5b2b97a4bfe32202a982b5f411cbd01bbcf8075970e8790ccebf27498eeef1"
+        },
+        "step8b_delta_auc_by_population": {
+          "path": "outputs/experiments/evia_2021_extended/step8b/step8b_delta_auc_by_population.csv",
+          "sha256": "ba49312afda6cd5a6898a716993800148ce40244fed790958aea7571b85a4ce9"
+        }
+      }
+    }
+  },
+  "legacy_output_retention": {
+    "policy": "retain_read_only",
+    "legacy_output_root": "outputs/experiments/evia_2021",
+    "deleted": false,
+    "overwritten": false,
+    "note": "The legacy variant stays registered and enabled; variant_status only removes it from NEW canonical cohort selections. Explicitly requesting it fails closed with the superseded_by pointer instead of being silently dropped."
+  },
+  "bbox_tuple_hash_recipe": "sha256(json.dumps([lon_min, lat_min, lon_max, lat_max], separators=(',', ':')).encode('utf-8')).hexdigest()"
+}

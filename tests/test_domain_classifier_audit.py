@@ -390,6 +390,58 @@ def test_full_run_writes_expected_output_files(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# PROHIBITED_ACTIONS contract: the ban is on legacy/superseded experiment IDs
+# (registry-driven), NOT on a named AOI. The canonical successor of the
+# superseded North Evia variant stays permitted.
+# ---------------------------------------------------------------------------
+def test_prohibited_actions_bans_superseded_ids_not_a_named_aoi():
+    actions = dca.PROHIBITED_ACTIONS
+    assert "include Evia in this canonical run" not in actions, (
+        "The blanket AOI-level Evia ban must be gone: the canonical extended "
+        "North Evia experiment is allowed."
+    )
+    matching = [a for a in actions if "legacy_superseded" in a]
+    assert len(matching) == 1, (
+        f"Expected exactly one legacy/superseded prohibition, got {matching!r}."
+    )
+    clause = matching[0]
+    assert "superseded_by" in clause and "canonical" in clause, (
+        f"The prohibition must point callers at the registry successor: {clause!r}."
+    )
+
+
+def test_superseded_evia_prohibited_but_extended_evia_canonical():
+    """Behavioural counterpart of the contract string, against the REAL
+    registry: evia_2021 is legacy_superseded and fails closed when explicitly
+    requested; evia_2021_extended is canonical and is never rejected on
+    variant grounds."""
+    from core.regions import (
+        VARIANT_STATUS_CANONICAL,
+        VARIANT_STATUS_LEGACY_SUPERSEDED,
+        assert_not_superseded_experiments,
+        get_superseded_by,
+        get_variant_status,
+    )
+
+    legacy_id = "evia_2021"
+    canonical_id = "evia_2021_extended"
+
+    assert get_variant_status(legacy_id) == VARIANT_STATUS_LEGACY_SUPERSEDED
+    assert get_superseded_by(legacy_id) == canonical_id
+    assert get_variant_status(canonical_id) == VARIANT_STATUS_CANONICAL
+    assert get_superseded_by(canonical_id) is None
+
+    # Explicit request of the superseded ID fails closed, naming the successor,
+    # before any Step8A file is touched.
+    with pytest.raises(SystemExit, match=r"refusing superseded experiment"):
+        dca.resolve_experiments(experiments=[legacy_id])
+
+    # The canonical successor passes the variant gate (a missing Step8A file
+    # is a separate, unrelated failure mode and is not asserted here).
+    assert_not_superseded_experiments([canonical_id], context="domain-classifier audit test")
+
+
+# ---------------------------------------------------------------------------
 # No hardcoded real experiment IDs in the scientific source modules (mirrors
 # the equivalent test for src/burned_pattern_audit.py).
 # ---------------------------------------------------------------------------

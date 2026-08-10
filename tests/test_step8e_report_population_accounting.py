@@ -1,8 +1,8 @@
 """
-tests/test_step8e_report_fix.py
+tests/test_step8e_report_population_accounting.py
 
-Focused tests for the Step8E (experiment-aware) final-report population
-count bug fix in scripts/run_step8_modeling.py.
+Contract tests for the Step8E (experiment-aware) final-report population
+count accounting in scripts/run_step8_modeling.py.
 
 Background: the report's `step8a_dataset` section mixed pre-exclusion
 burned/unburned counts (read directly from step8a_dataset_stats.json's
@@ -27,7 +27,7 @@ Covers (task numbering):
     7. Markdown clearly labels total, excluded, and modeled counts
 
 Run:
-    python -m unittest tests.test_step8e_report_fix
+    python -m unittest tests.test_step8e_report_population_accounting
 """
 
 from __future__ import annotations

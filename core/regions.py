@@ -105,6 +105,47 @@ NORTH_EVIA_AOI_BBOX = (23.12, 38.68, 23.52, 39.08)
 # evia_2021 gibi.
 NORTH_EVIA_EXTENDED_AOI_BBOX = (23.05, 38.55, 23.85, 39.15)
 
+# Montiferru / Oristano, Sardinia (Italy) -- 24 July 2021 wildfire
+# (bkz. EXPERIMENTS["montiferru_2021"]). Manavgat/Bejís/Muğla/Evia ile ayni
+# "mediterranean_transfer_wildfire" ailesindendir.
+#
+# Bu bbox YALNIZCA YER (place) kapsamindan tanimlanmistir: dort capa belediye
+# (comune) -- Bonarcado, Santu Lussurgiu, Cuglieri, Scano di Montiferro --
+# TERRITORYALARI ile birlikte icerilir. KESIN yangin perimetri DEGILDIR ve
+# yangin footprint'ine gore KIRPILMAMISTIR; MCD64A1 etiketlerine, burned
+# prevalence'a, gate sonucuna, AUC/PR-AUC'ye veya herhangi bir model
+# metrigine BAKILARAK ayarlanmamistir. Tek, deterministik aday olarak
+# dondurulmustur (birden fazla geometri denenip en iyisi SECILMEMISTIR).
+#
+# Capa belediye merkezleri (yaklasik; yalnizca dokumantasyon amacli,
+# hesaplamada KULLANILMAZ):
+#   Cuglieri              ~ (lon 8.567, lat 40.183)
+#   Bonarcado             ~ (lon 8.650, lat 40.150)
+#   Santu Lussurgiu       ~ (lon 8.650, lat 40.217)
+#   Scano di Montiferro   ~ (lon 8.583, lat 40.233)
+# Kenar turetme yontemi (KANONIK; makine-okunur karsiligi
+# EXPERIMENTS["montiferru_2021"]["aoi_provenance"] icindedir):
+#   ISTAT 2021 non-generalized administrative boundaries (Limiti2021.zip,
+#   referans tarihi 2021-12-31) arsivinden yukaridaki dort resmi comune
+#   poligonu secilir, EPSG:4326'ya donusturulur, birlesimlerinin (union)
+#   total bounds'u hesaplanir ve her kenar 2 ondalik dereceye DISA DOGRU
+#   (outward) yuvarlanir:
+#     raw union total bounds =
+#       (8.454041028057148, 40.053824525866645,
+#        8.745509975002108, 40.264205506896815)
+#     outward round -> (8.45, 40.05, 8.75, 40.27) = MONTIFERRU_AOI_BBOX
+#   Yani lon_min/lat_min asagi, lon_max/lat_max yukari yuvarlanir; ham
+#   birlesim sinirlari her zaman final bbox'in ICINDE kalir.
+# Step6B burned-landcover gate ile dogrulanmalidir -- tipki manavgat_2021 /
+# bejis_2022 / mugla_2021 / evia_2021 gibi. Gate FAIL ederse AOI, populasyon
+# veya esik DEGISTIRILMEZ.
+MONTIFERRU_AOI_BBOX = (
+    8.45,
+    40.05,
+    8.75,
+    40.27,
+)
+
 
 # =============================================================================
 # 1) Region geometrileri (mevcut + yeni placeholder'lar)
@@ -241,6 +282,15 @@ def build_regions() -> dict:
     north_evia_extended_candidate_bbox = ee.Geometry.BBox(*NORTH_EVIA_EXTENDED_AOI_BBOX)
     north_evia_extended = north_evia_extended_candidate_bbox
 
+    # --- Montiferru / Oristano 2021 (Akdeniz transfer wildfire, Italya) ---
+    # Module-seviyesi MONTIFERRU_AOI_BBOX sabitinden (TEK KAYNAK) uretilir;
+    # cografi gerekce o sabitin uzerinde belgelenmistir (dort capa belediye:
+    # Bonarcado, Santu Lussurgiu, Cuglieri, Scano di Montiferro). KESIN yangin
+    # perimetri DEGILDIR ve yangin footprint'ine gore kirpilmamistir; Step6B
+    # burned-landcover gate ile dogrulanmalidir.
+    montiferru_aoi_candidate_bbox = ee.Geometry.BBox(*MONTIFERRU_AOI_BBOX)
+    montiferru_aoi = montiferru_aoi_candidate_bbox
+
     return {
         "dogu_akdeniz": dogu_akdeniz,
         "kozan_aoi": kozan_aoi,
@@ -255,6 +305,8 @@ def build_regions() -> dict:
         "north_evia_candidate_bbox": north_evia_candidate_bbox,
         "north_evia_extended": north_evia_extended,
         "north_evia_extended_candidate_bbox": north_evia_extended_candidate_bbox,
+        "montiferru_aoi": montiferru_aoi,
+        "montiferru_aoi_candidate_bbox": montiferru_aoi_candidate_bbox,
     }
 
 
@@ -280,6 +332,11 @@ def build_regions() -> dict:
 EXPERIMENTS = {
     "kozan_2023": {
         "enabled": True,
+        # kozan_2023 is NOT a legacy variant: it is the canonical
+        # cropland/stubble-burning negative control and stays selectable.
+        # It is filtered out of natural-vegetation cohort discovery by its
+        # ROLE ("negative_control"), never by variant_status.
+        "variant_status": "canonical",
         "region_key": "kozan_aoi",
         "display_name": "Kozan 2023",
         "role": "negative_control",
@@ -294,6 +351,7 @@ EXPERIMENTS = {
     },
     "manavgat_2021": {
         "enabled": True,
+        "variant_status": "canonical",
         "region_key": "manavgat_aoi",
         "display_name": "Manavgat / Antalya 2021",
         "role": "anchor_wildfire",
@@ -309,6 +367,7 @@ EXPERIMENTS = {
     
         "bejis_2022": { #valenica
         "enabled": True,
+        "variant_status": "canonical",
         "region_key": "bejis_aoi",
         "display_name": "Bejís / Castellón 2022",
         "role": "mediterranean_transfer_wildfire",
@@ -331,6 +390,7 @@ EXPERIMENTS = {
 
     "mugla_2021": {
         "enabled": True,
+        "variant_status": "canonical",
         "region_key": "mugla_aoi",
         "display_name": "Muğla 2021",
         "role": "same_country_same_year_transfer_wildfire",
@@ -382,8 +442,201 @@ EXPERIMENTS = {
         ),
     },
 
+    # --- HISTORICAL / SUPERSEDED: provisional calendar-shift attempt ---------
+    # mugla_2021 ile AYNI MEKAN, YALNIZCA BIR YIL SONRAKI ZAMAN PENCERESI
+    # (takvim kaydirmasi / calendar shift). Bu formulasyon, danisman
+    # (supervisor) protokolun OLAY-GORELI (event-relative) oldugunu
+    # netlestirdikten SONRA bilimsel olarak GECERSIZ KILINMISTIR; yerini
+    # mugla_2022_event_relative almistir (bkz. superseded_by).
+    #
+    # Kayit SILINMEZ ve outputs/experiments/mugla_2022/ altindaki calendar-
+    # shift gate denemesinin ciktilari ASLA overwrite/migrate EDILMEZ --
+    # tarihsel kayit olarak oldugu gibi kalir. variant_status yalnizca bu
+    # kaydi YENI kanonik secimlerden cikarir (evia_2021 ile ayni mekanizma).
+    #
+    # AOI SABITTIR: ayni region_key ("mugla_aoi") uzerinden MEVCUT Muğla
+    # geometrisi (module sabiti MUGLA_AOI_BBOX -> (27.10, 36.60, 28.90, 37.45))
+    # YENIDEN KULLANILIR -- yeni bir bbox/geometri TANIMLANMAZ.
+    "mugla_2022": {
+        "enabled": True,
+        "variant_status": "legacy_superseded",
+        "superseded_by": "mugla_2022_event_relative",
+        "region_key": "mugla_aoi",
+        "display_name": "Muğla 2022",
+        # Temporal (ayni AOI, farkli yil) transfer deneyi: mekan sabit
+        # tutuldugunda transfer basarisizliginin YILA/OLAYA mi bagli oldugunu
+        # test eder. Yeni bir kod dali gerektirmez -- rol yalnizca
+        # aciklayici metadata olarak tasinir (bkz. list_canonical_enabled_
+        # experiments(role=...) jenerik filtresi).
+        "role": "temporal_transfer_wildfire",
+        "country": "Turkey",
+        "predictor_start_date": "2022-06-01",
+        "predictor_end_date": "2022-07-28",
+        "label_start_date": "2022-07-29",
+        "label_end_date": "2022-09-15",
+        "baseline_years": [2018, 2019, 2020, 2021],
+        "output_namespace": "mugla_2022",
+        # Ayni jenerik, deklaratif leakage sozlesmesi (mugla_2021 / evia_2021
+        # ile ayni mekanizma; yeni bir kod dali EKLENMEZ): label rasteri label
+        # penceresine DOY-maskeli oldugu icin, label_start ONCESI yanan
+        # hucreler ayri bir pre-label BurnDate rasteri ile analiz evreninden
+        # DISLANIR (unburned negatif olarak SAYILMAZ).
+        "exclude_pre_label_burns": True,
+        "pre_label_burn_window": ["2022-06-01", "2022-07-28"],
+        # NOT: mugla_2021'deki `pre_label_diagnostic_window` BILEREK
+        # kopyalanmamistir -- o alan Bördübet/Marmaris (~2021-06-21..25)
+        # yangina ozgu bir TESHIS alt-penceresidir ve 2022 icin boyle bir
+        # onceden belirlenmis olay yoktur. Alan yoksa
+        # scripts/run_label_gate_only.py jenerik olarak None gecer.
+        "notes": (
+            "SUPERSEDED (historical calendar-shift attempt; retained, never "
+            "deleted or migrated). This was the PROVISIONAL calendar-shift "
+            "formulation of Muğla 2022: mugla_2021's windows shifted forward by "
+            "exactly one calendar year (predictor 2022-06-01..2022-07-28, label "
+            "2022-07-29..2022-09-15, baseline 2018-2021) on the identical AOI "
+            "(region_key='mugla_aoi', MUGLA_AOI_BBOX). It is SCIENTIFICALLY "
+            "SUPERSEDED after the supervisor clarified that the protocol is "
+            "EVENT-RELATIVE: the windows must be anchored on the 2022 fire "
+            "ignition date, not on the 2021 calendar dates. The canonical "
+            "replacement is mugla_2022_event_relative (see superseded_by), "
+            "which writes to its OWN namespace. The calendar-shift gate attempt "
+            "under outputs/experiments/mugla_2022/ is PRESERVED as-is and is "
+            "never overwritten, migrated, or reused as input for the "
+            "event-relative experiment. mugla_2021 remains untouched."
+        ),
+    },
+
+    # --- CANONICAL: event-relative, same-geography event-to-event -----------
+    # Replaces the calendar-shift attempt above (mugla_2022). SAME AOI as
+    # mugla_2021/mugla_2022 -- region_key="mugla_aoi", the existing
+    # MUGLA_AOI_BBOX geometry is REUSED; no new bbox/geometry is defined.
+    # Windows are anchored on the 2022 dominant MCD64A1 event ignition
+    # (2022-06-21) instead of on 2021's calendar dates, preserving the
+    # same-AOI 2021 window DURATIONS exactly (58-day predictor, 49-day label).
+    #
+    # Writes exclusively to outputs/experiments/mugla_2022_event_relative/;
+    # the frozen outputs/experiments/mugla_2022/ artifacts are never read as
+    # input, overwritten, or migrated.
+    "mugla_2022_event_relative": {
+        "enabled": True,
+        "variant_status": "canonical",
+        "region_key": "mugla_aoi",
+        "display_name": "Muğla 2022 -- event-relative",
+        # Role is deliberately KEPT as temporal_transfer_wildfire: existing
+        # discovery logic (src/burned_pattern_audit.py NON_COHORT_ROLES and the
+        # generic role filters) excludes this role from the canonical
+        # five-AOI spatial/domain cohort. Changing the role would silently
+        # enrol a SECOND year of an AOI that is already represented
+        # (mugla_2021) into a spatial comparison. The role name is descriptive
+        # metadata only -- see transfer_framing below for the actual claim.
+        "role": "temporal_transfer_wildfire",
+        "country": "Turkey",
+        "predictor_start_date": "2022-04-24",
+        "predictor_end_date": "2022-06-20",
+        "label_start_date": "2022-06-21",
+        "label_end_date": "2022-08-08",
+        "baseline_years": [2018, 2019, 2020, 2021],
+        "output_namespace": "mugla_2022_event_relative",
+        # --- Event-relative framing (explicit, machine-readable) -------------
+        # This is NOT a pure temporal-transfer experiment: YEAR and SEASONAL
+        # PHASE are confounded (the 2022 event ignites ~5 weeks earlier in the
+        # season than the 2021 event), so a performance difference cannot be
+        # attributed to the year alone. The intended claim is SAME-GEOGRAPHY
+        # EVENT-TO-EVENT transfer.
+        "transfer_framing": "same_geography_event_to_event",
+        "event_anchor_date": "2022-06-21",
+        "event_anchor_basis": (
+            "dominant MCD64A1 event identified independently before window "
+            "revision"
+        ),
+        "event_window_rule": (
+            "same-AOI 2021 duration preserved: 58-day predictor ending one day "
+            "before ignition; 49-day label beginning on ignition"
+        ),
+        # --- Leakage-safe PRE-LABEL exclusion (same generic, declarative
+        # contract as mugla_2021 / evia_2021 / montiferru_2021; no new code
+        # branch). Cells that burned inside THIS experiment's predictor window
+        # (before label_start) leave post-fire predictor signatures and are
+        # removed from the analysis universe -- never counted as unburned. ---
+        "exclude_pre_label_burns": True,
+        "pre_label_burn_window": ["2022-04-24", "2022-06-20"],
+        # --- HISTORICAL (2021) BURN EXCLUSION (separate, independent contract)
+        # A cell that burned in the 2021 Muğla event is excluded from the 2022
+        # analysis universe entirely, because its 2022 NDVI/LST/TVDI may
+        # reflect POST-FIRE RECOVERY rather than a normal vegetation state.
+        # This is a DIFFERENT exclusion axis from the pre-label one above: the
+        # two are derived independently, reported separately, and unioned by
+        # the gate (a cell may carry both flags). Generic, declarative fields
+        # -- no code path keys off this experiment_id.
+        #
+        # Source mask definition is EXACTLY `burned == 1` in the source
+        # experiment's canonical Step8A parquet; it is NOT additionally
+        # restricted by TSG, analysis_eligible, valid_for_modeling or
+        # landcover. The source artifact is READ-ONLY and never rewritten.
+        "exclude_historical_burns": True,
+        "historical_burn_source_experiment": "mugla_2021",
+        "historical_burn_source_kind": "canonical_step8a_physical_burned_cells",
+        # Frozen expectation for the CURRENT canonical source artifact; the
+        # manifest builder fails closed if the source yields a different count
+        # (a silently changed/regenerated source must never pass unnoticed).
+        "historical_burn_source_expected_count": 3073,
+        # --- POST-GATE primary-population sample-size rule (SEPARATE from the
+        # generic burned-landcover gate's min_positives=30, which stays the
+        # total-burned feasibility threshold and is NOT modified). Evaluated
+        # AFTER all exclusions + landcover classification, on the primary
+        # population only. Falling short is a STOP for downstream
+        # authorization -- it is NOT a failure of the natural/cropland
+        # composition gate. ---
+        "primary_population": "burnable_tree_shrub_grass",
+        "min_primary_population_burned": 300,
+        "notes": (
+            "Muğla 2022 EVENT-RELATIVE (canonical; supersedes the provisional "
+            "calendar-shift record mugla_2022). Same AOI as mugla_2021 "
+            "(region_key='mugla_aoi', MUGLA_AOI_BBOX -- reused, not "
+            "redefined). Windows are anchored on the 2022 dominant MCD64A1 "
+            "event ignition date 2022-06-21, which was identified "
+            "INDEPENDENTLY, BEFORE the window revision, and preserve the "
+            "same-AOI 2021 window durations exactly: a 58-day predictor "
+            "(2022-04-24..2022-06-20, ending one day before ignition) and a "
+            "49-day label (2022-06-21..2022-08-08, beginning on ignition). "
+            "FRAMING: this is NOT a pure temporal-transfer experiment. Year "
+            "and seasonal phase are CONFOUNDED -- the 2022 event ignites "
+            "earlier in the season than the 2021 event, so predictor/label "
+            "windows sit in a different seasonal phase as well as a different "
+            "year, and no year-only attribution is possible. The intended "
+            "claim is SAME-GEOGRAPHY EVENT-TO-EVENT transfer "
+            "(transfer_framing='same_geography_event_to_event'). Two "
+            "INDEPENDENT exclusion contracts apply and are unioned by the "
+            "gate: (1) pre-label burns inside this experiment's own predictor "
+            "window, and (2) historical 2021 burns (all burned==1 cells of "
+            "mugla_2021's canonical Step8A dataset), excluded because their "
+            "2022 vegetation/thermal state may reflect post-fire recovery. "
+            "The frozen outputs/experiments/mugla_2022/ calendar-shift "
+            "artifacts are never overwritten, migrated or reused here. "
+            "Registration does NOT authorize downstream predictor/Step7/Step8/"
+            "Step9/Step10 execution; the same MCD64A1 burned-landcover gate "
+            "must pass first, AND the separate primary-population "
+            "sample-size rule (>= 300 burned burnable_tree_shrub_grass cells) "
+            "must be satisfied."
+        ),
+    },
+
     "evia_2021": {
         "enabled": True,
+        # --- FROZEN VARIANT DECISION -------------------------------------
+        # evia_2021 is the LEGACY North Evia AOI variant, superseded by
+        # evia_2021_extended (same event, same predictor/label windows, same
+        # baseline years, same predictor/label/model contract -- the ONLY
+        # contract difference is AOI geometry). It stays `enabled` and fully
+        # registered, and its frozen outputs under
+        # outputs/experiments/evia_2021/ are NEVER deleted or overwritten;
+        # `variant_status` only removes it from NEW canonical cohort
+        # selections (discovery mode, cross-region synthesis, multi-AOI
+        # univariate comparison). Explicitly requesting it fails closed with
+        # the superseded_by pointer -- it is never silently dropped.
+        # Quantitative variant comparison: docs/evia_2021_prevalence_audit.json
+        "variant_status": "legacy_superseded",
+        "superseded_by": "evia_2021_extended",
         "region_key": "north_evia",
         "display_name": "North Evia (Euboea), Greece",
         "role": "mediterranean_transfer_wildfire",
@@ -429,6 +682,10 @@ EXPERIMENTS = {
     # farklidir.
     "evia_2021_extended": {
         "enabled": True,
+        # Canonical North Evia variant; supersedes evia_2021 (see that
+        # record's `superseded_by`). A canonical record must NEVER carry a
+        # `superseded_by` key -- see validate_variant_record().
+        "variant_status": "canonical",
         "region_key": "north_evia_extended",
         "display_name": "North Evia (Euboea), Greece -- extended AOI",
         "role": "mediterranean_transfer_wildfire",
@@ -460,10 +717,282 @@ EXPERIMENTS = {
             "Step10 execution."
         ),
     },
+
+    "montiferru_2021": {
+        "enabled": True,
+        "variant_status": "canonical",
+        "region_key": "montiferru_aoi",
+        "display_name": "Montiferru / Oristano, Sardinia 2021",
+        "role": "mediterranean_transfer_wildfire",
+        "country": "Italy",
+        "predictor_start_date": "2021-05-25",
+        "predictor_end_date": "2021-07-23",
+        "label_start_date": "2021-07-24",
+        "label_end_date": "2021-08-31",
+        "baseline_years": [2017, 2018, 2019, 2020],
+        "output_namespace": "montiferru_2021",
+        "exclude_pre_label_burns": True,
+        "pre_label_burn_window": ["2021-05-25", "2021-07-23"],
+        # Kanonik, JSON-serializable AOI turetme zinciri. MONTIFERRU_AOI_BBOX
+        # bu kaydin "final_bbox_epsg4326" alanina birebir esittir; bbox'in
+        # kendisi TEK KAYNAK olarak modul sabitinde kalir. Bu dict gate
+        # manifestine scientific.aoi.derivation olarak tasinir ve boylece
+        # analysis_id'nin parcasi olur.
+        "aoi_provenance": {
+            "source_authority": "ISTAT",
+            "source_dataset": "2021 non-generalized administrative boundaries",
+            "source_archive": "Limiti2021.zip",
+            "source_reference_date": "2021-12-31",
+            "administrative_level": "municipality/comune",
+            "municipalities": [
+                "Bonarcado",
+                "Cuglieri",
+                "Santu Lussurgiu",
+                "Scano di Montiferro",
+            ],
+            "derivation_method": (
+                "Select the four official municipality polygons, transform to "
+                "EPSG:4326, compute their union total bounds, then outward-round "
+                "each edge to two decimal degrees."
+            ),
+            "raw_union_total_bounds_epsg4326": [
+                8.454041028057148,
+                40.053824525866645,
+                8.745509975002108,
+                40.264205506896815,
+            ],
+            "rounding": {
+                "mode": "outward",
+                "decimal_places": 2,
+            },
+            "final_bbox_epsg4326": [
+                8.45,
+                40.05,
+                8.75,
+                40.27,
+            ],
+            "selection_constraint": (
+                "Defined only from official municipal boundaries; not tuned "
+                "using the fire footprint, MCD64A1 labels, prevalence, gate "
+                "outcome or model metrics."
+            ),
+        },
+        "notes": (
+            "Montiferru / Oristano 2021 wildfire AOI covering Bonarcado, "
+            "Santu Lussurgiu, Cuglieri and Scano di Montiferro. The AOI is "
+            "defined from geographic place coverage only and was not tuned on "
+            "MCD64A1 labels, burned prevalence, gate outcome or model metrics. "
+            "Mixed forest, olive-grove and grassland landscape; the canonical "
+            "burned-landcover gate may fail. Gate passage does not authorize "
+            "downstream execution."
+        ),
+    },
 }
 
 # Geriye donuk uyumluluk: mevcut pipeline'in varsayilan deneyi.
 DEFAULT_EXPERIMENT_ID = "kozan_2023"
+
+
+# =============================================================================
+# 2b) Variant status (canonical / legacy_superseded) -- generic, fail-closed
+# =============================================================================
+# Bir deney kaydinin AOI/kontrat varyant durumu. YALNIZCA iki deger gecerlidir;
+# bilinmeyen veya eksik bir deger HATA verir (fail-closed) -- boylece yeni bir
+# deney kaydi eklendiginde varyant durumunu belirtmeyi unutmak sessizce
+# "canonical" varsayilmaz.
+#
+#   canonical          : yeni cohort/synthesis secimlerinde kullanilabilir.
+#   legacy_superseded  : baska bir deney tarafindan gecersiz kilinmistir;
+#                        kaydi ve ciktilari SILINMEZ/OVERWRITE EDILMEZ, ama
+#                        yeni kanonik secimlere GIRMEZ. Acikca istenirse
+#                        superseded_by isaretcisiyle fail-closed hata verir.
+#
+# ONEMLI: `variant_status` `enabled` alanindan BAGIMSIZDIR. legacy_superseded
+# bir deney hala enabled kalabilir (tekil, acik, geriye donuk analizler icin);
+# bu iki alan birbirinin yerine KULLANILMAZ.
+#
+# ONEMLI: `role` de `variant_status`tan BAGIMSIZDIR. kozan_2023 canonical bir
+# kayittir; dogal-vejetasyon cohort'larindan `role == "negative_control"`
+# oldugu icin ayrilir, legacy oldugu icin DEGIL.
+VARIANT_STATUS_CANONICAL = "canonical"
+VARIANT_STATUS_LEGACY_SUPERSEDED = "legacy_superseded"
+ALLOWED_VARIANT_STATUSES = (
+    VARIANT_STATUS_CANONICAL,
+    VARIANT_STATUS_LEGACY_SUPERSEDED,
+)
+
+
+class VariantStatusError(ValueError):
+    """Raised when a registry record's variant contract is invalid or when a
+    superseded experiment is requested where only canonical ones are allowed.
+
+    Subclasses ValueError so existing callers that already catch ValueError
+    from `get_experiment()` keep working unchanged.
+    """
+
+
+def validate_variant_record(record: dict, experiment_id: str) -> str:
+    """Validate ONE registry record's variant contract and return its status.
+
+    Pure function over a record dict -- it does not consult EXPERIMENTS, so
+    callers that already hold a record (e.g. from `list_experiments()`) can
+    validate it without a second registry lookup.
+
+    Rules (all fail-closed):
+        - `variant_status` must be present and one of ALLOWED_VARIANT_STATUSES;
+          missing or unknown values raise (never defaulted to canonical).
+        - `legacy_superseded` requires a `superseded_by` naming a DIFFERENT,
+          registered experiment.
+        - `canonical` must NOT carry a `superseded_by` key at all.
+
+    The `superseded_by` target is resolved against EXPERIMENTS only when that
+    registry actually contains `experiment_id`, so record-level validation of
+    synthetic/test records stays self-contained.
+    """
+    status = record.get("variant_status")
+    if status is None:
+        raise VariantStatusError(
+            f"'{experiment_id}': registry record has no 'variant_status'. "
+            f"Every experiment must declare one of {list(ALLOWED_VARIANT_STATUSES)} "
+            "explicitly (missing status is never defaulted to canonical)."
+        )
+    if status not in ALLOWED_VARIANT_STATUSES:
+        raise VariantStatusError(
+            f"'{experiment_id}': unknown variant_status {status!r}. "
+            f"Allowed values: {list(ALLOWED_VARIANT_STATUSES)}."
+        )
+
+    superseded_by = record.get("superseded_by")
+    if status == VARIANT_STATUS_LEGACY_SUPERSEDED:
+        if not superseded_by or not isinstance(superseded_by, str):
+            raise VariantStatusError(
+                f"'{experiment_id}': variant_status='{VARIANT_STATUS_LEGACY_SUPERSEDED}' "
+                "requires a non-empty 'superseded_by' experiment_id."
+            )
+        if superseded_by == experiment_id:
+            raise VariantStatusError(
+                f"'{experiment_id}': 'superseded_by' must not point at itself."
+            )
+        
+        # Only enforce successor registry constraints when this record is itself
+        # a real registry entry; synthetic records validate standalone.
+        if experiment_id in EXPERIMENTS:
+            if superseded_by not in EXPERIMENTS:
+                raise VariantStatusError(
+                    f"'{experiment_id}': superseded_by='{superseded_by}' is not a "
+                    f"registered experiment. Valid IDs: "
+                    f"{', '.join(sorted(EXPERIMENTS))}."
+                )
+
+            successor_status = EXPERIMENTS[superseded_by].get("variant_status")
+            if successor_status != VARIANT_STATUS_CANONICAL:
+                raise VariantStatusError(
+                    f"'{experiment_id}': superseded_by='{superseded_by}' "
+                    "must reference a canonical experiment."
+                )
+        
+    elif "superseded_by" in record:
+        raise VariantStatusError(
+            f"'{experiment_id}': variant_status='{VARIANT_STATUS_CANONICAL}' "
+            f"must not carry 'superseded_by' (found {superseded_by!r}). "
+            "Only superseded records point at a successor."
+        )
+    return status
+
+
+def get_variant_status(experiment_id: str) -> str:
+    """Return the validated variant status for `experiment_id`.
+
+    Raises:
+        ValueError: experiment_id is not registered.
+        VariantStatusError: the record's variant contract is invalid
+            (missing/unknown status, superseded without a valid
+            `superseded_by`, or canonical carrying one).
+    """
+    record = get_experiment(experiment_id)
+    return validate_variant_record(record, experiment_id)
+
+
+def get_superseded_by(experiment_id: str) -> Optional[str]:
+    """Return the successor experiment_id for a superseded experiment, or
+    None when `experiment_id` is canonical. Validates the record first."""
+    record = get_experiment(experiment_id)
+    status = validate_variant_record(record, experiment_id)
+    if status != VARIANT_STATUS_LEGACY_SUPERSEDED:
+        return None
+    return record["superseded_by"]
+
+
+def assert_not_superseded_experiments(
+    experiment_ids, context: str,
+) -> tuple[str, ...]:
+    """Fail closed if any caller-supplied experiment_id is superseded.
+
+    Generic guard for entry points that accept an EXPLICIT experiment list.
+    A superseded ID is NEVER silently dropped -- doing so would quietly change
+    the scientific cohort behind the caller's back. The raised error names the
+    successor so the caller can fix the request.
+
+    Every ID is also variant-validated, so an unknown/missing status fails
+    here too.
+
+    Args:
+        experiment_ids: iterable of experiment IDs (validated in order).
+        context: short human-readable name of the calling entry point, echoed
+            in the error message (e.g. "multi-AOI transfer synthesis").
+
+    Returns:
+        The validated IDs as a tuple, unchanged.
+
+    Raises:
+        ValueError: an ID is unknown.
+        VariantStatusError: an ID is superseded or has an invalid record.
+    """
+    validated: list[str] = []
+    offenders: list[str] = []
+    for experiment_id in experiment_ids:
+        status = get_variant_status(experiment_id)  # ValueError if unknown
+        if status == VARIANT_STATUS_LEGACY_SUPERSEDED:
+            successor = EXPERIMENTS[experiment_id]["superseded_by"]
+            offenders.append(f"'{experiment_id}' (superseded_by='{successor}')")
+        validated.append(experiment_id)
+    if offenders:
+        raise VariantStatusError(
+            f"{context}: refusing superseded experiment(s): {', '.join(offenders)}. "
+            f"Only variant_status='{VARIANT_STATUS_CANONICAL}' experiments may enter a "
+            "new canonical selection. Legacy outputs stay on disk and are never "
+            "deleted; use the successor experiment_id instead."
+        )
+    return tuple(validated)
+
+
+def list_canonical_enabled_experiments(role: Optional[str] = None) -> dict:
+    """Return the enabled + canonical experiments, optionally filtered by role.
+
+    Generic replacement for ad-hoc `enabled minus <hardcoded legacy id>`
+    filtering. No experiment ID is hard-coded here.
+
+    Args:
+        role: when given, keep only records whose "role" equals it (e.g.
+            "negative_control" or "mediterranean_transfer_wildfire"). When
+            None, every role is kept -- including negative controls, which
+            callers building natural-vegetation cohorts must exclude
+            themselves by role (kozan_2023 is canonical, not legacy).
+
+    Raises:
+        VariantStatusError: any enabled record has an invalid variant contract.
+    """
+    selected: dict = {}
+    for experiment_id, record in EXPERIMENTS.items():
+        if not record.get("enabled"):
+            continue
+        status = validate_variant_record(record, experiment_id)
+        if status != VARIANT_STATUS_CANONICAL:
+            continue
+        if role is not None and record.get("role") != role:
+            continue
+        selected[experiment_id] = dict(record, experiment_id=experiment_id)
+    return selected
 
 
 # =============================================================================

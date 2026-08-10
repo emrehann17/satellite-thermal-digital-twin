@@ -1,7 +1,7 @@
 """
-tests/test_step9e_report_fix.py
+tests/test_step9e_report_wording_and_provenance.py
 
-Focused tests for the Step9E metadata/provenance fix in
+Contract tests for the Step9E report wording/provenance guarantees in
 src/step9e_distribution_shift_audit.py:
 
     1. safe_wording is derived dynamically from Step9D's canonical
@@ -31,7 +31,7 @@ Covers (task numbering):
     8. Mugla-Evia resolves to the partial/asymmetric wording
 
 Run:
-    python -m unittest tests.test_step9e_report_fix
+    python -m unittest tests.test_step9e_report_wording_and_provenance
 """
 
 from __future__ import annotations

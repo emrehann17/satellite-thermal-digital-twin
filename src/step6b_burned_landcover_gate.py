@@ -147,6 +147,14 @@ PRE_LABEL_EXCLUSION_MANIFEST_PARQUET = "pre_label_excluded_cells.parquet"
 PRE_LABEL_EXCLUSION_MANIFEST_CSV = "pre_label_excluded_cells.csv"
 PRE_LABEL_EXCLUSION_MANIFEST_METADATA = "pre_label_excluded_cells_metadata.json"
 
+# --- Primary-population sample-size STOP state -------------------------------
+# Emitted by the SEPARATE post-gate primary-population rule (see
+# evaluate_primary_population_sample_size). This is NOT a burned-landcover
+# composition outcome and must never be reported as one.
+PRIMARY_POPULATION_STOP = "insufficient_primary_population_burned"
+PRIMARY_POPULATION_GATE_PASS = "pass"
+PRIMARY_POPULATION_GATE_STOP = "stop"
+
 
 class Step6BError(SystemExit):
     """Fail-fast error for Step6B (extends SystemExit like other steps)."""
@@ -209,6 +217,71 @@ def classify_gate_decision(
         "Ne natural (tree+shrub+grass dominant) ne de cropland-dominant "
         "esigi karsilandi (mixed/uncertain burned-landcover kompozisyonu).",
     )
+
+
+def evaluate_primary_population_sample_size(
+    primary_population_burned_count: int,
+    population: str | None,
+    min_burned_required: int | None,
+) -> dict | None:
+    """
+    Pure, testable implementation of the SEPARATE post-gate primary-population
+    sample-size rule.
+
+    THIS IS NOT THE BURNED-LANDCOVER GATE. The composition gate above keeps
+    its own generic total-burned feasibility threshold
+    (`min_positives`, core/config.py STEP6_BURNED_LANDCOVER_GATE_MIN_POSITIVES
+    = 30), which is UNCHANGED and applies to `burned_count` -- every burned
+    cell, any landcover. This rule is evaluated separately, AFTER all
+    exclusions and landcover classification, on the PRIMARY POPULATION only
+    (e.g. burned cells whose dominant landcover is tree/shrub/grass), and is
+    configured per experiment in the registry -- it is not a global constant
+    and it is not applied to experiments that do not declare it.
+
+    A shortfall is a STOP for downstream authorization. It is deliberately
+    reported in its own structure with its own decision vocabulary so it can
+    never be mistaken for (or reinterpreted as) a failure of the
+    natural/cropland composition gate.
+
+    Returns None when the experiment declares no such rule (every existing
+    experiment), so their gate output is unaffected.
+    """
+    if population is None and min_burned_required is None:
+        return None
+    if population is None or min_burned_required is None:
+        raise Step6BError(
+            "Primary-population sample-size rule is only half configured "
+            f"(population={population!r}, min_burned_required="
+            f"{min_burned_required!r}). Both must be declared together."
+        )
+
+    burned_count = int(primary_population_burned_count)
+    passed = burned_count >= int(min_burned_required)
+    return {
+        "population": population,
+        "burned_count": burned_count,
+        "min_burned_required": int(min_burned_required),
+        "decision": PRIMARY_POPULATION_GATE_PASS if passed else PRIMARY_POPULATION_GATE_STOP,
+        "stop_state": None if passed else PRIMARY_POPULATION_STOP,
+        "reason": (
+            f"{population} burned_count={burned_count} >= "
+            f"min_burned_required={min_burned_required}."
+            if passed else
+            f"{population} burned_count={burned_count} < "
+            f"min_burned_required={min_burned_required}; downstream is NOT "
+            "authorized. This is a PRIMARY-POPULATION SAMPLE-SIZE stop, NOT a "
+            "natural/cropland composition gate failure."
+        ),
+        "evaluated_after": (
+            "all analysis-universe exclusions (pre-label AND historical) and "
+            "landcover classification"
+        ),
+        "independent_of": (
+            "the burned-landcover composition gate and its generic "
+            "min_positives total-burned feasibility threshold"
+        ),
+        "downstream_authorized": False,
+    }
 
 
 def _resolve_explicit_landcover(
@@ -277,6 +350,11 @@ def compute_gate(
     predictor_end: str | None = None,
     bordubet_check_window: tuple[str, str] | None = None,
     experiment_id: str | None = None,
+    exclude_historical_burns: bool = False,
+    historical_excluded_cell_ids: frozenset[str] | None = None,
+    historical_exclusion_config: dict | None = None,
+    primary_population: str | None = None,
+    min_primary_population_burned: int | None = None,
 ) -> dict:
     """
     Reconstructs approximate native ~500 m MCD64A1 cells from the 30 m
@@ -298,6 +376,26 @@ def compute_gate(
         which would otherwise leak already-burned cells into the negatives.
         With exclude_pre_label_burns=False the function behaves EXACTLY as
         before (Kozan/Manavgat/Bejís unchanged).
+
+    HISTORICAL BURN EXCLUSION (opt-in; SEPARATE, INDEPENDENT axis):
+        When exclude_historical_burns is True, a caller-supplied set of
+        cell_id values (built and validated by
+        src/historical_burn_exclusion.py from an EARLIER experiment's
+        canonical Step8A burned cells) is also removed from the analysis
+        universe. This is config-driven -- the caller resolves it from the
+        registry; nothing here is keyed off an experiment_id.
+
+    UNION SEMANTICS:
+        Both flags are derived INDEPENDENTLY for every cell:
+
+            pre_label_burn_excluded    (this experiment's predictor window)
+            historical_burn_excluded   (an earlier event, same geography)
+            analysis_excluded = pre_label_burn_excluded OR historical_burn_excluded
+
+        A cell may carry BOTH flags; the overlap is counted and reported, and
+        each reason keeps its own independent count. A union-excluded cell
+        enters NEITHER the burned NOR the unburned gate counts, and appears in
+        NO gate denominator.
     """
     with rasterio.open(reference_path) as ref:
         ref_w, ref_h = ref.width, ref.height
@@ -346,6 +444,21 @@ def compute_gate(
         )
         pre_label_src = rasterio.open(aligned_pre_label_path)
 
+    # --- Historical exclusion setup (opt-in; SEPARATE axis) ---
+    # The set is built + provenance-validated by the caller
+    # (src/historical_burn_exclusion.py); an enabled contract with no set is a
+    # fail-closed error, never a silent empty exclusion.
+    if exclude_historical_burns and historical_excluded_cell_ids is None:
+        raise Step6BError(
+            "exclude_historical_burns=True verildi ama historical_excluded_"
+            "cell_id kumesi yok. Historical exclusion manifest'i gate'ten ONCE "
+            "uretilip dogrulanmalidir (bkz. src/historical_burn_exclusion.py "
+            "build_historical_burn_exclusion_manifest)."
+        )
+    historical_ids: frozenset[str] = (
+        historical_excluded_cell_ids if exclude_historical_burns else frozenset()
+    )
+
     # Bördübet predictor-window fire check DOY bounds (default 2021-06-21..25).
     bord_doy_lo = bord_doy_hi = None
     if bordubet_check_window is not None:
@@ -376,6 +489,14 @@ def compute_gate(
     # of those aggregate reports so existing experiments' gate outputs are
     # never affected by this feature.
     pre_label_excluded_rows: list[dict] = []
+    # --- Historical exclusion accumulators (INDEPENDENT of the pre-label
+    # ones above; a cell may be counted in both, and the overlap is tracked
+    # explicitly so the union arithmetic can be verified). ---
+    historical_excluded_count = 0
+    historical_excluded_dominant_counts: dict = {}
+    historical_excluded_without_valid_landcover = 0
+    pre_label_historical_overlap_count = 0
+    total_unique_excluded_count = 0
     temporal_qa = {
         "cell_level_note": (
             "Counts are per reconstructed ~500 m cell (representative BurnDate "
@@ -433,15 +554,16 @@ def compute_gate(
             dominant_class = int(uniq[int(np.argmax(counts))])
             dominant_name = _dominant_landcover_name(dominant_class)
 
-        # --- Pre-label burn exclusion (leakage-safe; opt-in) ---
-        # A cell that already burned BEFORE label_start is removed from the
-        # ENTIRE analysis universe here -- never counted as burned OR unburned
-        # and never in any denominator.
+        # --- Exclusion axis 1: pre-label burn (leakage-safe; opt-in) ---
+        # A cell that already burned BEFORE label_start carries post-fire
+        # predictor signatures for THIS experiment's own predictor window.
+        pre_label_burn_excluded = False
         if pre_label_src is not None:
             pre_arr = pre_label_src.read(1, window=window, masked=True).astype("float32").filled(np.nan)
             pre_valid = pre_arr[np.isfinite(pre_arr)]
             pre_positive = pre_valid[pre_valid > 0]
             if pre_positive.size > 0:
+                pre_label_burn_excluded = True
                 rep_pre_doy, _c, _n = mode_and_agreement(pre_positive)
                 pre_label_excluded_count += 1
                 if dominant_name is not None:
@@ -482,7 +604,28 @@ def compute_gate(
                         dominant_name in ("tree_cover", "shrubland", "grassland")
                     ),
                 })
-                continue  # EXCLUDED: do not count as burned or unburned
+
+        # --- Exclusion axis 2: historical burn (earlier event, same AOI) ---
+        # Derived INDEPENDENTLY of axis 1 above: the two reasons never
+        # short-circuit each other, so a cell excluded for both is counted in
+        # both breakdowns and in the overlap.
+        historical_burn_excluded = cell_id in historical_ids
+        if historical_burn_excluded:
+            historical_excluded_count += 1
+            if dominant_name is not None:
+                historical_excluded_dominant_counts[dominant_name] = (
+                    historical_excluded_dominant_counts.get(dominant_name, 0) + 1
+                )
+            else:
+                historical_excluded_without_valid_landcover += 1
+
+        if pre_label_burn_excluded and historical_burn_excluded:
+            pre_label_historical_overlap_count += 1
+
+        # --- Union: analysis_excluded = pre_label OR historical ---
+        if pre_label_burn_excluded or historical_burn_excluded:
+            total_unique_excluded_count += 1
+            continue  # EXCLUDED: enters NEITHER burned NOR unburned counts
 
         # --- Label (BurnDate) within the label window ---
         label_arr = label_src.read(1, window=window, masked=True).astype("float32").filled(np.nan)
@@ -581,16 +724,57 @@ def compute_gate(
         "by_dominant_class": pre_label_excluded_dominant_counts,
     }
 
-    # --- Leakage-safety assertion: excluded cells NEVER became burned/unburned.
-    # Every considered cell is exactly one of {excluded, burned, unburned}.
+    # --- Historical excluded cells: landcover breakdown (same shape) ---
+    hist_tree = historical_excluded_dominant_counts.get("tree_cover", 0)
+    hist_shrub = historical_excluded_dominant_counts.get("shrubland", 0)
+    hist_grass = historical_excluded_dominant_counts.get("grassland", 0)
+    hist_crop = historical_excluded_dominant_counts.get("cropland", 0)
+    hist_other = (
+        historical_excluded_count
+        - hist_tree - hist_shrub - hist_grass - hist_crop
+        - historical_excluded_without_valid_landcover
+    )
+    historical_excluded_breakdown = {
+        "total": historical_excluded_count,
+        "tree_cover": hist_tree,
+        "shrubland": hist_shrub,
+        "grassland": hist_grass,
+        "tree_shrub": hist_tree + hist_shrub,
+        "tree_shrub_grass": hist_tree + hist_shrub + hist_grass,
+        "cropland": hist_crop,
+        "other": hist_other,
+        "without_valid_landcover": historical_excluded_without_valid_landcover,
+        "by_dominant_class": historical_excluded_dominant_counts,
+    }
+
+    # --- Leakage-safety assertions --------------------------------------
+    # (1) Partition: every considered cell is exactly one of
+    #     {analysis-excluded, burned, unburned}. The excluded term is the
+    #     UNION count -- with no historical exclusion configured it equals
+    #     pre_label_excluded_count, so this is the pre-existing assertion.
     analysis_universe_cells = burned_count + unburned_count
-    partition_ok = (pre_label_excluded_count + analysis_universe_cells) == total_cells
+    partition_ok = (total_unique_excluded_count + analysis_universe_cells) == total_cells
     if not partition_ok:
         raise Step6BError(
-            "LEAKAGE-SAFETY ASSERTION FAILED: pre_label_excluded "
-            f"({pre_label_excluded_count}) + burned ({burned_count}) + "
+            "LEAKAGE-SAFETY ASSERTION FAILED: total_unique_excluded "
+            f"({total_unique_excluded_count}) + burned ({burned_count}) + "
             f"unburned ({unburned_count}) != total_cells ({total_cells}). "
-            "A pre-label excluded cell must never enter burned/unburned counts."
+            "An analysis-excluded cell must never enter burned/unburned counts."
+        )
+    # (2) Union arithmetic: |A u B| == |A| + |B| - |A n B|. A violation means
+    #     the two reasons were not derived independently.
+    expected_union = (
+        pre_label_excluded_count
+        + historical_excluded_count
+        - pre_label_historical_overlap_count
+    )
+    if total_unique_excluded_count != expected_union:
+        raise Step6BError(
+            "EXCLUSION UNION ASSERTION FAILED: total_unique_excluded_count="
+            f"{total_unique_excluded_count} != pre_label_burn_excluded_count "
+            f"({pre_label_excluded_count}) + historical_burn_excluded_count "
+            f"({historical_excluded_count}) - pre_label_historical_overlap_count "
+            f"({pre_label_historical_overlap_count}) = {expected_union}."
         )
     if exclude_pre_label_burns and pre_label_excluded_count > 0:
         warnings_list.append(
@@ -598,6 +782,15 @@ def compute_gate(
             "ONCESI yandigi icin analiz evreninden DISLANDI (pre_label_burn_"
             "excluded); bu hucreler ne burned ne unburned sayildi, hicbir "
             "gate paydasinda YOK."
+        )
+    if exclude_historical_burns and historical_excluded_count > 0:
+        warnings_list.append(
+            f"{historical_excluded_count} hucre ONCEKI bir olayda "
+            "(historical_burn_excluded) yandigi icin analiz evreninden "
+            "DISLANDI; bu hucreler ne burned ne unburned sayildi, hicbir gate "
+            f"paydasinda YOK. Bunlarin {pre_label_historical_overlap_count} "
+            "tanesi ayni zamanda pre_label_burn_excluded'dir (iki neden "
+            "BAGIMSIZ olarak turetilir ve ayri ayri raporlanir)."
         )
 
     # --- Decision rules (supervisor-specified; pure, extracted for testing) ---
@@ -608,6 +801,28 @@ def compute_gate(
         min_positives=min_positives,
         natural_threshold=natural_threshold,
         cropland_threshold=cropland_threshold,
+    )
+
+    # --- SEPARATE post-gate primary-population sample-size rule ---
+    # Evaluated AFTER all exclusions and landcover classification, on the
+    # primary population's burned count. None for every experiment that does
+    # not declare the rule -- their gate output is byte-for-byte unaffected.
+    primary_population_counts = {
+        "burnable_tree_shrub_grass": burned_tree_shrub_grass_count,
+        "burnable_tree_shrub": burned_tree_shrub_count,
+    }
+    if primary_population is not None and primary_population not in primary_population_counts:
+        raise Step6BError(
+            f"Bilinmeyen primary_population={primary_population!r}. Gecerli "
+            f"degerler: {sorted(primary_population_counts)}."
+        )
+    primary_population_gate = evaluate_primary_population_sample_size(
+        primary_population_burned_count=(
+            primary_population_counts[primary_population]
+            if primary_population is not None else 0
+        ),
+        population=primary_population,
+        min_burned_required=min_primary_population_burned,
     )
 
     return {
@@ -627,6 +842,31 @@ def compute_gate(
             f"valid nonzero BurnDate calendar date < label_start ({label_start})"
             if exclude_pre_label_burns else "not_applied"
         ),
+        # --- Historical burn exclusion (SEPARATE, independent axis) ---
+        "exclude_historical_burns": bool(exclude_historical_burns),
+        "historical_burn_excluded_count": historical_excluded_count,
+        "historical_burn_excluded_breakdown": historical_excluded_breakdown,
+        "historical_burn_exclusion_rule": (
+            (
+                (historical_exclusion_config or {}).get("mask_definition")
+                or "cell_id present in the validated historical burn exclusion manifest"
+            )
+            if exclude_historical_burns else "not_applied"
+        ),
+        "historical_burn_exclusion_config": historical_exclusion_config,
+        # --- Union of the two independent exclusion axes ---
+        "pre_label_historical_overlap_count": pre_label_historical_overlap_count,
+        "total_unique_excluded_count": total_unique_excluded_count,
+        "exclusion_union_rule": (
+            "analysis_excluded = pre_label_burn_excluded OR "
+            "historical_burn_excluded; total_unique_excluded_count = "
+            "pre_label_burn_excluded_count + historical_burn_excluded_count - "
+            "pre_label_historical_overlap_count; a union-excluded cell enters "
+            "NEITHER burned NOR unburned counts and NO gate denominator."
+        ),
+        # --- SEPARATE primary-population sample-size rule (None when the
+        # experiment declares none). NOT a composition-gate outcome. ---
+        "primary_population_sample_size_gate": primary_population_gate,
         "temporal_label_qa": temporal_qa,
         # Cell-level rows for the manifest writer (main() pops this key
         # before writing burned_landcover_gate.json/.md/.csv -- never
@@ -690,6 +930,8 @@ def write_csv(gate: dict, out_path: Path) -> Path:
         "total_valid_cells_or_pixels_considered",
         "analysis_universe_cells_after_exclusions",
         "exclude_pre_label_burns", "pre_label_burn_excluded_count",
+        "exclude_historical_burns", "historical_burn_excluded_count",
+        "pre_label_historical_overlap_count", "total_unique_excluded_count",
         "burned_count", "unburned_count",
         "burned_tree_cover_count", "burned_shrubland_count", "burned_grassland_count",
         "burned_cropland_count", "burned_tree_shrub_grass_count", "burned_tree_shrub_count",
@@ -713,6 +955,17 @@ def write_csv(gate: dict, out_path: Path) -> Path:
                     "tree_shrub_grass", "cropland", "other", "without_valid_landcover"]:
             if key in breakdown:
                 writer.writerow([f"pre_label_burn_excluded__{key}", breakdown[key]])
+        hist_breakdown = gate.get("historical_burn_excluded_breakdown", {}) or {}
+        for key in ["total", "tree_cover", "shrubland", "grassland", "tree_shrub",
+                    "tree_shrub_grass", "cropland", "other", "without_valid_landcover"]:
+            if key in hist_breakdown:
+                writer.writerow([f"historical_burn_excluded__{key}", hist_breakdown[key]])
+        primary_gate = gate.get("primary_population_sample_size_gate") or {}
+        for key in ["population", "burned_count", "min_burned_required",
+                    "decision", "stop_state"]:
+            if key in primary_gate:
+                writer.writerow([f"primary_population_sample_size_gate__{key}",
+                                 primary_gate[key]])
         qa = gate.get("temporal_label_qa", {}) or {}
         for key in ["count_within_predictor_window", "count_within_label_window",
                     "count_between_predictor_end_and_label_start",
@@ -826,6 +1079,76 @@ def write_markdown(gate: dict, out_path: Path) -> Path:
             lines.append("")
         lines.append(f"_{qa.get('out_of_span_note', '')}_")
         lines.append("")
+
+    # --- Historical burn exclusion (SEPARATE axis) + union arithmetic ---
+    if gate.get("exclude_historical_burns"):
+        hb = gate.get("historical_burn_excluded_breakdown", {}) or {}
+        cfg = gate.get("historical_burn_exclusion_config", {}) or {}
+        lines.append("## Historical burn exclusion (earlier event, same geography)")
+        lines.append("")
+        lines.append(
+            "Cells that burned in an EARLIER event over the SAME AOI were "
+            "removed from the analysis universe because their current-year "
+            "NDVI/LST/TVDI may reflect POST-FIRE RECOVERY rather than a normal "
+            "vegetation state. This is an axis SEPARATE from the pre-label "
+            "exclusion above: the two flags are derived independently, a cell "
+            "may carry both, and the gate excludes their UNION."
+        )
+        lines.append("")
+        lines.append(f"- source experiment: `{cfg.get('source_experiment_id')}`")
+        lines.append(f"- source kind: `{cfg.get('source_kind')}`")
+        lines.append(f"- mask definition: {gate.get('historical_burn_exclusion_rule')}")
+        lines.append(f"- historical_burn_excluded_count: `{gate.get('historical_burn_excluded_count')}`")
+        lines.append("")
+        lines.append("| Excluded cells by dominant landcover | Count |")
+        lines.append("|---|---|")
+        for key in ["tree_cover", "shrubland", "grassland", "tree_shrub",
+                    "tree_shrub_grass", "cropland", "other", "without_valid_landcover"]:
+            lines.append(f"| {key} | {hb.get(key, 0)} |")
+        lines.append("")
+        lines.append("## Exclusion union")
+        lines.append("")
+        lines.append(f"_{gate.get('exclusion_union_rule')}_")
+        lines.append("")
+        lines.append("| Metric | Value |")
+        lines.append("|---|---|")
+        for key in ["pre_label_burn_excluded_count", "historical_burn_excluded_count",
+                    "pre_label_historical_overlap_count", "total_unique_excluded_count",
+                    "analysis_universe_cells_after_exclusions", "burned_count",
+                    "unburned_count", "total_valid_cells_or_pixels_considered"]:
+            lines.append(f"| {key} | {gate.get(key)} |")
+        lines.append("")
+
+    # --- SEPARATE primary-population sample-size rule ---
+    primary_gate = gate.get("primary_population_sample_size_gate")
+    if primary_gate:
+        lines.append("## Primary-population sample-size rule (SEPARATE from the composition gate)")
+        lines.append("")
+        lines.append(
+            "This is NOT the burned-landcover composition gate and NOT its "
+            f"generic total-burned feasibility threshold "
+            f"(`min_positives = {gate.get('thresholds', {}).get('min_positives')}`, "
+            "which applies to `burned_count` across every landcover and is "
+            "unchanged). It is a separate, per-experiment sample-size rule "
+            "evaluated after all exclusions and landcover classification, on "
+            "the primary population only."
+        )
+        lines.append("")
+        lines.append("| Field | Value |")
+        lines.append("|---|---|")
+        for key in ["population", "burned_count", "min_burned_required", "decision", "stop_state"]:
+            lines.append(f"| {key} | {primary_gate.get(key)} |")
+        lines.append("")
+        lines.append(f"Reason: {primary_gate.get('reason')}")
+        lines.append("")
+        if primary_gate.get("decision") == PRIMARY_POPULATION_GATE_STOP:
+            lines.append(
+                f"**STOP: `{primary_gate.get('stop_state')}`** -- downstream is "
+                "NOT authorized. This is a primary-population sample-size stop; "
+                "it must NOT be reinterpreted as a natural/cropland composition "
+                "gate failure."
+            )
+            lines.append("")
 
     lines.append(f"**downstream_authorized: `{gate.get('downstream_authorized')}`** "
                  "(passing the gate does NOT authorize predictor/Step7/Step8/"
@@ -976,6 +1299,11 @@ def main(
     predictor_end: str | None = None,
     bordubet_check_window: tuple[str, str] | None = None,
     experiment_id: str | None = None,
+    exclude_historical_burns: bool = False,
+    historical_exclusion_manifest_arg: str | None = None,
+    historical_exclusion_config: dict | None = None,
+    primary_population: str | None = None,
+    min_primary_population_burned: int | None = None,
 ) -> dict:
     """
     Path-aware davranis (Step0C):
@@ -1066,6 +1394,43 @@ def main(
             )
         log.info("Pre-label exclusion AKTIF; pre-label raster: %s", pre_label_path)
 
+    # --- Historical burn exclusion (SEPARATE axis; opt-in, config-driven) ---
+    # The manifest is BUILT and provenance-validated by the caller
+    # (scripts/run_label_gate_only.py) BEFORE the gate runs; here it is only
+    # read back through its own dedicated reader, which keeps its own checks.
+    historical_excluded_cell_ids = None
+    historical_manifest_path = None
+    if exclude_historical_burns:
+        from src.historical_burn_exclusion import (
+            HISTORICAL_BURN_EXCLUSION_MANIFEST_PARQUET,
+            HistoricalBurnExclusionError,
+            read_historical_burn_exclusion_manifest,
+        )
+
+        if not experiment_id:
+            raise Step6BError(
+                "exclude_historical_burns=True verildi ama experiment_id yok. "
+                "Historical exclusion manifest'i deney kimligiyle dogrulamak "
+                "icin experiment_id ZORUNLUDUR."
+            )
+        historical_manifest_path = Path(
+            historical_exclusion_manifest_arg
+            or (out_dir / HISTORICAL_BURN_EXCLUSION_MANIFEST_PARQUET)
+        )
+        if not historical_manifest_path.is_absolute():
+            historical_manifest_path = BASE_DIR / historical_manifest_path
+        try:
+            historical_excluded_cell_ids = read_historical_burn_exclusion_manifest(
+                historical_manifest_path, experiment_id=experiment_id,
+            )
+        except HistoricalBurnExclusionError as exc:
+            raise Step6BError(str(exc)) from exc
+        log.info(
+            "Historical exclusion AKTIF [%s]: %d hucre (manifest: %s) analiz "
+            "evreninden dislanacak.", experiment_id,
+            len(historical_excluded_cell_ids), historical_manifest_path,
+        )
+
     gate = compute_gate(
         label_path=label_path,
         label_kind=label_kind,
@@ -1083,9 +1448,19 @@ def main(
         predictor_end=predictor_end,
         bordubet_check_window=bordubet_check_window,
         experiment_id=experiment_id,
+        exclude_historical_burns=exclude_historical_burns,
+        historical_excluded_cell_ids=historical_excluded_cell_ids,
+        historical_exclusion_config=historical_exclusion_config,
+        primary_population=primary_population,
+        min_primary_population_burned=min_primary_population_burned,
     )
     gate["label_raster_diagnostics"] = label_diag
     gate["landcover_info"] = landcover_info
+    if exclude_historical_burns:
+        gate["historical_burn_exclusion_manifest"] = {
+            "parquet_path": str(historical_manifest_path),
+            "excluded_cell_count": len(historical_excluded_cell_ids or ()),
+        }
 
     # Manifest rows never go into the aggregate JSON/MD/CSV -- popped here,
     # written to their own dedicated files below.
@@ -1117,6 +1492,21 @@ def main(
         gate["decision"], gate["burned_count"],
         gate["burned_natural_vegetation_fraction"], gate["burned_cropland_fraction"],
     )
+    primary_gate = gate.get("primary_population_sample_size_gate")
+    if primary_gate:
+        log.info(
+            "Primary-population sample-size rule (SEPARATE from the composition "
+            "gate): population=%s burned_count=%s min_burned_required=%s -> %s",
+            primary_gate["population"], primary_gate["burned_count"],
+            primary_gate["min_burned_required"], primary_gate["decision"],
+        )
+        if primary_gate["decision"] == PRIMARY_POPULATION_GATE_STOP:
+            log.warning(
+                "STOP: %s -- downstream NOT authorized. This is a "
+                "primary-population sample-size stop, NOT a natural/cropland "
+                "composition gate failure.", primary_gate["stop_state"],
+            )
+
     log.info("=" * 60)
     log.info("STEP 6B TAMAMLANDI (diagnostic only; pipeline durdurulmadi)")
     log.info("=" * 60)
@@ -1128,6 +1518,18 @@ def main(
         "csv_path": str(csv_path),
         "burned_count": gate["burned_count"],
         "manifest_result": manifest_result,
+        # Exclusion accounting (uniform schema; zero/False when unused).
+        "pre_label_burn_excluded_count": gate.get("pre_label_burn_excluded_count", 0),
+        "historical_burn_excluded_count": gate.get("historical_burn_excluded_count", 0),
+        "pre_label_historical_overlap_count": gate.get("pre_label_historical_overlap_count", 0),
+        "total_unique_excluded_count": gate.get("total_unique_excluded_count", 0),
+        "analysis_universe_cells_after_exclusions": gate.get(
+            "analysis_universe_cells_after_exclusions"
+        ),
+        "historical_burn_exclusion_manifest": gate.get("historical_burn_exclusion_manifest"),
+        # SEPARATE post-gate sample-size rule; None when undeclared.
+        "primary_population_sample_size_gate": primary_gate,
+        "downstream_authorized": False,
     }
 
 
@@ -1179,8 +1581,34 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Bördübet predictor-window fire check bitisi (or. 2021-06-25).")
     parser.add_argument(
         "--experiment-id", type=str, default=None,
-        help="Deney kimligi (yalniz --exclude-pre-label-burns ile ZORUNLU; "
-        "cell-level exclusion manifest'ini damgalamak icin kullanilir).",
+        help="Deney kimligi (--exclude-pre-label-burns / "
+        "--exclude-historical-burns ile ZORUNLU; cell-level exclusion "
+        "manifest'lerini damgalamak/dogrulamak icin kullanilir).",
+    )
+    # --- Historical burn exclusion (SEPARATE axis; opt-in) ---
+    parser.add_argument(
+        "--exclude-historical-burns", action="store_true",
+        help="Onceki bir olayda (ayni AOI) yanan hucreleri de analiz "
+        "evreninden disla. Gate'ten ONCE uretilmis historical exclusion "
+        "manifest'i gerekir.",
+    )
+    parser.add_argument(
+        "--historical-exclusion-manifest", type=str, default=None,
+        help="historical_burn_excluded_cells.parquet yolu (verilmezse "
+        "--output-dir altindaki kanonik ad kullanilir).",
+    )
+    # --- SEPARATE primary-population sample-size rule ---
+    parser.add_argument(
+        "--primary-population", type=str, default=None,
+        help="Sample-size kuralinin uygulanacagi birincil populasyon "
+        "(or. burnable_tree_shrub_grass). --min-primary-population-burned "
+        "ile BIRLIKTE verilmelidir.",
+    )
+    parser.add_argument(
+        "--min-primary-population-burned", type=int, default=None,
+        help="Birincil populasyondaki minimum burned hucre sayisi. Bu, "
+        "jenerik --min-positives (toplam burned) esiginden AYRIDIR ve onu "
+        "DEGISTIRMEZ.",
     )
     return parser.parse_args(argv)
 
@@ -1207,4 +1635,8 @@ if __name__ == "__main__":
             if args.bordubet_start and args.bordubet_end else None
         ),
         experiment_id=args.experiment_id,
+        exclude_historical_burns=args.exclude_historical_burns,
+        historical_exclusion_manifest_arg=args.historical_exclusion_manifest,
+        primary_population=args.primary_population,
+        min_primary_population_burned=args.min_primary_population_burned,
     )

@@ -49,7 +49,7 @@ import io
 import json
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
@@ -132,6 +132,47 @@ REQUIRED_FROZEN_INPUT_ROLES: tuple[str, ...] = (
 LABEL_RESOLUTION_METADATA = "step8a_dataset_stats_metadata"
 LABEL_RESOLUTION_CONTEXT = "experiment_context_gate_labels_dir"
 LABEL_RESOLUTION_FALLBACK = "canonical_production_filename_fallback"
+
+# --- Pre-label exclusion gate documents (frozen, read-only) ------------------
+# An experiment may declare `exclude_pre_label_burns` in the registry. When it
+# does, production Step8A REQUIRES the Step6B gate's cell-level exclusion
+# manifest next to the label rasters (`ctx["gate_labels_dir"]`) and fails fast
+# without it -- see
+# `src.step8a_prepare_500m_modeling_dataset.read_pre_label_exclusion_manifest`.
+#
+# A variant's `gate_labels_dir` points INSIDE its own downstream input tree
+# (`assert_local_downstream_context_safe` forbids it from pointing at the
+# canonical namespace), so the gate documents have to be materialised there
+# like every other frozen input. They are copied byte-verbatim and never
+# regenerated: the exclusion set is a LABEL-side contract over the frozen label
+# window, so it is identical for every predictor-timing variant.
+#
+# File names mirror `src.step6b_burned_landcover_gate`; they are asserted
+# against those production constants in the tests rather than imported, so this
+# module stays free of the gate's heavy raster imports (same pattern as
+# `CANONICAL_LABEL_FILENAMES`).
+PRELABEL_EXCLUSION_POLICY_FIELD = "exclude_pre_label_burns"
+PRELABEL_EXCLUSION_ROLE_MANIFEST = "prelabel_exclusion_manifest"
+PRELABEL_EXCLUSION_ROLE_METADATA = "prelabel_exclusion_manifest_metadata"
+PRELABEL_EXCLUSION_ROLE_GATE_MANIFEST = "prelabel_exclusion_gate_manifest"
+PRELABEL_EXCLUSION_FILENAMES: dict[str, str] = {
+    PRELABEL_EXCLUSION_ROLE_MANIFEST: "pre_label_excluded_cells.parquet",
+    PRELABEL_EXCLUSION_ROLE_METADATA: "pre_label_excluded_cells_metadata.json",
+}
+#: Written by `scripts/run_label_gate_only.py`; OPTIONAL for Step8A, but when
+#: it exists production cross-validates it, so it is carried along.
+PRELABEL_EXCLUSION_GATE_MANIFEST_TEMPLATE = "{experiment_id}_gate_manifest.json"
+PRELABEL_EXCLUSION_REQUIRED_ROLES: tuple[str, ...] = (
+    PRELABEL_EXCLUSION_ROLE_MANIFEST, PRELABEL_EXCLUSION_ROLE_METADATA,
+)
+#: The two Step8A audit columns the exclusion produces, and the stats-file
+#: counters that account for them.
+PRELABEL_EXCLUSION_AUDIT_COLUMNS: tuple[str, ...] = (
+    "analysis_eligible", "pre_label_burn_excluded",
+)
+PRELABEL_EXCLUSION_STATS_COUNTERS: tuple[str, ...] = (
+    "pre_label_burn_excluded_count", "analysis_eligible_count",
+)
 
 # --- Date-window semantics ---------------------------------------------------
 # The upstream helper is a REDUCER counterfactual and says so in its note. That
@@ -217,8 +258,8 @@ LIMITATIONS: tuple[str, ...] = (
     "A confidence interval that includes zero leaves directional uncertainty "
     "unresolved in this analysis.",
     "Any performance change is consistent with the predictor and "
-    "observation-support changes that follow from the closure date; it does "
-    "not establish a causal mechanism.",
+    "observation-support changes that follow from the closure date. These "
+    "results are descriptive and do not establish an underlying mechanism.",
     "Landsat and MODIS scene/observation support can itself change with the "
     "closure date, so support differences are part of what is being measured.",
     "PR-AUC depends on prevalence; every comparison here is made on the SAME "
@@ -1039,6 +1080,242 @@ def assert_label_prerequisites(inventory: dict) -> None:
         "label rasters first (Step6 raw BurnDate export), or re-run with "
         "--dry-run to inspect the plan."
     )
+
+
+# =============================================================================
+# Pre-label exclusion binding
+#
+# GENERIC, registry-driven. No experiment id, date or count is hard-coded: the
+# policy comes from `EXPERIMENTS[<id>][exclude_pre_label_burns]` through the
+# built experiment context, and the documents come from that context's
+# canonical `gate_labels_dir`.
+# =============================================================================
+def prelabel_exclusion_binding(
+    experiment_id: str, base_context: dict,
+    experiments_root: Optional[Path] = None,
+) -> dict:
+    """Resolve the experiment's pre-label censor policy and its gate documents.
+
+    Read-only: it hashes what already exists and creates nothing. When the
+    registry does not enable the policy the binding is inactive and carries no
+    document, which is the correct contract for an experiment that has no
+    pre-label exclusion (the analysis-wide censor in `common_prelabel_interval`
+    is separate and always applies).
+    """
+    active = bool(base_context.get(PRELABEL_EXCLUSION_POLICY_FIELD, False))
+    # Same resolution order as `resolve_label_inputs`: the context's gate
+    # directory is trusted only when it belongs to the canonical namespace this
+    # run is pinned to, so an injected `experiments_root` always wins.
+    canonical_root = canonical_experiment_root(experiment_id, experiments_root)
+    source_dir = canonical_root / "validation" / "labels"
+    candidate = base_context.get("gate_labels_dir")
+    if candidate and _is_inside(Path(candidate), canonical_root):
+        source_dir = Path(candidate)
+    documents: dict[str, dict] = {}
+    if source_dir is not None:
+        source_dir = Path(source_dir)
+        wanted = dict(PRELABEL_EXCLUSION_FILENAMES)
+        wanted[PRELABEL_EXCLUSION_ROLE_GATE_MANIFEST] = (
+            PRELABEL_EXCLUSION_GATE_MANIFEST_TEMPLATE.format(experiment_id=experiment_id)
+        )
+        for role, filename in sorted(wanted.items()):
+            path = source_dir / filename
+            exists = path.is_file()
+            documents[role] = {
+                "role": role,
+                "filename": filename,
+                "path": str(path),
+                "exists": exists,
+                "sha256": sha256_file(path) if exists else None,
+                "required": role in PRELABEL_EXCLUSION_REQUIRED_ROLES,
+                "access": "read_only",
+            }
+    missing = sorted(
+        role for role in PRELABEL_EXCLUSION_REQUIRED_ROLES
+        if not (documents.get(role) or {}).get("exists")
+    )
+    return {
+        "exclude_pre_label_burns": active,
+        "policy_source": (
+            f"core.regions.EXPERIMENTS[{experiment_id!r}]"
+            f".{PRELABEL_EXCLUSION_POLICY_FIELD} via core.experiment_context"
+        ),
+        "binding_required": active,
+        "canonical_gate_labels_dir": str(source_dir) if source_dir is not None else None,
+        "documents": documents,
+        "required_roles": list(PRELABEL_EXCLUSION_REQUIRED_ROLES),
+        "missing_required_documents": missing if active else [],
+        "expected_audit_columns": list(PRELABEL_EXCLUSION_AUDIT_COLUMNS),
+        "expected_stats_counters": list(PRELABEL_EXCLUSION_STATS_COUNTERS),
+        "consumer": (
+            "src.step8a_prepare_500m_modeling_dataset."
+            "read_pre_label_exclusion_manifest via ctx['gate_labels_dir']"
+        ),
+        "binding_ready": bool(not active or not missing),
+    }
+
+
+def assert_prelabel_exclusion_binding(binding: dict, when: str) -> dict:
+    """Fail closed when the registry enables the policy but it cannot be bound.
+
+    Run BEFORE the export stage so a missing gate document never costs an Earth
+    Engine export: the policy, the document set and the expected variant
+    contract are all statically resolvable at plan time.
+    """
+    if not binding["exclude_pre_label_burns"]:
+        return binding
+    if binding["canonical_gate_labels_dir"] is None:
+        raise WindowClosureError(
+            f"BLOCKER: PRELABEL_EXCLUSION_BINDING_MISSING ({when}) -- the "
+            f"experiment declares {PRELABEL_EXCLUSION_POLICY_FIELD}=True but "
+            "its context carries no 'gate_labels_dir', so the Step6B exclusion "
+            "manifest cannot be bound to the variant namespace."
+        )
+    if binding["missing_required_documents"]:
+        paths = "; ".join(
+            str((binding["documents"].get(role) or {}).get("path"))
+            for role in binding["missing_required_documents"]
+        )
+        raise WindowClosureError(
+            f"BLOCKER: PRELABEL_EXCLUSION_BINDING_MISSING ({when}) -- the "
+            f"experiment declares {PRELABEL_EXCLUSION_POLICY_FIELD}=True, so "
+            "production Step8A requires the Step6B gate exclusion manifest in "
+            "every variant's gate_labels_dir. Missing required document(s): "
+            f"{binding['missing_required_documents']}. Expected at: {paths}. "
+            "Re-run the label gate before this stage; nothing was exported, "
+            "created or written."
+        )
+    return binding
+
+
+def assert_prelabel_exclusion_accounting(
+    variant_frame, stats_path: Path, binding: dict, variant_id: str,
+) -> dict:
+    """Reconcile the variant's censor audit columns with the bound manifest.
+
+    Every rule here is a FAILURE, never a repair: the variant dataset is the
+    production artefact and this function only decides whether it may be
+    published.
+    """
+    import pandas as pd
+
+    present = [
+        column for column in PRELABEL_EXCLUSION_AUDIT_COLUMNS
+        if column in variant_frame.columns
+    ]
+    if not binding["exclude_pre_label_burns"]:
+        return {
+            "exclude_pre_label_burns": False,
+            "binding_active": False,
+            "audit_columns_present": present,
+            "pre_label_burn_excluded_count": None,
+            "analysis_eligible_count": None,
+            "manifest_cell_count": None,
+            "manifest_cells_in_variant": None,
+            "accounting_reconciled": True,
+            "reconciliation": "policy inactive; no censor accounting is required",
+        }
+
+    if sorted(present) != sorted(PRELABEL_EXCLUSION_AUDIT_COLUMNS):
+        raise WindowClosureError(
+            f"BLOCKER: PRELABEL_EXCLUSION_AUDIT_MISSING -- variant "
+            f"'{variant_id}' declares {PRELABEL_EXCLUSION_POLICY_FIELD}=True "
+            f"but its Step8A dataset carries {present}; both of "
+            f"{list(PRELABEL_EXCLUSION_AUDIT_COLUMNS)} are required together."
+        )
+    # Boolean semantics and the inverse relation are the production contract;
+    # re-asserted here so a disagreement can never reach the model stage.
+    validate_step8a_optional_audit_columns(variant_frame, frame_name=variant_id)
+
+    excluded_mask = variant_frame["pre_label_burn_excluded"].astype(bool)
+    eligible_mask = variant_frame["analysis_eligible"].astype(bool)
+    if bool((eligible_mask == excluded_mask).any()):
+        raise WindowClosureError(
+            f"BLOCKER: PRELABEL_EXCLUSION_INVERSE_VIOLATION -- variant "
+            f"'{variant_id}': analysis_eligible must equal NOT "
+            "pre_label_burn_excluded on every row."
+        )
+    excluded_count = int(excluded_mask.sum())
+    eligible_count = int(eligible_mask.sum())
+    if excluded_count + eligible_count != len(variant_frame):
+        raise WindowClosureError(
+            f"BLOCKER: PRELABEL_EXCLUSION_ACCOUNTING_MISMATCH -- variant "
+            f"'{variant_id}': excluded({excluded_count}) + "
+            f"eligible({eligible_count}) != rows({len(variant_frame)})."
+        )
+
+    record = binding["documents"][PRELABEL_EXCLUSION_ROLE_MANIFEST]
+    manifest_path = Path(record["path"])
+    if not record["exists"] or not manifest_path.is_file():
+        raise WindowClosureError(
+            f"BLOCKER: PRELABEL_EXCLUSION_BINDING_MISSING -- variant "
+            f"'{variant_id}' has no bound exclusion manifest at {manifest_path}."
+        )
+    manifest_ids = set(pd.read_parquet(manifest_path)["cell_id"].astype(str))
+    variant_ids = set(variant_frame["cell_id"].astype(str))
+    expected_excluded = manifest_ids & variant_ids
+    observed_excluded = set(
+        variant_frame.loc[excluded_mask, "cell_id"].astype(str)
+    )
+    if observed_excluded != expected_excluded:
+        only_dataset = sorted(observed_excluded - expected_excluded)[:6]
+        only_manifest = sorted(expected_excluded - observed_excluded)[:6]
+        raise WindowClosureError(
+            f"BLOCKER: PRELABEL_EXCLUSION_MANIFEST_DISAGREEMENT -- variant "
+            f"'{variant_id}': the dataset's pre_label_burn_excluded cells do "
+            "not match the bound gate manifest. Excluded in dataset only: "
+            f"{only_dataset}; in manifest only: {only_manifest}."
+        )
+
+    # The production stats file keeps its own counters; when it is present they
+    # must agree with the dataset, otherwise the published accounting would
+    # depend on which artefact a reader opened.
+    stats_counters: dict[str, Any] = {}
+    if Path(stats_path).is_file():
+        try:
+            stats = json.loads(Path(stats_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            raise WindowClosureError(
+                f"BLOCKER: PRELABEL_EXCLUSION_ACCOUNTING_UNREADABLE -- variant "
+                f"'{variant_id}': {stats_path} could not be read: {exc}."
+            ) from exc
+        block = stats.get("pre_label_exclusion")
+        candidates = [stats, block if isinstance(block, dict) else {}]
+        for counter, observed in (
+            ("pre_label_burn_excluded_count", excluded_count),
+            ("analysis_eligible_count", eligible_count),
+        ):
+            for candidate in candidates:
+                if counter not in candidate:
+                    continue
+                stats_counters[counter] = candidate[counter]
+                if int(candidate[counter]) != observed:
+                    raise WindowClosureError(
+                        f"BLOCKER: PRELABEL_EXCLUSION_ACCOUNTING_MISMATCH -- "
+                        f"variant '{variant_id}': {stats_path.name} records "
+                        f"{counter}={candidate[counter]}, dataset carries "
+                        f"{observed}."
+                    )
+                break
+    return {
+        "exclude_pre_label_burns": True,
+        "binding_active": True,
+        "audit_columns_present": sorted(present),
+        "pre_label_burn_excluded_count": excluded_count,
+        "analysis_eligible_count": eligible_count,
+        "variant_row_count": int(len(variant_frame)),
+        "manifest_cell_count": int(len(manifest_ids)),
+        "manifest_cells_in_variant": int(len(expected_excluded)),
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": record["sha256"],
+        "stats_counters": stats_counters,
+        "accounting_reconciled": True,
+        "reconciliation": (
+            "pre_label_burn_excluded == (bound gate manifest cells INTERSECT "
+            "variant cells); analysis_eligible == NOT pre_label_burn_excluded; "
+            "excluded + eligible == variant rows"
+        ),
+    }
 
 
 def scientific_configuration(
@@ -2943,6 +3220,101 @@ def modis_job_date_semantics(start_date: str, end_date: str) -> dict:
     }
 
 
+# --- Fixed month-filter clipping, read back from export provenance -----------
+# The clipping is DERIVED at export time by `modis_month_filter_transparency`
+# and persisted per MODIS artefact inside `predictor_export_metadata.json`.
+# Downstream stages read it back from there instead of recomputing it, so a
+# published number can never disagree with what production actually exported.
+MODIS_CLIPPING_TRANSPARENCY_KEY = "calendar_month_filter_transparency"
+
+
+def modis_clipping_from_predictor_metadata(metadata: dict, variant_id: str, source: str) -> dict:
+    """The variant's fixed-month-filter clipping, read from export provenance.
+
+    Fail-closed in every direction: a missing MODIS record, a missing
+    transparency block, a non-integer or negative count, two MODIS roles that
+    disagree, or a clipped/effective/requested triple that does not add up are
+    all failures. An unknown clipping is NEVER reported as zero.
+    """
+    if not isinstance(metadata, dict):
+        raise WindowClosureError(
+            f"BLOCKER: MODIS_CLIPPING_PROVENANCE_MISSING -- variant "
+            f"'{variant_id}': {source} is not a JSON object."
+        )
+    records: dict[str, dict] = {}
+    for record in (metadata.get("artifact_inventory") or []):
+        if not isinstance(record, dict):
+            continue
+        role = str(record.get("role") or record.get("artifact_id") or "")
+        if role not in MODIS_ROLE_FILENAMES:
+            continue
+        transparency = (
+            (record.get("date_semantics") or {}).get(MODIS_CLIPPING_TRANSPARENCY_KEY)
+        )
+        if not isinstance(transparency, dict):
+            raise WindowClosureError(
+                f"BLOCKER: MODIS_CLIPPING_PROVENANCE_MISSING -- variant "
+                f"'{variant_id}': MODIS role '{role}' in {source} carries no "
+                f"'{MODIS_CLIPPING_TRANSPARENCY_KEY}' block."
+            )
+        clipped = transparency.get("clipped_day_count")
+        effective = transparency.get("effective_included_day_count")
+        requested = (record.get("date_semantics") or {}).get("duration_days")
+        for name, value in (
+            ("clipped_day_count", clipped),
+            ("effective_included_day_count", effective),
+            ("duration_days", requested),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise WindowClosureError(
+                    f"BLOCKER: MODIS_CLIPPING_PROVENANCE_INVALID -- variant "
+                    f"'{variant_id}' role '{role}': {name}={value!r} is not an "
+                    "integer."
+                )
+            if value < 0:
+                raise WindowClosureError(
+                    f"BLOCKER: MODIS_CLIPPING_PROVENANCE_INVALID -- variant "
+                    f"'{variant_id}' role '{role}': {name}={value} is negative."
+                )
+        if int(clipped) + int(effective) != int(requested):
+            raise WindowClosureError(
+                f"BLOCKER: MODIS_CLIPPING_PROVENANCE_INCONSISTENT -- variant "
+                f"'{variant_id}' role '{role}': clipped({clipped}) + "
+                f"effective({effective}) != requested({requested})."
+            )
+        records[role] = {
+            "clipped_day_count": int(clipped),
+            "effective_included_day_count": int(effective),
+            "requested_day_count": int(requested),
+            "calendar_month_filter": transparency.get("calendar_month_filter"),
+        }
+    if not records:
+        raise WindowClosureError(
+            f"BLOCKER: MODIS_CLIPPING_PROVENANCE_MISSING -- variant "
+            f"'{variant_id}': {source} records no MODIS current-window "
+            f"artefact, so the fixed month-filter clipping is unknown. An "
+            "unknown clipping is never reported as zero."
+        )
+    distinct = sorted({record["clipped_day_count"] for record in records.values()})
+    if len(distinct) != 1:
+        raise WindowClosureError(
+            f"BLOCKER: MODIS_CLIPPING_PROVENANCE_INCONSISTENT -- variant "
+            f"'{variant_id}': MODIS roles disagree on clipped_day_count "
+            f"{distinct}; they share one requested window."
+        )
+    anchor = records[sorted(records)[0]]
+    return {
+        "variant_id": variant_id,
+        "clipped_day_count": distinct[0],
+        "effective_included_day_count": anchor["effective_included_day_count"],
+        "requested_day_count": anchor["requested_day_count"],
+        "calendar_month_filter": anchor["calendar_month_filter"],
+        "roles": sorted(records),
+        "source": source,
+        "derived_at": "predictor-export",
+    }
+
+
 # --- Job set (pure) ----------------------------------------------------------
 def nonzero_variants(variants: Sequence[dict]) -> list[dict]:
     """Non-canonical variants, deterministically ordered by increasing shift."""
@@ -4370,7 +4742,9 @@ def canonical_step8a_stats_path(
 
 
 # --- Which production stage consumes which logical role ----------------------
-def production_stage_input_roles(baseline_years: Sequence[int]) -> dict[str, list[str]]:
+def production_stage_input_roles(
+    baseline_years: Sequence[int], censor_roles: Sequence[str] = (),
+) -> dict[str, list[str]]:
     """Logical inputs of each production downstream stage.
 
     Read off the production helpers themselves (the `ctx` keys and file names
@@ -4396,9 +4770,14 @@ def production_stage_input_roles(baseline_years: Sequence[int]) -> dict[str, lis
         "step7c": ["step7b"],
         "step7d": ["step5", "step7b", "step7c"],
         "step7e": ["step5", "step7d"],
+        # Step8A additionally consumes the bound pre-label exclusion gate
+        # documents, but ONLY for an experiment whose registry record enables
+        # the policy -- so the declaration is driven by the caller's resolved
+        # binding, never by an experiment name.
         "step8a": [
             "step5", "step5c", "step7d", "step7e", INPUT_ROLE_CURRENT_NDVI,
             "dem_elevation", "dem_slope", "landcover_aligned", LABEL_ROLE_RAW,
+            *sorted(censor_roles),
         ],
     }
 
@@ -4766,6 +5145,7 @@ def production_input_bindings(
     artifacts: Sequence[dict],
     inventory: dict,
     output_root: Optional[Path] = None,
+    censor_binding: Optional[dict] = None,
 ) -> list[dict]:
     """Map every predictor / frozen static input onto its production file name.
 
@@ -4933,6 +5313,42 @@ def production_input_bindings(
             "consumed_by_production": role != LABEL_ROLE_BINARY,
             "producer": "frozen canonical production output (read-only)",
         })
+
+    # --- Frozen pre-label EXCLUSION gate documents ---------------------------
+    # Only when the registry enables the policy. Production Step8A resolves
+    # them from ctx["gate_labels_dir"], which for a variant is this materialised
+    # `labels/` directory, so they must be laid out under their production file
+    # names exactly like the label rasters above. They are documents, not
+    # rasters, so they use the verbatim-document mode.
+    censor_binding = assert_prelabel_exclusion_binding(
+        censor_binding if censor_binding is not None
+        else prelabel_exclusion_binding(experiment_id, base_context),
+        f"local-downstream input binding for variant '{variant_id}'",
+    )
+    if censor_binding["exclude_pre_label_burns"]:
+        for role in sorted(censor_binding["documents"]):
+            record = censor_binding["documents"][role]
+            if not record["exists"]:
+                # Only the OPTIONAL gate provenance manifest can be absent
+                # here; the required ones already failed the assertion above.
+                continue
+            bindings.append({
+                "input_role": role,
+                "mode": "copy_document",
+                "sources": [Path(record["path"])],
+                "source_artifact_ids": [role],
+                "source_sha256": [record["sha256"]],
+                "band_order": [role],
+                "target": root / "labels" / record["filename"],
+                "context_dir_key": PRODUCTION_INPUT_CONTEXT_DIRS["labels"],
+                "variant_derived": False,
+                "consumed_by_production": (
+                    role in PRELABEL_EXCLUSION_REQUIRED_ROLES
+                ),
+                "producer": (
+                    "frozen Step6B burned-landcover gate output (read-only)"
+                ),
+            })
     bindings.sort(key=lambda item: item["input_role"])
     return bindings
 
@@ -5144,6 +5560,15 @@ def materialize_local_downstream_inputs(bindings: Sequence[dict]) -> list[dict]:
                 "crs": str(profile["crs"]),
                 "nodata": None if profile["nodata"] is None else float(profile["nodata"]),
             }
+        elif binding["mode"] == "copy_document":
+            # A parquet/JSON gate document: the same byte-verbatim copy, but it
+            # carries no raster profile, so none is invented for it.
+            _copy_verbatim(sources[0], target)
+            detail = {
+                "band_count": None, "dtype": None, "width": None,
+                "height": None, "crs": None, "nodata": None,
+                "document": True,
+            }
         elif binding["mode"] == "stack_bands":
             detail = _stack_single_band_rasters(sources, target)
         else:
@@ -5178,7 +5603,7 @@ def assert_materialized_values_unchanged(records: Sequence[dict]) -> None:
             continue
         target = Path(record["target"])
         sources = [Path(path) for path in record["sources"]]
-        if record["mode"] == "copy":
+        if record["mode"] in ("copy", "copy_document"):
             if sha256_file(target) != sha256_file(sources[0]):
                 raise WindowClosureError(
                     f"Materialised input '{record['input_role']}' does not hash "
@@ -5644,8 +6069,10 @@ STEP8A_KEY_COLUMNS: tuple[str, ...] = ("cell_id", "row_500m", "col_500m", "lon",
 STEP8A_LABEL_COLUMNS: tuple[str, ...] = (
     "burned", "burn_date", "burn_month", "burn_day_of_year", "label_source",
     "burn_date_pixel_agreement_fraction", "out_of_window_burndate",
-    "pre_label_burn_excluded", "analysis_eligible",
 )
+STEP8A_OPTIONAL_AUDIT_COLUMNS: frozenset[str] = frozenset({
+    "analysis_eligible", "pre_label_burn_excluded",
+})
 STEP8A_POPULATION_COLUMNS: tuple[str, ...] = (
     "landcover_dominant", "landcover_tree_cover_fraction",
     "landcover_shrubland_fraction", "landcover_grassland_fraction",
@@ -5802,6 +6229,7 @@ def classify_step8a_columns(columns: Sequence[str], lineage: dict) -> dict:
 
     key = _take(STEP8A_KEY_COLUMNS)
     label = _take(STEP8A_LABEL_COLUMNS)
+    audit = _take(sorted(STEP8A_OPTIONAL_AUDIT_COLUMNS))
     population = _take(STEP8A_POPULATION_COLUMNS)
     static_predictor = _predictor_columns(lineage["static_predictors"])
     grid_support = _take(STEP8A_GRID_SUPPORT_COLUMNS)
@@ -5823,6 +6251,7 @@ def classify_step8a_columns(columns: Sequence[str], lineage: dict) -> dict:
     return {
         "key_columns": key,
         "label_columns": label,
+        "audit_columns": audit,
         "population_columns": population,
         "static_predictor_columns": static_predictor,
         "grid_support_columns": grid_support,
@@ -5955,12 +6384,62 @@ def step8a_feature_contract(frame, lineage: dict) -> dict:
         "model_feature_columns_in_order": list(THERMAL_MODEL_FEATURES),
         "categorical_features": list(CATEGORICAL_FEATURES),
         "label_columns": classification["label_columns"],
+        "audit_columns": classification["audit_columns"],
         "population_columns": classification["population_columns"],
         "key_columns": classification["key_columns"],
         "invariant_columns": classification["invariant_columns"],
         "timing_derived_columns": classification["timing_derived_columns"],
         "classification": classification,
         "key_column": step8a_key_column(frame),
+    }
+
+
+def validate_step8a_optional_audit_columns(frame, *, frame_name: str) -> dict:
+    """Validate the exact optional pre-label censor audit pair, read-only."""
+    import numpy as np
+    import pandas as pd
+
+    present = sorted(STEP8A_OPTIONAL_AUDIT_COLUMNS & set(frame.columns))
+    if present and set(present) != set(STEP8A_OPTIONAL_AUDIT_COLUMNS):
+        raise WindowClosureError(
+            f"Step8A optional audit contract failed for {frame_name}: both "
+            f"columns are required together; present={present}."
+        )
+    normalized: dict[str, Any] = {}
+    for column in present:
+        series = frame[column]
+        if series.isna().any():
+            raise WindowClosureError(
+                f"Step8A optional audit contract failed for {frame_name}: "
+                f"{column} contains null values."
+            )
+        if pd.api.types.is_bool_dtype(series.dtype):
+            normalized[column] = series.astype(bool).to_numpy()
+        elif pd.api.types.is_numeric_dtype(series.dtype):
+            values = series.to_numpy(dtype="float64")
+            if not np.all(np.isfinite(values)) or not np.all(np.isin(values, [0.0, 1.0])):
+                raise WindowClosureError(
+                    f"Step8A optional audit contract failed for {frame_name}: "
+                    f"{column} is not boolean-semantic."
+                )
+            normalized[column] = values.astype(bool)
+        else:
+            raise WindowClosureError(
+                f"Step8A optional audit contract failed for {frame_name}: "
+                f"{column} dtype {series.dtype} is not safely boolean-semantic."
+            )
+    if present and not np.array_equal(
+        normalized["analysis_eligible"],
+        ~normalized["pre_label_burn_excluded"],
+    ):
+        raise WindowClosureError(
+            f"Step8A optional audit contract failed for {frame_name}: "
+            "analysis_eligible must equal NOT pre_label_burn_excluded."
+        )
+    return {
+        "present": present,
+        "contract_passed": True,
+        "classification": "eligibility/audit metadata; never a model feature",
     }
 
 
@@ -5971,6 +6450,12 @@ def assert_step8a_feature_contract(variant_frame, canonical_frame, lineage: dict
     check pass: the column order is whatever the production Step8A helper
     produced, and it is required to be the canonical one.
     """
+    canonical_audit = validate_step8a_optional_audit_columns(
+        canonical_frame, frame_name="canonical",
+    )
+    variant_audit = validate_step8a_optional_audit_columns(
+        variant_frame, frame_name="variant",
+    )
     canonical_contract = step8a_feature_contract(canonical_frame, lineage)
     variant_contract = step8a_feature_contract(variant_frame, lineage)
 
@@ -5982,12 +6467,20 @@ def assert_step8a_feature_contract(variant_frame, canonical_frame, lineage: dict
 
     canonical_columns = set(canonical_contract["columns"])
     variant_columns = set(variant_contract["columns"])
+    legacy_canonical = not canonical_audit["present"]
+    _require(
+        legacy_canonical or bool(variant_audit["present"]),
+        "the canonical audit pair is present but the variant audit pair is absent.",
+    )
     added = sorted(variant_columns - canonical_columns)
     dropped = sorted(canonical_columns - variant_columns)
-    _require(not added, f"the variant carries new column(s) {added}.")
+    allowed_added = set(STEP8A_OPTIONAL_AUDIT_COLUMNS) if legacy_canonical else set()
+    _require(not (set(added) - allowed_added), f"the variant carries new column(s) {added}.")
     _require(not dropped, f"the variant is missing canonical column(s) {dropped}.")
+    canonical_non_audit = [c for c in canonical_contract["columns"] if c not in STEP8A_OPTIONAL_AUDIT_COLUMNS]
+    variant_non_audit = [c for c in variant_contract["columns"] if c not in STEP8A_OPTIONAL_AUDIT_COLUMNS]
     _require(
-        variant_contract["columns"] == canonical_contract["columns"],
+        variant_non_audit == canonical_non_audit,
         "the variant column ORDER differs from the canonical one "
         f"({variant_contract['columns'][:6]} vs {canonical_contract['columns'][:6]}); "
         "the production helper must produce it deterministically and it is "
@@ -6026,7 +6519,7 @@ def assert_step8a_feature_contract(variant_frame, canonical_frame, lineage: dict
     literal_differences: list[dict] = []
     accepted: list[dict] = []
     rejected: list[str] = []
-    for column in canonical_contract["columns"]:
+    for column in canonical_non_audit:
         variant_dtype = variant_contract["dtypes"].get(column)
         canonical_dtype = canonical_contract["dtypes"].get(column)
         if variant_dtype == canonical_dtype:
@@ -6068,6 +6561,11 @@ def assert_step8a_feature_contract(variant_frame, canonical_frame, lineage: dict
         "feature_contract_passed": True,
         "key_column": key_column,
         "key_uniqueness_passed": True,
+        "legacy_canonical_audit_columns_absent": legacy_canonical,
+        "optional_audit_columns_present_in_variant": variant_audit["present"],
+        "optional_audit_contract_passed": True,
+        "model_feature_registry_unchanged": True,
+        "canonical_bytes_unchanged": True,
         # Computed in the VALIDATION layer only: no parquet, CSV, raster or
         # value is read-modified-written to reconcile a dtype.
         "semantic_dtype_contract": {
@@ -6547,14 +7045,24 @@ def local_downstream_state_diff(before: dict, after: dict) -> dict:
 def local_downstream_frozen_inputs(
     experiment_id: str, inventory: dict, variants: Sequence[dict],
     output_root: Optional[Path] = None, experiments_root: Optional[Path] = None,
+    censor_binding: Optional[dict] = None,
 ) -> dict:
     """Everything this stage must not disturb, hashed.
 
     The frozen canonical Step8A dataset and its stats, the DEM, the slope, the
-    aligned landcover, both label rasters, the shared pre-label raster, every
-    variant's predictor metadata and every one of its predictor rasters.
+    aligned landcover, both label rasters, the shared pre-label raster, the
+    bound pre-label exclusion gate documents, every variant's predictor
+    metadata and every one of its predictor rasters.
     """
     extended = dict(predictor_frozen_inputs(experiment_id, inventory, output_root))
+    for role, record in sorted((censor_binding or {}).get("documents", {}).items()):
+        if not record.get("exists"):
+            continue
+        extended[f"prelabel_exclusion__{role}"] = {
+            "path": record["path"],
+            "exists": True,
+            "sha256": record["sha256"],
+        }
     stats = canonical_step8a_stats_path(experiment_id, experiments_root)
     extended["canonical_step8a_stats"] = {
         "path": str(stats),
@@ -6589,6 +7097,7 @@ def local_downstream_frozen_inputs(
 
 def _quarantine_local_downstream(
     experiment_id: str, variant_id: str, output_root: Optional[Path] = None,
+    *, reason: str = "explicit force rebuild",
 ) -> list[str]:
     """Move the stage-owned outputs aside instead of deleting them.
 
@@ -6597,12 +7106,13 @@ def _quarantine_local_downstream(
     canonical outputs and any unmanaged file are never touched, and nothing is
     ever removed.
     """
-    stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     target_root = (
         variant_root(experiment_id, variant_id, output_root)
         / LOCAL_DOWNSTREAM_QUARANTINE_DIR / LOCAL_DOWNSTREAM_QUARANTINE_KIND / stamp
     )
     moved: list[str] = []
+    records: list[dict[str, str]] = []
     for source in (
         local_downstream_root(experiment_id, variant_id, output_root),
         local_downstream_metadata_path(experiment_id, variant_id, output_root),
@@ -6616,6 +7126,18 @@ def _quarantine_local_downstream(
         destination = target_root / source.name
         os.replace(source, destination)
         moved.append(str(destination))
+        records.append({"source": str(source), "target": str(destination)})
+    if records:
+        recovery_record = target_root / "quarantine_metadata.json"
+        _atomic_write_text(recovery_record, _json_document({
+            "timestamp_utc": stamp,
+            "experiment_id": experiment_id,
+            "variant_id": variant_id,
+            "reason": reason,
+            "moves": records,
+            "deleted_files": [],
+        }))
+        moved.append(str(recovery_record))
     return sorted(moved)
 
 
@@ -6628,14 +7150,17 @@ def local_downstream_variant_is_reusable(
     lineage: dict,
     experiments_root: Optional[Path] = None,
     output_root: Optional[Path] = None,
+    censor_binding: Optional[dict] = None,
 ) -> tuple[bool, Optional[dict], str]:
     """Whether a previously produced variant downstream may be reused untouched.
 
     Requires: the metadata to exist with the right schema, the SAME analysis_id
     and status=pass; the predictor metadata hash to be unchanged; every recorded
     artefact to exist with a matching hash; the Step8A feature contract to pass
-    again; and the static/label invariance to hold again. Anything else is not
-    reusable -- a partial or drifted downstream is never silently accepted.
+    again; the static/label invariance to hold again; and -- when the registry
+    enables it -- the pre-label exclusion binding to still be present, bound to
+    the same gate manifest and reconciled. Anything else is not reusable: a
+    partial or drifted downstream is never silently accepted.
     """
     import pandas as pd
 
@@ -6689,6 +7214,30 @@ def local_downstream_variant_is_reusable(
         return False, metadata, f"Step8A contract/invariance failed again: {exc}"
     except Exception as exc:  # noqa: BLE001 -- an unreadable dataset is not reusable
         return False, metadata, f"the variant Step8A dataset is unusable: {exc}"
+
+    if (censor_binding or {}).get("exclude_pre_label_burns"):
+        if not metadata.get("prelabel_exclusion_applied"):
+            return False, metadata, (
+                "the registry enables exclude_pre_label_burns but the recorded "
+                "downstream declares no pre-label exclusion binding"
+            )
+        if not metadata.get("prelabel_exclusion_accounting_reconciled"):
+            return False, metadata, "the recorded pre-label exclusion accounting is not reconciled"
+        recorded = (
+            (metadata.get("prelabel_exclusion_binding") or {}).get("documents") or {}
+        )
+        for role in PRELABEL_EXCLUSION_REQUIRED_ROLES:
+            expected = (censor_binding["documents"].get(role) or {}).get("sha256")
+            if (recorded.get(role) or {}).get("sha256") != expected:
+                return False, metadata, (
+                    f"the bound pre-label exclusion document '{role}' has changed"
+                )
+        try:
+            assert_prelabel_exclusion_accounting(
+                frame, stats, censor_binding, variant_id,
+            )
+        except WindowClosureError as exc:
+            return False, metadata, f"pre-label exclusion accounting failed again: {exc}"
     return True, metadata, "complete and verified"
 
 
@@ -6704,6 +7253,7 @@ def run_local_downstream(
     experiments_root: Optional[Path] = None,
     force: bool = False,
     resume: bool = False,
+    recover_partial: bool = False,
     engine: Optional[Any] = None,
 ) -> dict:
     """Run (or reuse) the production downstream chain of every non-canonical variant.
@@ -6771,9 +7321,18 @@ def run_local_downstream(
         except (OSError, ValueError, UnicodeDecodeError):
             prelabel_positive_cell_count = 0
 
+    # The registry-driven pre-label censor policy is resolved and asserted
+    # ONCE, before any variant is touched: a missing gate document is a plan
+    # error, not a per-variant surprise after the production chain has started.
+    censor_binding = assert_prelabel_exclusion_binding(
+        prelabel_exclusion_binding(experiment_id, base_context, experiments_root),
+        "local-downstream stage entry",
+    )
+
     frozen_before = frozen_hash_map(
         local_downstream_frozen_inputs(
             experiment_id, inventory, variants, output_root, experiments_root,
+            censor_binding,
         )
     )
 
@@ -6800,10 +7359,10 @@ def run_local_downstream(
 
         reusable, previous, reason = local_downstream_variant_is_reusable(
             experiment_id, analysis_id, variant, predictor_binding, canonical_frame,
-            lineage, experiments_root, output_root,
+            lineage, experiments_root, output_root, censor_binding,
         )
         if reusable and not force:
-            if not resume:
+            if not resume and not recover_partial:
                 raise WindowClosureError(
                     f"Variant '{variant_id}' already has a complete, verified "
                     f"local downstream at {metadata_path}. Refusing to "
@@ -6846,7 +7405,7 @@ def run_local_downstream(
                 "deleted)."
             )
 
-        if not force and (previous is not None or downstream.exists()):
+        if not force and not recover_partial and (previous is not None or downstream.exists()):
             raise WindowClosureError(
                 f"Variant '{variant_id}' has an existing but NOT reusable local "
                 f"downstream ({reason}) at {downstream}. Refusing to overwrite "
@@ -6856,12 +7415,18 @@ def run_local_downstream(
 
         # Rebuilding (force, or a clean namespace): quarantine whatever is
         # there, never delete it.
-        quarantined += _quarantine_local_downstream(experiment_id, variant_id, output_root)
+        quarantined += _quarantine_local_downstream(
+            experiment_id, variant_id, output_root,
+            reason=(
+                f"outer stage resume recovery: local-downstream is not reusable ({reason})"
+                if recover_partial else "explicit force rebuild"
+            ),
+        )
 
         # --- Production inputs, laid out under the production names ---------
         bindings = production_input_bindings(
             experiment_id, variant, base_context, predictor_binding["artifacts"],
-            inventory, output_root,
+            inventory, output_root, censor_binding,
         )
         assert_local_downstream_owned_targets(
             experiment_id, variant_id,
@@ -6926,10 +7491,23 @@ def run_local_downstream(
         invariance = compare_step8a_invariance(
             variant_frame, canonical_frame, contract, contract["key_column"],
         )
+        # The censor accounting is reconciled against the BOUND manifest and
+        # the production stats counters before the variant may be published.
+        censor_accounting = assert_prelabel_exclusion_accounting(
+            variant_frame, stats_path, censor_binding, variant_id,
+        )
+        # The fixed month-filter clipping is read back from this variant's own
+        # export provenance; it is never recomputed or defaulted here.
+        modis_clipping = modis_clipping_from_predictor_metadata(
+            read_predictor_metadata(experiment_id, variant_id, output_root),
+            variant_id,
+            str(predictor_metadata_path(experiment_id, variant_id, output_root)),
+        )
 
         frozen_after = frozen_hash_map(
             local_downstream_frozen_inputs(
                 experiment_id, inventory, variants, output_root, experiments_root,
+                censor_binding,
             )
         )
         assert_frozen_hashes_unchanged(
@@ -6943,7 +7521,7 @@ def run_local_downstream(
             artifact_inventory, contract, invariance, grid_check, variant_frame,
             canonical_dataset, canonical_sha256, canonical_stats, canonical_stats_sha256,
             lineage, prelabel_positive_cell_count, frozen_before, frozen_after,
-            output_root,
+            output_root, censor_binding, censor_accounting, modis_clipping,
         )
         _atomic_write_text(metadata_path, _json_document(metadata))
 
@@ -6973,6 +7551,7 @@ def run_local_downstream(
     frozen_after = frozen_hash_map(
         local_downstream_frozen_inputs(
             experiment_id, inventory, variants, output_root, experiments_root,
+            censor_binding,
         )
     )
     assert_frozen_hashes_unchanged(
@@ -7023,6 +7602,9 @@ def build_local_downstream_metadata(
     frozen_before: dict,
     frozen_after: dict,
     output_root: Optional[Path] = None,
+    censor_binding: Optional[dict] = None,
+    censor_accounting: Optional[dict] = None,
+    modis_clipping: Optional[dict] = None,
 ) -> dict:
     """The per-variant local-downstream record. Deterministic and self-describing."""
     variant_id = variant["variant_id"]
@@ -7055,7 +7637,13 @@ def build_local_downstream_metadata(
                    f"{PRODUCTION_STAGE_HELPERS[stage]['function']}"
             for stage in stages_run
         },
-        "production_stage_input_roles": production_stage_input_roles(baseline_years),
+        "production_stage_input_roles": production_stage_input_roles(
+            baseline_years,
+            [
+                role for role in PRELABEL_EXCLUSION_REQUIRED_ROLES
+                if (censor_binding or {}).get("exclude_pre_label_burns")
+            ],
+        ),
         "production_policy": {
             "scientific_calculation_unchanged": True,
             "new_formula_introduced": False,
@@ -7108,6 +7696,13 @@ def build_local_downstream_metadata(
         "canonical_feature_contract_sha256": contract["canonical_feature_contract_sha256"],
 
         "feature_contract_passed": contract["feature_contract_passed"],
+        "legacy_canonical_audit_columns_absent":
+            contract["legacy_canonical_audit_columns_absent"],
+        "optional_audit_columns_present_in_variant":
+            contract["optional_audit_columns_present_in_variant"],
+        "optional_audit_contract_passed": contract["optional_audit_contract_passed"],
+        "model_feature_registry_unchanged": contract["model_feature_registry_unchanged"],
+        "canonical_bytes_unchanged": contract["canonical_bytes_unchanged"],
         "key_uniqueness_passed": contract["key_uniqueness_passed"],
         "key_column": contract["key_column"],
         # Which literal dtype differences occurred and which were accepted as
@@ -7149,6 +7744,31 @@ def build_local_downstream_metadata(
         "prelabel_positive_cell_count": int(prelabel_positive_cell_count),
         "prelabel_role": "censoring_provenance_only",
         "common_cohort_created": False,
+
+        # --- Registry-driven pre-label EXCLUSION contract -------------------
+        # The policy, the bound gate documents and the reconciled per-variant
+        # counts, so a reader never has to infer whether the exclusion was
+        # applied or how many cells it removed.
+        "prelabel_exclusion_binding": dict(censor_binding or {}),
+        "prelabel_exclusion_accounting": dict(censor_accounting or {}),
+        "prelabel_exclusion_applied": bool(
+            (censor_binding or {}).get("exclude_pre_label_burns", False)
+        ),
+        "prelabel_exclusion_binding_ready": bool(
+            (censor_binding or {}).get("binding_ready", False)
+        ),
+        "prelabel_exclusion_accounting_reconciled": bool(
+            (censor_accounting or {}).get("accounting_reconciled", False)
+        ),
+
+        # --- Fixed MODIS month-filter clipping, read from export provenance --
+        "modis_month_filter_clipping": dict(modis_clipping or {}),
+        "modis_clipped_day_count": (
+            None if not modis_clipping else int(modis_clipping["clipped_day_count"])
+        ),
+        "modis_clipping_provenance_source": (
+            None if not modis_clipping else modis_clipping["source"]
+        ),
 
         "all_paths_inside_variant_namespace": True,
         "canonical_downstream_attempted": False,
@@ -7753,6 +8373,39 @@ def build_model_common_cohort(
     order = sorted(frames_by_variant)
     censored = set(censor["censored_cell_ids"])
     features = list(registry["feature_union"])
+
+    # The two shifted arms are produced from the same frozen pre-label censor.
+    # Compare their decisions before eligibility filtering so a disagreement
+    # cannot be hidden merely because one arm drops the affected cell.
+    shifted_with_audit = [
+        name for name in order
+        if name != CANONICAL_VARIANT_ID
+        and set(STEP8A_OPTIONAL_AUDIT_COLUMNS) <= set(frames_by_variant[name].columns)
+    ]
+    for name in shifted_with_audit:
+        validate_step8a_optional_audit_columns(
+            frames_by_variant[name], frame_name=name,
+        )
+    if len(shifted_with_audit) >= 2:
+        anchor_name = shifted_with_audit[0]
+        anchor_audit = frames_by_variant[anchor_name][
+            ["cell_id", "analysis_eligible", "pre_label_burn_excluded"]
+        ].set_index("cell_id")
+        for name in shifted_with_audit[1:]:
+            other = frames_by_variant[name][
+                ["cell_id", "analysis_eligible", "pre_label_burn_excluded"]
+            ].set_index("cell_id")
+            common_audit_ids = anchor_audit.index.intersection(other.index)
+            mismatch = (
+                anchor_audit.loc[common_audit_ids].astype(bool).to_numpy()
+                != other.loc[common_audit_ids].astype(bool).to_numpy()
+            ).any(axis=1)
+            if mismatch.any():
+                examples = list(common_audit_ids[mismatch][:6])
+                raise WindowClosureError(
+                    "Shifted Step8A censor audit mismatch for common cell(s) "
+                    f"{examples} between '{anchor_name}' and '{name}'."
+                )
 
     initial_rows_by_variant: dict[str, int] = {}
     after_valid: dict[str, int] = {}
@@ -8906,8 +9559,8 @@ COMPARE_INTERPRETATION_LIMITS: tuple[str, ...] = (
     "Results apply to the Manavgat-2021-style common cohort of this analysis "
     "only; they are not automatically transferable to another AOI or fire "
     "season.",
-    "This is an observational predictive analysis. It does not establish a "
-    "causal mechanism.",
+    "These results are descriptive and do not establish an underlying "
+    "mechanism.",
     "It is not an operational forecasting validation and supports no "
     "deployment or alerting claim.",
     "Where a bootstrap interval includes zero, the direction of the change is "
@@ -10230,6 +10883,7 @@ def run_analysis(
     dry_run: bool = False,
     force: bool = False,
     resume: bool = False,
+    recover_partial_local_downstream: bool = False,
     output_root: Optional[Path] = None,
     experiments_root: Optional[Path] = None,
     prelabel_exporter: Optional[Any] = None,
@@ -10452,6 +11106,16 @@ def run_analysis(
     assert_label_prerequisites(inventory)
     # 3. ...and so would a missing frozen Step8A or static shared raster.
     prerequisite_status = assert_actual_plan_prerequisites(inventory)
+    # 4. If the registry enables the pre-label exclusion policy, production
+    #    Step8A will REQUIRE the Step6B gate exclusion manifest inside every
+    #    variant's own gate_labels_dir. That is statically resolvable now, so
+    #    it is asserted here -- on EVERY actual invocation, including the plan
+    #    stage that precedes the export stage -- rather than after an Earth
+    #    Engine export has already been paid for.
+    censor_binding = assert_prelabel_exclusion_binding(
+        prelabel_exclusion_binding(experiment_id, base_context, experiments_root),
+        f"actual run preflight (stages {list(stages)})",
+    )
 
     # Re-hash immediately before any write: the inventory that produced the
     # analysis_id must still describe what is on disk right now.
@@ -10529,6 +11193,7 @@ def run_analysis(
             experiment_id, analysis_id, base_context, canonical, variants,
             inventory, binding, output_root=output_root,
             experiments_root=experiments_root, force=force, resume=resume,
+            recover_partial=recover_partial_local_downstream,
             engine=local_downstream_engine,
         )
         files_written += local_downstream_outcome["files_written"]
@@ -10596,6 +11261,7 @@ def run_analysis(
         "resume_requested": bool(resume),
         "prerequisites_ready": prerequisite_status["prerequisites_ready"],
         "missing_required_inputs": prerequisite_status["missing_required_inputs"],
+        "prelabel_exclusion_binding": censor_binding,
         "label_inputs": {
             role: {
                 "path": str(entry["path"]),

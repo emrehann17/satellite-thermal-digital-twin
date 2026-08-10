@@ -11,7 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from core.regions import get_experiment
+from core.regions import (
+    VARIANT_STATUS_LEGACY_SUPERSEDED,
+    get_experiment,
+    validate_variant_record,
+)
 from src.step8_large_block_robustness import canonical_json, sha256_bytes, _git_commit
 import src.step9g_univariate_feature_auc_direction_reversal as step9g
 
@@ -47,8 +51,12 @@ def comparison_output_dir(sorted_ids: tuple[str, ...]) -> Path:
 
 def resolve_experiments(experiments: Optional[list[str]]) -> tuple[str, ...]:
     """Validate the caller-supplied explicit experiment list. No fixed
-    allowed-AOI list: any experiment_id present in the core.regions
-    registry is accepted, current or future."""
+    allowed-AOI list: any CANONICAL experiment_id present in the core.regions
+    registry is accepted, current or future.
+
+    Superseded legacy AOI variants are rejected fail-closed (naming their
+    successor) rather than silently dropped, so a comparison can never be
+    built over a cohort the caller did not actually ask for."""
     if not experiments or not isinstance(experiments, (list, tuple)):
         raise ComparisonError("--experiments must be a non-empty list of experiment IDs.")
     if len(experiments) < 2:
@@ -59,8 +67,23 @@ def resolve_experiments(experiments: Optional[list[str]]) -> tuple[str, ...]:
     duplicates = sorted(k for k, v in seen.items() if v > 1)
     if duplicates:
         raise ComparisonError(f"Duplicate --experiments entries are not allowed: {duplicates}.")
+    offenders: list[str] = []
     for experiment_id in experiments:
-        get_experiment(experiment_id)  # raises ValueError if unknown
+        record = get_experiment(experiment_id)  # raises ValueError if unknown
+        # Generic, fail-closed variant validation: a record with a missing or
+        # unknown variant_status raises here rather than being assumed
+        # canonical. No AOI ID is hard-coded -- the successor is read from
+        # the record itself.
+        if validate_variant_record(record, experiment_id) == VARIANT_STATUS_LEGACY_SUPERSEDED:
+            offenders.append(f"'{experiment_id}' (superseded_by='{record['superseded_by']}')")
+    if offenders:
+        raise ComparisonError(
+            "multi-AOI Step9G univariate-AUC comparison: refusing superseded "
+            f"experiment(s): {', '.join(offenders)}. Only canonical experiments may "
+            "enter a new comparison; a superseded ID is never silently dropped. "
+            "Legacy outputs stay on disk and are never deleted. Use the successor "
+            "experiment_id instead."
+        )
     return tuple(experiments)
 
 

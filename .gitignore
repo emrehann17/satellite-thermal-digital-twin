@@ -7,9 +7,16 @@ data/
 logs/
 outputs/
 old_codes/
+archives/
 
 # Yerel dokumantasyon arsivi (superseded/teslim kopyalari GitHub'a gitmez)
 docs/archive/
+
+# Uretilen review/design paketi: icerigi tamamen
+# docs/multi_region_window_closure_design/*.md dosyalarindan turetilir,
+# hicbir kod/test onu okumaz. Koke sabitlenmistir; alt dizinlerdeki bilincli
+# ZIP fixture'lari etkilenmez.
+/multi_region_window_closure_design.zip
 
 
 # IDE ayarları
@@ -18,9 +25,8 @@ docs/archive/
 # GEE Kimlik Bilgileri (Eğer klasöre gelirse)
 .netrc
 .placeholder
-=======
+
 # Byte-compiled / optimized / DLL files
-__pycache__/
 *.py[codz]
 *$py.class
 
@@ -78,6 +84,7 @@ cover/
 
 # Django stuff:
 *.log
+!docs/multi_region_window_closure_design/*dryrun.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal

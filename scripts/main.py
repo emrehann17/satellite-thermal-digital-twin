@@ -480,6 +480,7 @@ def cmd_burned_pattern_audit(args: argparse.Namespace) -> int:
             all_enabled=args.all_enabled,
             dry_run=args.dry_run,
             force=args.force,
+            allow_superseded_sensitivity=args.allow_superseded_sensitivity,
         )
     except SystemExit as exc:
         return _fail("burned-pattern-audit", exc)
@@ -601,90 +602,45 @@ def cmd_marginal_aoa_completion(args: argparse.Namespace) -> int:
 
 
 def cmd_window_closure_sensitivity(args: argparse.Namespace) -> int:
-    try:
-        result = orch.run_window_closure_sensitivity_stage(
-            experiment_id=args.experiment,
-            shifts=args.shifts,
-            from_stage=args.from_stage,
-            to_stage=args.to_stage,
-            dry_run=args.dry_run,
-            force=args.force,
-            resume=args.resume,
-        )
-    except SystemExit as exc:
-        return _fail("window-closure-sensitivity", exc)
-    except Exception as exc:  # noqa: BLE001
-        return _fail("window-closure-sensitivity", exc)
+    """RETIRED. Fails fast; never reaches the orchestrator or the backend.
+
+    The per-AOI output namespace this command published into was retired on
+    2026-08-10, when all five window-closure AOIs -- including the read-only
+    Manavgat reference -- were unified under `window_closure_region`. Running it
+    again would silently recreate that retired root, so the command refuses
+    instead of redirecting: a silent redirect would publish into a namespace the
+    caller did not ask for.
+
+    The subcommand stays registered, and its options stay parseable, so the
+    historical invocation remains self-documenting in `--help`.
+    """
+    from src.multi_region_window_closure.contract import RETIRED_CLI_MESSAGE
+
+    print(RETIRED_CLI_MESSAGE, file=sys.stderr)
+    log.error("[window-closure-sensitivity] retired entry point refused; nothing was run.")
+    return 2
+
+
+def cmd_window_closure_region(args: argparse.Namespace) -> int:
+    """Dispatch exactly one AOI to the reviewed read-only regional planner."""
+    from scripts.run_window_closure_region import main as regional_main
+
+    argv = ["--experiment", args.experiment]
     if args.dry_run:
-        print(json.dumps(result, indent=2, default=str))
-    log.info(
-        "[window-closure-sensitivity] tamamlandı: ran=%s experiment=%s shifts=%s",
-        result.get("ran"), args.experiment, args.shifts,
-    )
-    if result.get("ran"):
-        log.info(
-            "[window-closure-sensitivity] stages=%s analysis_id=%s "
-            "files_written=%s reused=%s",
-            result.get("stages_run"), result.get("analysis_id"),
-            result.get("files_written_count"), result.get("reused"),
-        )
-        if result.get("exported_variants") is not None:
-            log.info(
-                "[window-closure-sensitivity] predictor-export: processed=%s "
-                "exported=%s reused=%s roles=%s rasters=%s "
-                "canonical_export_attempted=%s",
-                result.get("processed_variants"), result.get("exported_variants"),
-                result.get("reused_variants"), result.get("logical_roles_produced"),
-                result.get("predictor_rasters_produced"),
-                result.get("canonical_export_attempted"),
-            )
-        if result.get("completed_variants") is not None:
-            log.info(
-                "[window-closure-sensitivity] local-downstream: processed=%s "
-                "completed=%s reused=%s artifacts=%s step8a_datasets=%s "
-                "canonical_downstream_attempted=%s common_cohort_created=%s "
-                "model_fit=%s bootstrap_run=%s",
-                result.get("processed_variants"), result.get("completed_variants"),
-                result.get("reused_variants"),
-                result.get("downstream_artifacts_produced"),
-                result.get("step8a_datasets_produced"),
-                result.get("canonical_downstream_attempted"),
-                result.get("common_cohort_created"),
-                result.get("model_fit"), result.get("bootstrap_run"),
-            )
-        if result.get("model_stage_metadata") is not None:
-            metadata = result.get("model_stage_metadata") or {}
-            log.info(
-                "[window-closure-sensitivity] model: reused=%s evaluations=%s "
-                "cohort_rows=%s prevalence=%s folds=%s "
-                "fire_risk_model_fit=%s downscaling_model_fit=%s "
-                "bootstrap_run=%s compare_run=%s",
-                result.get("model_reused"),
-                metadata.get("model_evaluation_count"),
-                (metadata.get("common_cohort") or {}).get("final_common_cohort_rows"),
-                (metadata.get("common_cohort") or {}).get("prevalence"),
-                (metadata.get("shared_folds") or {}).get("fold_count"),
-                result.get("fire_risk_model_fit"),
-                result.get("downscaling_model_fit"),
-                result.get("bootstrap_run"), result.get("compare_run"),
-            )
-        if result.get("compare_stage_metadata") is not None:
-            metadata = result.get("compare_stage_metadata") or {}
-            log.info(
-                "[window-closure-sensitivity] compare: reused=%s "
-                "point_metrics=%s contributions=%s bootstrap_rows=%s "
-                "evidence=%s model_fit=%s bootstrap_run=%s compare_run=%s",
-                result.get("compare_reused"),
-                metadata.get("point_metric_row_count"),
-                metadata.get("thermal_contribution_row_count"),
-                metadata.get("bootstrap_summary_row_count"),
-                metadata.get("evidence_status_counts"),
-                result.get("model_fit"), result.get("bootstrap_run"),
-                result.get("compare_run"),
-            )
-        for path in result.get("files_written") or []:
-            log.info("[window-closure-sensitivity]   %s", path)
-    return 0
+        argv.append("--dry-run")
+    if getattr(args, "execute_actual", False):
+        argv.append("--execute-actual")
+    if args.resume:
+        argv.append("--resume")
+    if args.force:
+        argv.append("--force")
+    if args.json:
+        argv.append("--json")
+    if getattr(args, "output_root", None):
+        argv.extend(["--output-root", args.output_root])
+    if getattr(args, "experiments_root", None):
+        argv.extend(["--experiments-root", args.experiments_root])
+    return regional_main(argv)
 
 
 def cmd_domain_classifier_audit(args: argparse.Namespace) -> int:
@@ -774,7 +730,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=EPILOG_EXAMPLES,
     )
-    subparsers = parser.add_subparsers(dest="command", metavar="{experiment,transfer,shift-audit,transfer-explore,self-cal-transfer,step10,step8-robustness,large-block-robustness,step8-big-block-robustness,concept-shift,concept-shift-compare,transfer-synthesis,evia-signed-auc,transfer-decomposition,frozen-hash-inventory,manavgat-step8a-hash-audit,old-new-deltas,burned-pattern-audit,marginal-aoa,marginal-aoa-completion,few-shot-recovery,window-closure-sensitivity,domain-classifier-audit,legacy}")
+    subparsers = parser.add_subparsers(dest="command")
 
     # --- experiment ---
     p_exp = subparsers.add_parser(
@@ -1323,6 +1279,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_burned_pattern.add_argument("--force", action="store_true", help="Overwrite existing outputs already produced by a different analysis_id.")
     p_burned_pattern.add_argument("--dry-run", action="store_true", help="Resolve experiments/inputs and print the plan; no component computation, no files written.")
+    p_burned_pattern.add_argument(
+        "--allow-superseded-sensitivity", action="store_true",
+        help=(
+            "Explicit --experiments selection only: permit a superseded legacy "
+            "AOI variant to be audited ALONGSIDE its canonical successor as a "
+            "descriptive AOI-definition sensitivity comparator. The legacy "
+            "experiment is not restored to the canonical cohort; --all-enabled "
+            "discovery is unaffected and rejects this flag, the successor named "
+            "by the registry superseded_by pointer must be requested in the same "
+            "selection, and the flag is rejected when no superseded experiment "
+            "was requested. --force cannot substitute for it."
+        ),
+    )
     p_burned_pattern.set_defaults(func=cmd_burned_pattern_audit)
 
     # --- marginal-aoa ---
@@ -1585,9 +1554,23 @@ def build_parser() -> argparse.ArgumentParser:
     # --- window-closure-sensitivity ---
     p_window_closure = subparsers.add_parser(
         "window-closure-sensitivity",
-        help="Predictor window-closure sensitivity of within-AOI baseline/thermal results.",
+        help=(
+            "[RETIRED 2026-08-10] Historical per-AOI window-closure entry point. "
+            "Always refuses; use window-closure-region."
+        ),
         description=(
-            "Scientific purpose: shift the canonical predictor window EARLIER "
+            "RETIRED on 2026-08-10 and kept only as a documented historical "
+            "entry point. Invoking it ALWAYS fails with a non-zero exit and "
+            "writes nothing: the output namespace it published into "
+            "(outputs/diagnostics/window_closure_sensitivity/) was retired when "
+            "all five window-closure AOIs, including the read-only Manavgat "
+            "reference, were unified under "
+            "outputs/diagnostics/window_closure_region/. Use "
+            "window-closure-region instead. The Python module "
+            "src/window_closure_sensitivity.py is NOT retired -- it remains the "
+            "scientific backend driven by ProductionRegionalEngine. "
+            "Historical scientific purpose, retained for provenance: shift the "
+            "canonical predictor window EARLIER "
             "by preregistered day counts (default 0/7/14) while preserving its "
             "LENGTH exactly, and measure how the within-AOI baseline and "
             "thermal model results -- and the thermal contribution between "
@@ -1605,13 +1588,19 @@ def build_parser() -> argparse.ArgumentParser:
             "comparisons are made on the exact common cohort. Results are "
             "DESCRIPTIVE predictor-timing sensitivity: closing the window "
             "earlier is not an operational forecasting validation, and an "
-            "interval containing zero is not evidence of equivalence. Writes "
-            "only under outputs/diagnostics/window_closure_sensitivity/. "
-            "Delegates to scripts/run_window_closure_sensitivity.py / "
-            "src/window_closure_sensitivity.py."
+            "interval containing zero is not evidence of equivalence. Delegates "
+            "to scripts/run_window_closure_sensitivity.py / "
+            "src/window_closure_sensitivity.py, which remains the scientific "
+            "backend of the regional runner. NOTE: the standalone "
+            "outputs/diagnostics/window_closure_sensitivity/ namespace was "
+            "RETIRED on 2026-08-10; all five completed AOIs now live under "
+            "outputs/diagnostics/window_closure_region/. Use "
+            "scripts/run_window_closure_region.py for regional work."
         ),
     )
-    p_window_closure.add_argument("--experiment", required=True, help="Experiment ID (core/regions.py registry entry).")
+    # NOT `required`: a retired command must answer with its retirement message,
+    # not with an argparse usage error about a flag that no longer does anything.
+    p_window_closure.add_argument("--experiment", default=None, help="[RETIRED] Experiment ID (core/regions.py registry entry).")
     p_window_closure.add_argument(
         "--shifts", nargs="+", type=int, default=list(_WINDOW_CLOSURE_DEFAULT_SHIFTS),
         help="Preregistered closure shifts in days (default: 0 7 14). Shifts move the window earlier; they are never window lengths.",
@@ -1622,6 +1611,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_window_closure.add_argument("--resume", action="store_true", help="Reuse completed stages whose recorded input hashes still match.")
     p_window_closure.add_argument("--dry-run", action="store_true", help="Print the full plan (windows, censor interval, export roles, planned paths); write no files, run no GEE query/export, no model fit, no bootstrap.")
     p_window_closure.set_defaults(func=cmd_window_closure_sensitivity)
+
+    p_wc_region = subparsers.add_parser(
+        "window-closure-region",
+        help="Plan or run one independently isolated window-closure AOI.",
+    )
+    p_wc_region.add_argument(
+        "--experiment", required=True,
+        choices=["bejis_2022", "mugla_2021", "evia_2021_extended", "montiferru_2021"],
+    )
+    p_wc_region.add_argument("--dry-run", action="store_true")
+    p_wc_region.add_argument("--execute-actual", action="store_true")
+    p_wc_region.add_argument("--resume", action="store_true")
+    p_wc_region.add_argument("--force", action="store_true")
+    p_wc_region.add_argument("--json", action="store_true")
+    p_wc_region.add_argument("--output-root")
+    p_wc_region.add_argument("--experiments-root")
+    p_wc_region.set_defaults(func=cmd_window_closure_region)
 
     # --- domain-classifier-audit ---
     p_domain_classifier = subparsers.add_parser(

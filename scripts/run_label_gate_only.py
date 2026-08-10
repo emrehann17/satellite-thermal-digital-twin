@@ -85,6 +85,7 @@ _PROVENANCE_FILES = [
     "src/step6a_prepare_gate_inputs.py",
     "src/step6_validate_fire_relation.py",
     "src/step8a_prepare_500m_modeling_dataset.py",
+    "src/historical_burn_exclusion.py",
 ]
 
 
@@ -260,6 +261,37 @@ def _static_region_aoi_provenance(region_key: str) -> dict | None:
     }
 
 
+def _registry_aoi_derivation(exp: dict) -> dict | None:
+    """Return registry-declared AOI derivation as a JSON-safe deep copy.
+
+    Experiments without an ``aoi_provenance`` declaration gain no manifest
+    field. An explicitly declared provenance must be a non-empty,
+    JSON-serializable dictionary; invalid declarations fail closed.
+    """
+    if "aoi_provenance" not in exp:
+        return None
+
+    provenance = exp["aoi_provenance"]
+
+    if not isinstance(provenance, dict) or not provenance:
+        raise ValueError(
+            f"aoi_provenance for experiment "
+            f"'{exp.get('experiment_id', '<unknown>')}' "
+            "must be a non-empty dict"
+        )
+
+    try:
+        return json.loads(
+            json.dumps(provenance, ensure_ascii=False)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"aoi_provenance for experiment "
+            f"'{exp.get('experiment_id', '<unknown>')}' "
+            f"is not JSON-serializable: {exc}"
+        ) from exc
+    
+
 def _sha256_file(path: Path) -> str | None:
     if not path.exists() or not path.is_file():
         return None
@@ -290,7 +322,119 @@ def _package_versions() -> dict:
     return versions
 
 
-def build_gate_manifest(experiment_id: str, exp: dict, paths: dict, gate_result: dict) -> dict:
+def declares_primary_population_rule(exp: dict) -> bool:
+    """True only when the registry record declares the COMPLETE per-experiment
+    primary-population sample-size rule (population AND threshold).
+
+    A half-declaration is deliberately NOT treated as "declared" here: the
+    gate's own `evaluate_primary_population_sample_size` fails closed on it,
+    and this predicate must not quietly pre-empt that error by writing a
+    half-filled manifest block.
+    """
+    return (
+        exp.get("primary_population") is not None
+        and exp.get("min_primary_population_burned") is not None
+    )
+
+
+def _scientific_optional_contracts(exp: dict, historical_description: dict | None) -> dict:
+    """The OPT-IN parts of the `scientific` payload, omitted entirely when the
+    experiment does not declare them.
+
+    Backward compatibility is the whole point: `scientific` is hashed into
+    analysis_id, so an experiment that opts into nothing must produce the
+    byte-identical pre-patch payload. Every block below is therefore added
+    only on an explicit registry declaration -- never as a null/`not_applied`
+    placeholder.
+    """
+    optional: dict = {}
+    if historical_description:
+        optional["historical_burn_exclusion"] = _scientific_historical_exclusion(
+            historical_description
+        )
+    if declares_primary_population_rule(exp):
+        optional["primary_population_sample_size_rule"] = (
+            _scientific_primary_population_rule(exp)
+        )
+    # Event-relative framing metadata, when the registry declares it. Carried
+    # verbatim so the scientific claim is part of the analysis_id.
+    for key in ("transfer_framing", "event_anchor_date",
+                "event_anchor_basis", "event_window_rule"):
+        if key in exp:
+            optional[key] = exp[key]
+    return optional
+
+
+def _scientific_historical_exclusion(historical_description: dict) -> dict:
+    """Historical-exclusion block of the manifest's `scientific` payload.
+
+    Only ever built for an experiment that opted in (see
+    _scientific_optional_contracts). Sitting under "scientific" makes the
+    source experiment, source kind, mask definition, source SHA-256 and source
+    physical-burned count part of the analysis_id by construction:
+    regenerating the source dataset (or pointing at a different source)
+    changes the analysis_id.
+    """
+    return {
+        "applied": True,
+        "exclude_historical_burns": True,
+        "source_experiment_id": historical_description.get("source_experiment_id"),
+        "source_region_key": historical_description.get("source_region_key"),
+        "source_kind": historical_description.get("source_kind"),
+        "mask_definition": historical_description.get("mask_definition"),
+        "exclusion_reason": historical_description.get("exclusion_reason"),
+        "source_step8a_parquet_path": historical_description.get("source_step8a_parquet_path"),
+        "source_step8a_parquet_sha256": historical_description.get("source_step8a_parquet_sha256"),
+        "source_row_count": historical_description.get("source_row_count"),
+        "source_physical_burned_count": historical_description.get("source_physical_burned_count"),
+        "source_expected_physical_burned_count": historical_description.get(
+            "source_expected_physical_burned_count"
+        ),
+        "region_grid_compatibility": historical_description.get("region_grid_compatibility"),
+    }
+
+
+def _scientific_primary_population_rule(exp: dict) -> dict:
+    """Primary-population sample-size rule block of `scientific`.
+
+    Only ever built for an experiment that declares the COMPLETE rule (see
+    declares_primary_population_rule).
+
+    SEPARATE from the burned-landcover gate's generic total-burned
+    feasibility threshold (min_positives), which is recorded alongside it and
+    is NOT modified. Being under "scientific" makes the per-experiment
+    threshold part of the analysis_id.
+    """
+    from core.config import STEP6_BURNED_LANDCOVER_GATE_MIN_POSITIVES
+
+    population = exp["primary_population"]
+    minimum = exp["min_primary_population_burned"]
+    return {
+        "applied": True,
+        "population": population,
+        "min_primary_population_burned": minimum,
+        "semantics": (
+            "post-gate sample-size STOP evaluated after all exclusions and "
+            "landcover classification, on the primary population's burned "
+            "count only"
+        ),
+        "distinct_from_composition_gate_min_positives": (
+            STEP6_BURNED_LANDCOVER_GATE_MIN_POSITIVES
+        ),
+        "distinct_from_composition_gate_min_positives_semantics": (
+            "generic TOTAL-burned feasibility threshold applied to burned_count "
+            "across every landcover; unchanged by this rule"
+        ),
+    }
+
+
+def build_gate_manifest(
+    experiment_id: str,
+    exp: dict,
+    paths: dict,
+    gate_result: dict,
+    historical_description: dict | None = None,
+) -> dict:
     """
     Builds a provenance manifest + a content-addressed analysis_id for any
     experiment-aware gate run. analysis_id is a sha256 over the scientific
@@ -299,6 +443,23 @@ def build_gate_manifest(experiment_id: str, exp: dict, paths: dict, gate_result:
     tied to exactly what produced it.
     """
     aoi = _static_region_aoi_provenance(exp.get("region_key", ""))
+    # scientific.aoi.source keeps describing the STATIC AST resolution above;
+    # the registry-declared derivation chain (how the bbox numbers came to be)
+    # is attached alongside it as scientific.aoi.derivation. It sits under
+    # "scientific", so it is part of the analysis_id payload by construction.
+    derivation = _registry_aoi_derivation(exp)
+    if derivation is not None:
+        if aoi is None:
+            # Fail closed: never write a manifest that silently drops a
+            # derivation chain the registry explicitly declared.
+            raise ValueError(
+                f"experiment '{experiment_id}' declares aoi_provenance but its "
+                f"region_key '{exp.get('region_key')}' could not be resolved "
+                "statically from core/regions.py; refusing to emit a manifest "
+                "without the declared AOI derivation."
+            )
+        aoi["derivation"] = derivation
+
     file_hashes = {rel: _sha256_file(BASE_DIR / rel) for rel in _PROVENANCE_FILES}
     protected = {
         rel: _sha256_file(BASE_DIR / rel)
@@ -321,6 +482,19 @@ def build_gate_manifest(experiment_id: str, exp: dict, paths: dict, gate_result:
             f"({exp.get('label_start_date')})"
             if exp.get("exclude_pre_label_burns") else "not_applied"
         ),
+        # --- ADDITIVE-ONLY EXTENSIONS ------------------------------------
+        # Everything below is added CONDITIONALLY, only when the registry
+        # record actually opts into the corresponding contract. An experiment
+        # that declares none of them keeps the EXACT pre-patch `scientific`
+        # key set -- and therefore its pre-patch analysis_id, since the key
+        # set is hashed. A key whose mere presence carried an "not applied"
+        # value would silently change every existing experiment's analysis_id.
+        #
+        #   historical_burn_exclusion            exclude_historical_burns=True
+        #   primary_population_sample_size_rule  the COMPLETE per-experiment
+        #                                        population + threshold pair
+        #   transfer_framing / event_anchor_*    event-relative framing
+        **_scientific_optional_contracts(exp, historical_description),
     }
     id_payload = {
         "scientific": scientific,
@@ -351,6 +525,44 @@ def build_gate_manifest(experiment_id: str, exp: dict, paths: dict, gate_result:
         ),
     }
 
+    # --- Historical exclusion provenance (SEPARATE from pre_label_provenance,
+    # which is retained above unchanged). Like the `scientific` blocks, this
+    # top-level key is OMITTED ENTIRELY for experiments that did not opt in,
+    # so their manifest structure stays byte-compatible with the pre-patch
+    # schema rather than gaining an all-zero placeholder. ---
+    optional_provenance: dict = {}
+    if historical_description:
+        historical_manifest_result = gate.get("historical_burn_exclusion_manifest") or {}
+        historical_artifact_path = historical_manifest_result.get("parquet_path")
+        optional_provenance["historical_burn_provenance"] = {
+            "applied": True,
+            "historical_burn_excluded_count": gate.get("historical_burn_excluded_count", 0),
+            "pre_label_historical_overlap_count": gate.get(
+                "pre_label_historical_overlap_count", 0
+            ),
+            "total_unique_excluded_count": gate.get("total_unique_excluded_count", 0),
+            "source_experiment_id": historical_description.get("source_experiment_id"),
+            "source_step8a_parquet_path": historical_description.get(
+                "source_step8a_parquet_path"
+            ),
+            "source_step8a_parquet_sha256": historical_description.get(
+                "source_step8a_parquet_sha256"
+            ),
+            "source_physical_burned_count": historical_description.get(
+                "source_physical_burned_count"
+            ),
+            "exclusion_manifest_parquet_path": historical_artifact_path,
+            "exclusion_manifest_parquet_sha256": (
+                _sha256_file(Path(historical_artifact_path))
+                if historical_artifact_path else None
+            ),
+        }
+    # Same rule for the post-gate sample-size outcome: present only when the
+    # gate actually evaluated the rule (i.e. the experiment declared it).
+    primary_population_gate = gate.get("primary_population_sample_size_gate")
+    if primary_population_gate is not None:
+        optional_provenance["primary_population_sample_size_gate"] = primary_population_gate
+
     return {
         "manifest_kind": "experiment_gate_provenance",
         "analysis_id": analysis_id,
@@ -359,6 +571,7 @@ def build_gate_manifest(experiment_id: str, exp: dict, paths: dict, gate_result:
         "downstream_status": "blocked_pending_advisor_review",
         "scientific": scientific,
         "pre_label_provenance": pre_label_provenance,
+        **optional_provenance,
         "code_file_hashes": file_hashes,
         "protected_gate_report_hashes": protected,
         "package_versions": _package_versions(),
@@ -413,6 +626,11 @@ def _namespaced_paths(experiment_id: str) -> dict:
     Hicbir sey OLUSTURMAZ/YAZMAZ -- yalnizca yol hesaplar (dry-run ve
     safety-check tarafindan da kullanilir).
     """
+    from src.historical_burn_exclusion import (
+        HISTORICAL_BURN_EXCLUSION_MANIFEST_CSV,
+        HISTORICAL_BURN_EXCLUSION_MANIFEST_METADATA,
+        HISTORICAL_BURN_EXCLUSION_MANIFEST_PARQUET,
+    )
     from src.step6a_prepare_gate_inputs import get_gate_input_paths
 
     gate_inputs = get_gate_input_paths(experiment_id)
@@ -426,6 +644,18 @@ def _namespaced_paths(experiment_id: str) -> dict:
         "raw_path": label_dir / "mcd64a1_raw.tif",
         "binary_path": label_dir / "mcd64a1_burned.tif",
         "pre_label_raw_path": label_dir / "mcd64a1_prelabel_raw.tif",
+        # Historical burn exclusion artifacts live in the SAME gate labels
+        # directory but in their OWN files -- never merged into
+        # pre_label_excluded_cells.*.
+        "historical_excluded_parquet_path": (
+            label_dir / HISTORICAL_BURN_EXCLUSION_MANIFEST_PARQUET
+        ),
+        "historical_excluded_csv_path": (
+            label_dir / HISTORICAL_BURN_EXCLUSION_MANIFEST_CSV
+        ),
+        "historical_excluded_metadata_path": (
+            label_dir / HISTORICAL_BURN_EXCLUSION_MANIFEST_METADATA
+        ),
         "manifest_path": label_dir / f"{experiment_id}_gate_manifest.json",
         "gate_output_dir": label_dir,
     }
@@ -463,6 +693,77 @@ def _assert_paths_are_safely_namespaced(experiment_id: str, paths: dict) -> None
             )
 
 
+def _resolve_historical_contract_or_none(exp: dict, is_kozan: bool, gate_output_dir):
+    """Registry-driven historical-exclusion resolution (read-only).
+
+    Returns the fully-resolved description (contract + source path/SHA/count +
+    region/grid compatibility + planned artifact paths) or None when the
+    experiment does not declare the contract. Nothing is created or written.
+    """
+    if is_kozan or not exp.get("exclude_historical_burns", False):
+        return None
+    from src.historical_burn_exclusion import (
+        HistoricalBurnExclusionError,
+        describe_historical_burn_contract,
+    )
+
+    try:
+        return describe_historical_burn_contract(exp, output_dir=Path(gate_output_dir))
+    except HistoricalBurnExclusionError as exc:
+        raise LabelGateRunnerError(str(exc)) from exc
+
+
+def _log_historical_contract(description: dict | None, exp: dict) -> None:
+    """Print the resolved historical-exclusion contract and the SEPARATE
+    primary-population sample-size rule. Read-only; creates nothing."""
+    if description is None:
+        log.info(
+            "  historical burn exclusion: NOT declared for this experiment "
+            "(exclude_historical_burns absent/False)."
+        )
+    else:
+        log.info("  historical burn exclusion: DECLARED")
+        log.info("    source experiment : %s", description["source_experiment_id"])
+        log.info("    source kind       : %s", description["source_kind"])
+        log.info("    mask definition   : %s", description["mask_definition"])
+        log.info("    source parquet    : %s", description["source_step8a_parquet_path"])
+        log.info("    source available  : %s", description.get("source_available"))
+        log.info("    source sha256     : %s", description.get("source_step8a_parquet_sha256"))
+        log.info("    source rows       : %s", description.get("source_row_count"))
+        log.info(
+            "    source physical burned cells: %s (frozen expectation: %s)",
+            description.get("source_physical_burned_count"),
+            description.get("source_expected_physical_burned_count"),
+        )
+        compat = description.get("region_grid_compatibility", {})
+        log.info(
+            "    region/grid identity: region_key=%s matches_source=%s "
+            "grid_verified=%s (%s)",
+            compat.get("region_key"), compat.get("region_key_matches_source"),
+            compat.get("grid_identity_verified"), compat.get("grid_identity_note"),
+        )
+        for name, planned in (description.get("planned_artifacts") or {}).items():
+            log.info("    planned %s: %s", name, planned)
+
+    population = exp.get("primary_population")
+    minimum = exp.get("min_primary_population_burned")
+    if population is None and minimum is None:
+        log.info(
+            "  primary-population sample-size rule: NOT declared for this "
+            "experiment (the generic composition gate min_positives is "
+            "unaffected either way)."
+        )
+    else:
+        from core.config import STEP6_BURNED_LANDCOVER_GATE_MIN_POSITIVES
+
+        log.info(
+            "  primary-population sample-size rule: population=%s "
+            "min_primary_population_burned=%s -- SEPARATE from the composition "
+            "gate's generic total-burned min_positives=%s (unchanged).",
+            population, minimum, STEP6_BURNED_LANDCOVER_GATE_MIN_POSITIVES,
+        )
+
+
 def _log_planned_paths(paths: dict) -> None:
     log.info("  gate_inputs reference (30 m, termal predictor DEGIL): %s", paths["reference_path"])
     log.info("  gate_inputs landcover (kaynak): %s", paths["landcover_source_path"])
@@ -473,6 +774,13 @@ def _log_planned_paths(paths: dict) -> None:
     log.info("  binary mask: %s", paths["binary_path"])
     if paths.get("pre_label_raw_path"):
         log.info("  pre-label BurnDate (leakage exclusion): %s", paths["pre_label_raw_path"])
+    if paths.get("historical_excluded_parquet_path"):
+        log.info("  historical exclusion manifest (parquet): %s",
+                 paths["historical_excluded_parquet_path"])
+        log.info("  historical exclusion manifest (csv):     %s",
+                 paths["historical_excluded_csv_path"])
+        log.info("  historical exclusion manifest (metadata): %s",
+                 paths["historical_excluded_metadata_path"])
     if paths.get("manifest_path"):
         log.info("  gate manifest (analysis_id, downstream_authorized=false): %s", paths["manifest_path"])
     log.info("  gate ciktilari (json/md/csv): %s/burned_landcover_gate.{json,md,csv}", paths["gate_output_dir"])
@@ -500,13 +808,32 @@ def main(
                 "(placeholder/disabled deney olabilir). Gate-only calistirilamaz."
             )
 
+    # Registry-driven historical-exclusion resolution. Read-only: it resolves
+    # the contract, the source parquet path/SHA/count and region+grid identity
+    # WITHOUT creating or writing anything, so --dry-run can print all of it.
+    historical_description = _resolve_historical_contract_or_none(
+        exp, is_kozan, paths["gate_output_dir"],
+    )
+
     if dry_run:
         log.info("[dry-run] Planlanan yollar:")
         _log_planned_paths(paths)
-        log.info("[dry-run] Hicbir export/gate CALISTIRILMADI.")
-        return {"experiment_id": experiment_id, "ran": False, "reason": "dry_run", "planned_paths": {
-            k: (str(v) if v is not None else None) for k, v in paths.items()
-        }}
+        log.info("[dry-run] Cozulmus sozlesmeler:")
+        _log_historical_contract(historical_description, exp)
+        log.info("[dry-run] Hicbir export/gate/manifest CALISTIRILMADI veya YAZILMADI.")
+        return {
+            "experiment_id": experiment_id,
+            "ran": False,
+            "reason": "dry_run",
+            "planned_paths": {
+                k: (str(v) if v is not None else None) for k, v in paths.items()
+            },
+            "historical_burn_exclusion": historical_description,
+            "primary_population_sample_size_rule": {
+                "population": exp.get("primary_population"),
+                "min_primary_population_burned": exp.get("min_primary_population_burned"),
+            },
+        }
 
     if skip_export and export_labels:
         raise LabelGateRunnerError(
@@ -580,6 +907,39 @@ def main(
             "verecektir).", paths["raw_path"],
         )
 
+    # --- Historical burn exclusion manifest: BUILT AND VALIDATED BEFORE the
+    # gate runs. The source experiment's Step8A artifact is opened read-only
+    # and never rewritten; the manifest is written only inside THIS
+    # experiment's gate labels directory (already namespace-checked above). ---
+    historical_manifest_result = None
+    exclude_historical = historical_description is not None
+    if exclude_historical:
+        log.info(
+            "Historical burn exclusion manifest uretiliyor/dogrulaniyor "
+            "(source=%s, kind=%s)...",
+            historical_description["source_experiment_id"],
+            historical_description["source_kind"],
+        )
+        _log_historical_contract(historical_description, exp)
+        try:
+            from src.historical_burn_exclusion import (
+                HistoricalBurnExclusionError,
+                build_historical_burn_exclusion_manifest,
+            )
+
+            historical_manifest_result = build_historical_burn_exclusion_manifest(
+                exp, output_dir=Path(paths["gate_output_dir"]), force=force,
+            )
+        except HistoricalBurnExclusionError as exc:
+            raise LabelGateRunnerError(str(exc)) from exc
+        log.info(
+            "Historical exclusion manifest hazir: %s (%d unique cell_id; "
+            "created=%s).",
+            historical_manifest_result["parquet_path"],
+            historical_manifest_result["excluded_cell_count"],
+            historical_manifest_result["created"],
+        )
+
     log.info("Step6B burned-landcover gate calistiriliyor...")
     try:
         from src.step6b_burned_landcover_gate import main as run_gate
@@ -624,12 +984,57 @@ def main(
                 bordubet_check_window=(tuple(diagnostic_window) if diagnostic_window else None),
                 experiment_id=experiment_id,
             )
+        if exclude_historical:
+            # SEPARATE kwargs from the pre-label ones above; the two exclusion
+            # axes are never conflated.
+            gate_kwargs.update(
+                exclude_historical_burns=True,
+                historical_exclusion_manifest_arg=str(
+                    paths["historical_excluded_parquet_path"]
+                ),
+                historical_exclusion_config=historical_description,
+                experiment_id=experiment_id,
+            )
+        # SEPARATE post-gate primary-population sample-size rule; generic
+        # registry fields, absent (None) for every experiment that declares
+        # none -- never a hardcoded per-AOI literal here.
+        if exp.get("primary_population") is not None or exp.get("min_primary_population_burned") is not None:
+            gate_kwargs.update(
+                primary_population=exp.get("primary_population"),
+                min_primary_population_burned=exp.get("min_primary_population_burned"),
+            )
         gate_result = run_gate(**gate_kwargs)
 
     log.info(
         "TAMAMLANDI. Gate karari: %s (burned_count=%s). JSON: %s",
         gate_result["decision"], gate_result["burned_count"], gate_result["json_path"],
     )
+    if exclude_historical:
+        log.info(
+            "Exclusion union: pre_label=%s historical=%s overlap=%s "
+            "total_unique=%s -> analysis universe=%s",
+            gate_result.get("pre_label_burn_excluded_count"),
+            gate_result.get("historical_burn_excluded_count"),
+            gate_result.get("pre_label_historical_overlap_count"),
+            gate_result.get("total_unique_excluded_count"),
+            gate_result.get("analysis_universe_cells_after_exclusions"),
+        )
+
+    # --- SEPARATE primary-population sample-size STOP (never auto-runs
+    # anything downstream; downstream_authorized is False either way). ---
+    primary_gate = gate_result.get("primary_population_sample_size_gate")
+    primary_stop_state = None
+    if primary_gate and primary_gate["decision"] == "stop":
+        primary_stop_state = primary_gate["stop_state"]
+        log.warning(
+            "STOP (%s): %s burned_count=%s < min_burned_required=%s. Downstream "
+            "is NOT authorized. This is a PRIMARY-POPULATION SAMPLE-SIZE stop "
+            "and must NOT be reinterpreted as a natural/cropland composition "
+            "gate failure (composition decision was: %s).",
+            primary_stop_state, primary_gate["population"],
+            primary_gate["burned_count"], primary_gate["min_burned_required"],
+            gate_result["decision"],
+        )
 
     # --- Provenance manifest (analysis_id + downstream_authorized=false) ---
     manifest_result = None
@@ -642,7 +1047,10 @@ def main(
                 manifest_path,
             )
         else:
-            manifest = build_gate_manifest(experiment_id, exp, paths, {"gate_result": gate_result})
+            manifest = build_gate_manifest(
+                experiment_id, exp, paths, {"gate_result": gate_result},
+                historical_description=historical_description,
+            )
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
             manifest_path.write_text(
                 json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -662,6 +1070,10 @@ def main(
         "pre_label_export_result": pre_label_export_result,
         "gate_result": gate_result,
         "manifest_result": manifest_result,
+        "historical_burn_exclusion": historical_description,
+        "historical_manifest_result": historical_manifest_result,
+        "primary_population_sample_size_gate": primary_gate,
+        "primary_population_stop_state": primary_stop_state,
         "downstream_authorized": False,
     }
 

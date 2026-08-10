@@ -983,7 +983,8 @@ def test_markdown_states_the_interpretation_boundary():
     assert "interval that includes zero" in lowered
     assert "do not resolve the direction of the change" in lowered
     assert "uncertainty remains" in lowered
-    assert "does not establish a causal mechanism" in lowered
+    assert "do not establish an underlying mechanism" in lowered
+    assert "causal" not in lowered
     assert "prevalence" in lowered
     assert "single aoi and a single season" in lowered
     # The scientific wording contract: none of these substrings may appear

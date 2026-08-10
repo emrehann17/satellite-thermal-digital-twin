@@ -53,8 +53,15 @@ import pyarrow.parquet as pq
 
 from core.config import STEP8A_MCD64A1_NATIVE_CELL_SIZE_M
 from core.paths import PROJECT_ROOT
-from core.pipeline_orchestrator import LEGACY_EXPERIMENT_ID
-from core.regions import get_experiment, get_experiment_output_root, list_experiments
+from core.pipeline_orchestrator import LEGACY_EXPERIMENT_ID  # noqa: F401  (re-exported for callers/tests)
+from core.regions import (
+    VARIANT_STATUS_CANONICAL,
+    VARIANT_STATUS_LEGACY_SUPERSEDED,
+    get_experiment,
+    get_experiment_output_root,
+    list_experiments,
+    validate_variant_record,
+)
 from src.step8_large_block_robustness import (
     _git_commit,
     canonical_json,
@@ -66,15 +73,40 @@ from src.step8a_prepare_500m_modeling_dataset import ESA_WORLDCOVER_CLASSES
 # =============================================================================
 # Frozen scientific/schema constants
 # =============================================================================
-ANALYSIS_SCHEMA_VERSION = "burned_pattern_audit.v1"
+ANALYSIS_SCHEMA_VERSION = "burned_pattern_audit.v2"
 
 REQUIRED_COLUMNS = ("burned", "row_500m", "col_500m", "elevation_mean", "landcover_dominant")
 OPTIONAL_COLUMNS = ("burn_date", "experiment_id", "region_key")
+
+# Roles that are registered and canonical but are NOT part of a
+# natural-vegetation burned-pattern cohort. Discovery mode (--all-enabled)
+# reports them as excluded with this reason instead of silently dropping
+# them; explicit --experiments selection of such an experiment is still
+# honoured unchanged. Role-based, never ID-based: no real experiment_id
+# appears anywhere in this module.
+#
+#   negative_control          cropland/stubble-burning control AOI; not a
+#                             natural-vegetation wildfire population.
+#   temporal_transfer_wildfire  same AOI as an existing cohort member, only
+#                             the year differs. This cohort compares burned
+#                             PATTERNS ACROSS SPACE, so admitting a second
+#                             year of the SAME geography would silently make
+#                             the comparison partly temporal and reuse one
+#                             AOI twice. Such an experiment is still fully
+#                             auditable via explicit --experiments selection.
+NON_COHORT_ROLES = ("negative_control", "temporal_transfer_wildfire")
 
 # Reused, UNMODIFIED, exact existing Step8 natural-vegetation population
 # mask column (src/step8a_prepare_500m_modeling_dataset.py). This module
 # does NOT recompute it from landcover_dominant/fractions.
 BURNABLE_MASK_COLUMN = "burnable_tree_shrub_grass"
+
+# Reused, UNMODIFIED, exact existing Step8B final-model row-eligibility flag
+# (predictor validity AND label validity) as already materialised in the
+# canonical Step8A dataset. Used ONLY by the third, advisor-specific
+# final-model-population morphology comparison below; never recomputed, and
+# never applied to the primary or natural-vegetation populations.
+VALID_FOR_MODELING_COLUMN = "valid_for_modeling"
 
 # Canonical LABEL-analysis eligibility mask, already computed by Step8A
 # (src/step8a_prepare_500m_modeling_dataset.py: `analysis_eligible =
@@ -94,7 +126,12 @@ PRE_LABEL_EXCLUDED_COLUMN = "pre_label_burn_excluded"
 
 POPULATION_ALL_VALID_BURNED = "all_valid_burned"
 POPULATION_BURNABLE_TSG_BURNED = "burnable_tree_shrub_grass_burned"
-POPULATIONS = (POPULATION_ALL_VALID_BURNED, POPULATION_BURNABLE_TSG_BURNED)
+POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED = "burnable_tree_shrub_grass_valid_for_modeling_burned"
+POPULATIONS = (
+    POPULATION_ALL_VALID_BURNED,
+    POPULATION_BURNABLE_TSG_BURNED,
+    POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED,
+)
 
 POPULATION_DEFINITIONS = {
     POPULATION_ALL_VALID_BURNED: (
@@ -109,10 +146,36 @@ POPULATION_DEFINITIONS = {
     POPULATION_BURNABLE_TSG_BURNED: (
         f"Natural-vegetation sensitivity population: the corrected primary "
         f"population further restricted to rows where the existing Step8A "
-        f"'{BURNABLE_MASK_COLUMN}' boolean column is True (tree/shrub/grass "
-        f"dominant land cover, per-cell fraction threshold already computed "
-        f"in Step8A; reused verbatim, not recomputed here). Reported as a "
-        f"sensitivity analysis, never substituted for the primary population."
+        f"'{BURNABLE_MASK_COLUMN}' boolean column is True. That frozen Step8A "
+        f"column is a COMBINED per-cell fraction rule -- "
+        f"(landcover_tree_cover_fraction + landcover_shrubland_fraction + "
+        f"landcover_grassland_fraction) >= burnable_threshold "
+        f"(STEP8A_BURNABLE_FRACTION_THRESHOLD) -- already computed in Step8A "
+        f"and reused verbatim here, never recomputed. It is NOT a "
+        f"dominant-land-cover selection: the 'landcover_dominant' column is "
+        f"no part of the selection rule (it is used only for descriptive "
+        f"land-cover composition reporting). A cell therefore qualifies "
+        f"whenever the three fractions SUM to at least the threshold even if "
+        f"its single dominant class is cropland/bare/other, and a cell whose "
+        f"dominant class is tree, shrubland or grassland is excluded if that "
+        f"sum falls below the threshold. Reported as a sensitivity analysis, "
+        f"never substituted for the primary population."
+    ),
+    POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED: (
+        f"Advisor-specific final-model-population morphology comparison. "
+        f"Selection contract, all conditions required simultaneously: "
+        f"{ANALYSIS_ELIGIBLE_COLUMN} == True AND "
+        f"{VALID_FOR_MODELING_COLUMN} == True AND "
+        f"{BURNABLE_MASK_COLUMN} == True AND burned == 1 AND non-null "
+        f"row_500m/col_500m. Both Step8A boolean columns are reused verbatim "
+        f"and never recomputed here (see the "
+        f"{POPULATION_BURNABLE_TSG_BURNED} definition for the combined "
+        f"fraction rule behind '{BURNABLE_MASK_COLUMN}'). This population "
+        f"describes the morphology of the rows that actually reach the final "
+        f"model; it is an ADDITIONAL comparison only and does NOT replace, "
+        f"redefine, or otherwise alter the '{POPULATION_ALL_VALID_BURNED}' "
+        f"primary population or the '{POPULATION_BURNABLE_TSG_BURNED}' "
+        f"sensitivity population."
     ),
 }
 
@@ -174,9 +237,131 @@ PROHIBITED_ACTIONS = (
     "choose a population or connectivity based on favorable results",
 )
 
+# Selection modes. "explicit_superseded_sensitivity" marks the ONLY selection
+# in which a superseded legacy variant is permitted, and only alongside its
+# canonical successor -- see resolve_experiments().
+SELECTION_MODE_EXPLICIT = "explicit"
+SELECTION_MODE_EXPLICIT_SUPERSEDED_SENSITIVITY = "explicit_superseded_sensitivity"
+SELECTION_MODE_ALL_ENABLED = "all_enabled"
+
+# Recorded verbatim in every artifact produced by a permitted legacy-variant
+# selection, so no downstream reader can mistake it for cohort restoration.
+SUPERSEDED_SENSITIVITY_NOTE = (
+    "This selection deliberately includes a superseded legacy AOI variant "
+    "ONLY as an explicitly permitted AOI-definition sensitivity comparator "
+    "against its canonical successor (--allow-superseded-sensitivity). The "
+    "legacy experiment is NOT restored to the canonical cohort: --all-enabled "
+    "discovery still excludes it, the default explicit selection still "
+    "refuses it, and no registry record, frozen output, or canonical "
+    "comparison matrix is changed by this run. The comparison is descriptive "
+    "AOI-definition sensitivity only -- it is not a model, a transfer result, "
+    "or evidence that either AOI definition is correct."
+)
+
+#: The ONE canonical output root of this analysis family. Every other path in
+#: this module is derived from it through `resolve_layout()`; no output path
+#: string is spelled out a second time here or in the runner.
 OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "diagnostics" / "burned_pattern_audit"
+
+#: Legacy FLAT layout, kept as the default for direct calls to
+#: `analyze_experiment()` / `run_comparison()` so existing programmatic callers
+#: and their monkeypatches keep working unchanged.
 EXPERIMENTS_OUTPUT_ROOT = OUTPUT_ROOT / "experiments"
 COMPARISON_OUTPUT_DIR = OUTPUT_ROOT / "comparison"
+
+
+@dataclass(frozen=True)
+class AuditLayout:
+    """Resolved output paths for one run. The single path authority.
+
+    Different analysis SCOPES (a five-AOI cohort run, a two-AOI sensitivity
+    pair, ...) get their own namespace UNDER `root` instead of their own
+    sibling root next to it. Sibling roots are what produced
+    `burned_pattern_audit_mugla_2021__mugla_2022_event_relative/` and the
+    hand-renamed `*_archive_*` directories: with no `--output-root` and a
+    hardcoded default, preserving a previous result meant renaming the whole
+    root by hand, and a second scope silently overwrote per-experiment
+    outputs inside the first one's root.
+    """
+
+    root: Path
+    experiments: Path
+    comparison: Path
+    scope: Optional[str] = None
+
+
+def default_layout() -> AuditLayout:
+    """The legacy flat layout, read from the module constants.
+
+    Reads the constants at call time so an existing test that patches
+    `EXPERIMENTS_OUTPUT_ROOT` / `COMPARISON_OUTPUT_DIR` still governs.
+    """
+    return AuditLayout(
+        root=OUTPUT_ROOT,
+        experiments=EXPERIMENTS_OUTPUT_ROOT,
+        comparison=COMPARISON_OUTPUT_DIR,
+        scope=None,
+    )
+
+
+def canonical_cohort_ids() -> tuple[str, ...]:
+    """The experiment set `--all-enabled` currently resolves to, sorted.
+
+    Derived from the registry through the same resolver the CLI uses, so a
+    superseded, disabled, negative-control or otherwise non-cohort experiment
+    can never enter it. Returns an empty tuple when the cohort cannot be
+    resolved, which makes `scope_key` fall back to the explicit name rather
+    than guess.
+    """
+    try:
+        return tuple(sorted(resolve_experiments(all_enabled=True).resolved_ids))
+    except BaseException:
+        return ()
+
+
+def scope_key(resolution: "ExperimentResolution") -> str:
+    """Deterministic namespace name for one analysis scope.
+
+    A selection that resolves to exactly the current `--all-enabled` cohort is
+    named `all_enabled` NO MATTER how it was requested. Without this, naming
+    the five canonical AOIs explicitly would create a second namespace holding
+    scientifically identical content -- the same duplication the scoped layout
+    exists to prevent. Comparison is set-based, so ordering is irrelevant.
+
+    A genuine subset (or any selection including a superseded AOI) keeps its
+    own deterministic name built from its sorted experiment IDs.
+    """
+    if resolution.selection_mode == "all_enabled":
+        return "all_enabled"
+    resolved = tuple(sorted(resolution.resolved_ids))
+    canonical = canonical_cohort_ids()
+    if canonical and resolved == canonical:
+        return "all_enabled"
+    return "__".join(resolved)
+
+
+def resolve_layout(
+    output_root: Optional[Path] = None, scope: Optional[str] = None,
+) -> AuditLayout:
+    """Resolve the output layout for a run. The ONLY place paths are built.
+
+    `output_root=None, scope=None` reproduces the legacy flat layout exactly.
+    """
+    if output_root is None and scope is None:
+        return default_layout()
+    # The implicit base is the PARENT of the legacy experiments directory, not
+    # `OUTPUT_ROOT`. In production the two are the same path, but callers that
+    # redirect this analysis (tests, alternative namespaces) override the leaf
+    # constants; deriving from `OUTPUT_ROOT` would silently escape their
+    # sandbox and write into the real canonical root.
+    base = Path(output_root) if output_root is not None else EXPERIMENTS_OUTPUT_ROOT.parent
+    namespace = base / scope if scope else base
+    return AuditLayout(
+        root=base,
+        experiments=namespace / "experiments",
+        comparison=namespace / "comparison",
+        scope=scope,
+    )
 
 STEP8A_RELATIVE_PATH = Path("step8a") / "step8a_500m_modeling_dataset.parquet"
 
@@ -202,6 +387,11 @@ class ExperimentResolution:
     resolved_ids: tuple[str, ...]
     selection_mode: str
     excluded: dict[str, str] = field(default_factory=dict)
+    # Backward-compatible defaults: every existing caller (including
+    # src/domain_classifier_audit.py, which imports this resolver) keeps the
+    # exact previous behaviour without passing or reading these.
+    allow_superseded_sensitivity: bool = False
+    superseded_pairs: tuple[tuple[str, str], ...] = ()
 
 
 def canonical_step8a_path(experiment_id: str) -> Path:
@@ -310,26 +500,69 @@ def validate_against_gate(
 def resolve_experiments(
     experiments: Optional[list[str]] = None,
     all_enabled: bool = False,
+    allow_superseded_sensitivity: bool = False,
 ) -> ExperimentResolution:
     """Resolve the experiment ID set for this audit.
 
     Exactly one of `experiments` / `all_enabled` must be given.
 
     - explicit `experiments`: every ID must exist in the registry
-      (core.regions.get_experiment) and must have a canonical Step8A
-      dataset on disk; missing input fails clearly (no silent skip).
-    - `all_enabled=True`: resolves every enabled, non-legacy registry
-      experiment (core.regions.list_experiments minus
-      core.pipeline_orchestrator.LEGACY_EXPERIMENT_ID), then keeps only
-      those with a canonical Step8A dataset present -- experiments
-      lacking one are recorded in `excluded`, not raised as an error,
-      since discovery mode is expected to skip experiments that have not
-      reached Step8A yet.
+      (core.regions.get_experiment), must NOT be a superseded legacy
+      variant, and must have a canonical Step8A dataset on disk; missing
+      input fails clearly (no silent skip). A superseded ID also fails
+      closed, naming its successor -- it is never quietly dropped, because
+      dropping it would silently change the requested cohort.
+    - `all_enabled=True`: resolves every enabled registry experiment whose
+      variant_status is "canonical" and whose role is a cohort role, then
+      keeps only those with a canonical Step8A dataset present. Each
+      dropped experiment is recorded in `excluded` with a machine-readable
+      reason, never raised as an error:
+          superseded_by_<successor>            legacy AOI variant
+          negative_control                     canonical, non-cohort role
+          temporal_transfer_wildfire           canonical, non-cohort role
+          missing_canonical_step8a_dataset:... has not reached Step8A yet
+      The reasons are checked in that order, so a legacy variant is
+      reported as legacy even if its Step8A output is absent.
+
+    Both branches are shared verbatim by src/domain_classifier_audit.py,
+    which imports this resolver rather than filtering in parallel.
+
+    `allow_superseded_sensitivity` (default False -- every existing caller,
+    including src/domain_classifier_audit.py, keeps the exact previous
+    behaviour) narrowly permits ONE thing: pairing a superseded legacy AOI
+    variant with its canonical successor as a descriptive AOI-definition
+    sensitivity comparison. It is fail-closed in every other direction:
+        * with `all_enabled=True` it is an error, never a filter change --
+          the discovery cohort is exactly what it was before;
+        * a permitted superseded ID must have its registry `superseded_by`
+          successor present in the SAME explicit request, and that successor
+          must itself validate as a canonical variant;
+        * requesting the permission without any superseded ID in the
+          selection is an error, so an unnecessary special permission can
+          never be granted silently;
+        * `--force` never reaches this decision: it only governs overwriting
+          outputs whose analysis_id differs, long after resolution.
+    A permitted selection is reported as
+    selection_mode="explicit_superseded_sensitivity" and carries the
+    (superseded, successor) pairs, so every downstream artifact records that
+    the legacy variant was a comparator, not a cohort member.
     """
     if bool(experiments) == bool(all_enabled):
         raise BurnedPatternAuditError(
             "Exactly one of --experiments or --all-enabled must be given "
             f"(got experiments={experiments!r}, all_enabled={all_enabled!r})."
+        )
+
+    # (A) The permission is meaningless for discovery and must never be able
+    # to widen the canonical cohort, so it is rejected outright rather than
+    # ignored.
+    if all_enabled and allow_superseded_sensitivity:
+        raise BurnedPatternAuditError(
+            "--allow-superseded-sensitivity cannot be combined with "
+            "--all-enabled: the discovery cohort is canonical-only by "
+            "definition and a superseded legacy variant is never restored to "
+            "it. Request the legacy variant and its canonical successor "
+            "explicitly with --experiments instead."
         )
 
     if experiments:
@@ -340,8 +573,46 @@ def resolve_experiments(
             duplicates = sorted(k for k, v in seen.items() if v > 1)
             raise BurnedPatternAuditError(f"Duplicate --experiments entries are not allowed: {duplicates}.")
         requested = tuple(experiments)
+        requested_set = set(requested)
+        superseded_pairs: list[tuple[str, str]] = []
         for experiment_id in requested:
-            get_experiment(experiment_id)  # raises ValueError if unknown
+            record = get_experiment(experiment_id)  # raises ValueError if unknown
+            # Fail closed on superseded legacy variants BEFORE touching disk,
+            # so the error names the successor instead of a confusing
+            # missing-input message. Explicit selection of a canonical
+            # negative-control experiment stays allowed and unchanged.
+            status = validate_variant_record(record, experiment_id)
+            if status == VARIANT_STATUS_LEGACY_SUPERSEDED:
+                # (B) DEFAULT behaviour, unchanged verbatim.
+                if not allow_superseded_sensitivity:
+                    raise BurnedPatternAuditError(
+                        f"burned-pattern audit --experiments: refusing superseded experiment "
+                        f"'{experiment_id}' (superseded_by='{record['superseded_by']}'). "
+                        "Only canonical experiments may enter a new selection; a superseded "
+                        "ID is never silently dropped. Legacy outputs stay on disk and are "
+                        "never deleted. Use the successor experiment_id instead."
+                    )
+                successor_id = record["superseded_by"]
+                if successor_id not in requested_set:
+                    raise BurnedPatternAuditError(
+                        f"--allow-superseded-sensitivity: superseded experiment "
+                        f"'{experiment_id}' may only be audited as an AOI-definition "
+                        f"sensitivity comparator against its canonical successor, but "
+                        f"'{successor_id}' (its registry superseded_by target) is not in "
+                        f"the requested selection {sorted(requested_set)}. Request both "
+                        "experiment IDs together."
+                    )
+                successor_record = get_experiment(successor_id)  # raises ValueError if unknown
+                successor_status = validate_variant_record(successor_record, successor_id)
+                if successor_status != VARIANT_STATUS_CANONICAL:
+                    raise BurnedPatternAuditError(
+                        f"--allow-superseded-sensitivity: the successor of superseded "
+                        f"experiment '{experiment_id}' is '{successor_id}', whose "
+                        f"variant_status is '{successor_status}', not "
+                        f"'{VARIANT_STATUS_CANONICAL}'. A legacy variant may only be "
+                        "compared against a valid canonical successor."
+                    )
+                superseded_pairs.append((experiment_id, successor_id))
             path = canonical_step8a_path(experiment_id)
             if not path.is_file():
                 raise BurnedPatternAuditError(
@@ -349,22 +620,56 @@ def resolve_experiments(
                     "Step8A must be generated (read-only for this audit) before "
                     "burned-pattern-audit can run for this experiment."
                 )
-        return ExperimentResolution(requested_ids=requested, resolved_ids=requested, selection_mode="explicit", excluded={})
+        # (C) Never accept an unnecessary special permission silently.
+        if allow_superseded_sensitivity and not superseded_pairs:
+            raise BurnedPatternAuditError(
+                "--allow-superseded-sensitivity was requested but the selection "
+                f"{sorted(requested_set)} contains no superseded experiment. The "
+                "permission exists solely to pair a superseded legacy AOI variant with "
+                "its canonical successor; drop the flag for an ordinary canonical "
+                "selection."
+            )
+        return ExperimentResolution(
+            requested_ids=requested,
+            resolved_ids=requested,
+            selection_mode=(
+                SELECTION_MODE_EXPLICIT_SUPERSEDED_SENSITIVITY
+                if superseded_pairs else SELECTION_MODE_EXPLICIT
+            ),
+            excluded={},
+            allow_superseded_sensitivity=allow_superseded_sensitivity,
+            superseded_pairs=tuple(sorted(superseded_pairs)),
+        )
 
     enabled = list_experiments(include_disabled=False)
-    candidate_ids = tuple(sorted(exp_id for exp_id in enabled if exp_id != LEGACY_EXPERIMENT_ID))
+    candidate_ids = tuple(sorted(enabled))
     resolved: list[str] = []
     excluded: dict[str, str] = {}
     for experiment_id in candidate_ids:
+        record = enabled[experiment_id]
+        # Fail-closed variant validation: a record with a missing/unknown
+        # variant_status raises here rather than being assumed canonical.
+        status = validate_variant_record(record, experiment_id)
+        if status == VARIANT_STATUS_LEGACY_SUPERSEDED:
+            excluded[experiment_id] = f"superseded_by_{record['superseded_by']}"
+            continue
+        if record.get("role") in NON_COHORT_ROLES:
+            excluded[experiment_id] = str(record.get("role"))
+            continue
+        # Missing-input behaviour is UNCHANGED: discovery mode is expected to
+        # skip experiments that have not reached Step8A yet.
         path = canonical_step8a_path(experiment_id)
         if path.is_file():
             resolved.append(experiment_id)
         else:
             excluded[experiment_id] = f"missing_canonical_step8a_dataset:{path}"
+    # (D) Discovery is untouched by the sensitivity permission: reaching this
+    # branch with the flag set is impossible (rejected above), so the result
+    # always carries the default allow_superseded_sensitivity=False / no pairs.
     return ExperimentResolution(
         requested_ids=candidate_ids,
         resolved_ids=tuple(resolved),
-        selection_mode="all_enabled",
+        selection_mode=SELECTION_MODE_ALL_ENABLED,
         excluded=excluded,
     )
 
@@ -389,6 +694,13 @@ def validate_required_columns(columns: list[str] | pd.Index, experiment_id: str)
         raise BurnedPatternAuditError(
             f"'{experiment_id}': canonical Step8A dataset is missing '{BURNABLE_MASK_COLUMN}', "
             "required to compute the natural-vegetation sensitivity population."
+        )
+    if VALID_FOR_MODELING_COLUMN not in present:
+        raise BurnedPatternAuditError(
+            f"'{experiment_id}': canonical Step8A dataset is missing "
+            f"'{VALID_FOR_MODELING_COLUMN}', required to compute the "
+            f"'{POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED}' final-model-population "
+            "comparison. The column is reused verbatim and never recomputed here."
         )
 
 
@@ -539,7 +851,10 @@ def component_population_metrics(components: list[dict[str, Any]], burned_cell_c
             "largest_component_cells": 0,
             "largest_component_fraction": None,
             "second_largest_component_cells": 0,
+            "second_largest_component_fraction": None,
             "top3_component_fraction": None,
+            "component_share_hhi": None,
+            "effective_component_count": None,
             "component_size_min": None,
             "component_size_q25": None,
             "component_size_median": None,
@@ -556,6 +871,21 @@ def component_population_metrics(components: list[dict[str, Any]], burned_cell_c
     second_largest = int(sizes[1]) if component_count > 1 else 0
     top3 = int(sizes[:3].sum())
     quantiles = np.quantile(sizes, [0.25, 0.5, 0.75, 0.9, 0.95])
+    # Concentration of burned area across components, descriptive only -- no
+    # threshold and no concentration CLASS is defined anywhere in this module.
+    #   shares_i                 = component_size_i / burned_cell_count
+    #   component_share_hhi      = sum(shares_i ** 2)
+    #   effective_component_count = 1 / component_share_hhi
+    # A single component gives HHI 1.0 and an effective count of 1.0.
+    if burned_cell_count:
+        shares = sizes.astype(float) / float(burned_cell_count)
+        hhi = float(np.sum(shares ** 2))
+        effective_component_count = 1.0 / hhi if hhi > 0 else None
+        second_largest_fraction = second_largest / burned_cell_count
+    else:
+        hhi = None
+        effective_component_count = None
+        second_largest_fraction = None
     return {
         "total_burned_cells": int(burned_cell_count),
         "component_count": component_count,
@@ -564,7 +894,10 @@ def component_population_metrics(components: list[dict[str, Any]], burned_cell_c
         "largest_component_cells": largest,
         "largest_component_fraction": largest / burned_cell_count if burned_cell_count else None,
         "second_largest_component_cells": second_largest,
+        "second_largest_component_fraction": second_largest_fraction,
         "top3_component_fraction": top3 / burned_cell_count if burned_cell_count else None,
+        "component_share_hhi": hhi,
+        "effective_component_count": effective_component_count,
         "component_size_min": int(sizes.min()),
         "component_size_q25": float(quantiles[0]),
         "component_size_median": float(quantiles[1]),
@@ -690,6 +1023,7 @@ def scientific_configuration(resolved_experiment_ids: tuple[str, ...], input_has
         "connectivity": CONNECTIVITY_DEFINITION,
         "populations": POPULATION_DEFINITIONS,
         "burnable_mask_column": BURNABLE_MASK_COLUMN,
+        "valid_for_modeling_column": VALID_FOR_MODELING_COLUMN,
         "landcover_mapping_source": LANDCOVER_MAPPING_SOURCE,
         "cell_area_km2_source": CELL_AREA_KM2_SOURCE,
         "approximate_cell_area_km2": APPROXIMATE_CELL_AREA_KM2,
@@ -735,6 +1069,15 @@ def _analyze_population(
         mask = base_mask
     elif population_name == POPULATION_BURNABLE_TSG_BURNED:
         mask = base_mask & (df[BURNABLE_MASK_COLUMN] == True)  # noqa: E712
+    elif population_name == POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED:
+        # Additional final-model-population comparison ONLY: the extra
+        # valid_for_modeling restriction is applied here and nowhere else, so
+        # the primary and natural-vegetation populations are untouched.
+        mask = (
+            base_mask
+            & (df[BURNABLE_MASK_COLUMN] == True)  # noqa: E712
+            & (df[VALID_FOR_MODELING_COLUMN] == True)  # noqa: E712
+        )
     else:
         raise BurnedPatternAuditError(f"Unknown population: {population_name}")
 
@@ -799,11 +1142,19 @@ def _analyze_population(
     }
 
 
-def analyze_experiment(experiment_id: str, dry_run: bool = False, force: bool = False) -> dict[str, Any]:
+def analyze_experiment(
+    experiment_id: str, dry_run: bool = False, force: bool = False,
+    layout: Optional[AuditLayout] = None,
+) -> dict[str, Any]:
     """Run (or dry-run-plan) the burned-pattern audit for a single resolved
-    experiment_id. Step8A is read-only throughout."""
+    experiment_id. Step8A is read-only throughout.
+
+    `layout=None` keeps the legacy flat default, so existing callers are
+    unaffected.
+    """
+    layout = layout or default_layout()
     input_path = canonical_step8a_path(experiment_id)
-    output_dir = EXPERIMENTS_OUTPUT_ROOT / experiment_id
+    output_dir = layout.experiments / experiment_id
     planned_paths = {
         "burned_pattern_summary_json": str(output_dir / "burned_pattern_summary.json"),
         "component_summary_csv": str(output_dir / "component_summary.csv"),
@@ -954,8 +1305,12 @@ def _population_markdown(pop: dict[str, Any], heading: str) -> str:
         f"({m['singleton_component_fraction']})",
         f"- Largest component: {m['largest_component_cells']} cells "
         f"(fraction {m['largest_component_fraction']})",
-        f"- Second-largest component: {m['second_largest_component_cells']} cells",
+        f"- Second-largest component: {m['second_largest_component_cells']} cells "
+        f"(fraction {m['second_largest_component_fraction']})",
         f"- Top-3 components combined fraction: {m['top3_component_fraction']}",
+        f"- Component-share HHI (sum of squared component shares): "
+        f"{m['component_share_hhi']}",
+        f"- Effective component count (1 / HHI): {m['effective_component_count']}",
         f"- Component size (cells): min={m['component_size_min']}, "
         f"q25={m['component_size_q25']}, median={m['component_size_median']}, "
         f"mean={m['component_size_mean']}, q75={m['component_size_q75']}, "
@@ -1021,9 +1376,15 @@ def render_experiment_markdown(experiment_id: str, populations: dict[str, Any], 
         "## Primary population: all_valid_burned",
         "",
         _population_markdown(populations[POPULATION_ALL_VALID_BURNED], "all_valid_burned"),
-        "## Sensitivity analysis: burnable_tree_shrub_grass_burned",
+        f"## Sensitivity analysis: {POPULATION_BURNABLE_TSG_BURNED}",
         "",
-        _population_markdown(populations[POPULATION_BURNABLE_TSG_BURNED], "burnable_tree_shrub_grass_burned"),
+        _population_markdown(populations[POPULATION_BURNABLE_TSG_BURNED], POPULATION_BURNABLE_TSG_BURNED),
+        f"## Final-model-population comparison: {POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED}",
+        "",
+        _population_markdown(
+            populations[POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED],
+            POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED,
+        ),
         "## Limitations",
         "",
     ]
@@ -1046,7 +1407,11 @@ def comparison_row(experiment_id: str, population_name: str, pop: dict[str, Any]
         "singleton_component_count": m["singleton_component_count"],
         "largest_component_cells": m["largest_component_cells"],
         "largest_component_fraction": m["largest_component_fraction"],
+        "second_largest_component_cells": m["second_largest_component_cells"],
+        "second_largest_component_fraction": m["second_largest_component_fraction"],
         "top3_component_fraction": m["top3_component_fraction"],
+        "component_share_hhi": m["component_share_hhi"],
+        "effective_component_count": m["effective_component_count"],
         "component_size_median": m["component_size_median"],
         "component_size_q90": m["component_size_q90"],
         "component_size_q95": m["component_size_q95"],
@@ -1065,6 +1430,25 @@ def comparison_row(experiment_id: str, population_name: str, pop: dict[str, Any]
     }
 
 
+def superseded_sensitivity_record(resolution: ExperimentResolution) -> dict[str, Any]:
+    """Serialisable record of the legacy-variant sensitivity permission, so
+    every manifest/result states both that the permission was used and that
+    the legacy experiment was NOT restored to the canonical cohort."""
+    return {
+        "allow_superseded_sensitivity": resolution.allow_superseded_sensitivity,
+        "superseded_pairs": [
+            {
+                "superseded_experiment_id": superseded_id,
+                "canonical_successor_experiment_id": successor_id,
+            }
+            for superseded_id, successor_id in resolution.superseded_pairs
+        ],
+        "superseded_sensitivity_note": (
+            SUPERSEDED_SENSITIVITY_NOTE if resolution.superseded_pairs else None
+        ),
+    }
+
+
 def render_comparison_markdown(
     resolution: ExperimentResolution,
     results: dict[str, dict[str, Any]],
@@ -1077,9 +1461,23 @@ def render_comparison_markdown(
         f"created_at: {manifest['created_at']}  ",
         f"selection_mode: {resolution.selection_mode}  ",
         f"requested_experiment_ids: {list(resolution.requested_ids)}  ",
-        f"resolved_experiment_ids: {sorted(resolution.resolved_ids)}",
+        f"resolved_experiment_ids: {sorted(resolution.resolved_ids)}  ",
+        f"allow_superseded_sensitivity: {resolution.allow_superseded_sensitivity}  ",
+        f"superseded_pairs: {[list(pair) for pair in resolution.superseded_pairs]}",
         "",
     ]
+    if resolution.superseded_pairs:
+        parts.append("**Legacy AOI-definition sensitivity comparison**")
+        parts.append("")
+        for superseded_id, successor_id in resolution.superseded_pairs:
+            parts.append(
+                f"- `{superseded_id}` is included ONLY as a superseded legacy "
+                f"AOI-definition sensitivity comparator against its canonical "
+                f"successor `{successor_id}`."
+            )
+        parts.append("")
+        parts.append(SUPERSEDED_SENSITIVITY_NOTE)
+        parts.append("")
     if resolution.excluded:
         parts.append("**Excluded from resolution:**")
         for exp_id, reason in sorted(resolution.excluded.items()):
@@ -1101,8 +1499,12 @@ def render_comparison_markdown(
         else:
             parts.append("No canonical burned-landcover gate found for this experiment; no pre-label exclusion applied.")
         parts.append("")
-        parts.append(_population_markdown(populations[POPULATION_ALL_VALID_BURNED], "all_valid_burned (primary)"))
-        parts.append(_population_markdown(populations[POPULATION_BURNABLE_TSG_BURNED], "burnable_tree_shrub_grass_burned (sensitivity)"))
+        parts.append(_population_markdown(populations[POPULATION_ALL_VALID_BURNED], f"{POPULATION_ALL_VALID_BURNED} (primary)"))
+        parts.append(_population_markdown(populations[POPULATION_BURNABLE_TSG_BURNED], f"{POPULATION_BURNABLE_TSG_BURNED} (sensitivity)"))
+        parts.append(_population_markdown(
+            populations[POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED],
+            f"{POPULATION_BURNABLE_TSG_VALID_MODEL_BURNED} (final-model population)",
+        ))
     parts.append("## Limitations")
     parts.append("")
     parts += [f"- {line}" for line in SCIENTIFIC_LIMITATIONS]
@@ -1110,14 +1512,19 @@ def render_comparison_markdown(
     return "\n".join(parts)
 
 
-def run_comparison(resolution: ExperimentResolution, dry_run: bool, force: bool) -> dict[str, Any]:
+def run_comparison(
+    resolution: ExperimentResolution, dry_run: bool, force: bool,
+    layout: Optional[AuditLayout] = None,
+) -> dict[str, Any]:
+    layout = layout or default_layout()
+    comparison_dir = layout.comparison
     planned_paths = {
-        "multi_aoi_burned_pattern_comparison_json": str(COMPARISON_OUTPUT_DIR / "multi_aoi_burned_pattern_comparison.json"),
-        "multi_aoi_burned_pattern_comparison_csv": str(COMPARISON_OUTPUT_DIR / "multi_aoi_burned_pattern_comparison.csv"),
-        "component_size_distribution_long_csv": str(COMPARISON_OUTPUT_DIR / "component_size_distribution_long.csv"),
-        "landcover_mix_long_csv": str(COMPARISON_OUTPUT_DIR / "landcover_mix_long.csv"),
-        "multi_aoi_burned_pattern_comparison_md": str(COMPARISON_OUTPUT_DIR / "multi_aoi_burned_pattern_comparison.md"),
-        "manifest_json": str(COMPARISON_OUTPUT_DIR / "manifest.json"),
+        "multi_aoi_burned_pattern_comparison_json": str(comparison_dir / "multi_aoi_burned_pattern_comparison.json"),
+        "multi_aoi_burned_pattern_comparison_csv": str(comparison_dir / "multi_aoi_burned_pattern_comparison.csv"),
+        "component_size_distribution_long_csv": str(comparison_dir / "component_size_distribution_long.csv"),
+        "landcover_mix_long_csv": str(comparison_dir / "landcover_mix_long.csv"),
+        "multi_aoi_burned_pattern_comparison_md": str(comparison_dir / "multi_aoi_burned_pattern_comparison.md"),
+        "manifest_json": str(comparison_dir / "manifest.json"),
     }
 
     if dry_run:
@@ -1133,6 +1540,7 @@ def run_comparison(resolution: ExperimentResolution, dry_run: bool, force: bool)
             "resolved_experiment_ids": sorted(resolution.resolved_ids),
             "selection_mode": resolution.selection_mode,
             "excluded": resolution.excluded,
+            **superseded_sensitivity_record(resolution),
             "scientific_configuration": scientific_configuration(resolution.resolved_ids, input_hashes),
             "planned_output_paths": planned_paths,
         }
@@ -1141,13 +1549,13 @@ def run_comparison(resolution: ExperimentResolution, dry_run: bool, force: bool)
     input_hashes: dict[str, str] = {}
     pre_label_gates: dict[str, Any] = {}
     for experiment_id in resolution.resolved_ids:
-        result = analyze_experiment(experiment_id, dry_run=False, force=force)
+        result = analyze_experiment(experiment_id, dry_run=False, force=force, layout=layout)
         per_experiment_results[experiment_id] = result
         input_hashes[experiment_id] = result["manifest"]["input_sha256"][experiment_id]
         pre_label_gates[experiment_id] = result["manifest"]["pre_label_gate"]
 
     analysis_id = build_analysis_id(resolution.resolved_ids, input_hashes)
-    _guard_force(COMPARISON_OUTPUT_DIR, analysis_id, force, label="burned-pattern-audit[comparison]")
+    _guard_force(comparison_dir, analysis_id, force, label="burned-pattern-audit[comparison]")
 
     manifest = {
         "analysis_id": analysis_id,
@@ -1157,6 +1565,7 @@ def run_comparison(resolution: ExperimentResolution, dry_run: bool, force: bool)
         "resolved_experiment_ids": sorted(resolution.resolved_ids),
         "selection_mode": resolution.selection_mode,
         "excluded": resolution.excluded,
+        **superseded_sensitivity_record(resolution),
         "input_paths": {eid: str(canonical_step8a_path(eid)) for eid in resolution.resolved_ids},
         "input_sha256": input_hashes,
         "pre_label_gate": pre_label_gates,
@@ -1173,8 +1582,8 @@ def run_comparison(resolution: ExperimentResolution, dry_run: bool, force: bool)
     size_long_rows = [
         {"experiment_id": experiment_id, **{k: v for k, v in row.items() if k != "population"}, "population": row["population"]}
         for experiment_id in sorted(per_experiment_results)
-        for row in per_experiment_results[experiment_id]["populations"][POPULATION_ALL_VALID_BURNED]["component_rows"]
-        + per_experiment_results[experiment_id]["populations"][POPULATION_BURNABLE_TSG_BURNED]["component_rows"]
+        for population_name in POPULATIONS
+        for row in per_experiment_results[experiment_id]["populations"][population_name]["component_rows"]
     ]
     size_long_df = pd.DataFrame(size_long_rows)
 
@@ -1194,17 +1603,17 @@ def run_comparison(resolution: ExperimentResolution, dry_run: bool, force: bool)
         "limitations": list(SCIENTIFIC_LIMITATIONS),
     }
 
-    COMPARISON_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    (COMPARISON_OUTPUT_DIR / "multi_aoi_burned_pattern_comparison.json").write_text(
+    comparison_dir.mkdir(parents=True, exist_ok=True)
+    (comparison_dir / "multi_aoi_burned_pattern_comparison.json").write_text(
         json.dumps(comparison_json, indent=2, default=str)
     )
-    comparison_df.to_csv(COMPARISON_OUTPUT_DIR / "multi_aoi_burned_pattern_comparison.csv", index=False)
-    size_long_df.to_csv(COMPARISON_OUTPUT_DIR / "component_size_distribution_long.csv", index=False)
-    landcover_long_df.to_csv(COMPARISON_OUTPUT_DIR / "landcover_mix_long.csv", index=False)
-    (COMPARISON_OUTPUT_DIR / "multi_aoi_burned_pattern_comparison.md").write_text(
+    comparison_df.to_csv(comparison_dir / "multi_aoi_burned_pattern_comparison.csv", index=False)
+    size_long_df.to_csv(comparison_dir / "component_size_distribution_long.csv", index=False)
+    landcover_long_df.to_csv(comparison_dir / "landcover_mix_long.csv", index=False)
+    (comparison_dir / "multi_aoi_burned_pattern_comparison.md").write_text(
         render_comparison_markdown(resolution, per_experiment_results, manifest)
     )
-    (COMPARISON_OUTPUT_DIR / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+    (comparison_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
 
     return {
         "ran": True,
@@ -1212,7 +1621,9 @@ def run_comparison(resolution: ExperimentResolution, dry_run: bool, force: bool)
         "analysis_id": analysis_id,
         "requested_experiment_ids": list(resolution.requested_ids),
         "resolved_experiment_ids": sorted(resolution.resolved_ids),
-        "output_dir": str(COMPARISON_OUTPUT_DIR),
+        "selection_mode": resolution.selection_mode,
+        **superseded_sensitivity_record(resolution),
+        "output_dir": str(comparison_dir),
         "per_experiment_results": {eid: r["analysis_id"] for eid, r in per_experiment_results.items()},
     }
 
@@ -1222,17 +1633,40 @@ def run_analysis(
     all_enabled: bool = False,
     dry_run: bool = False,
     force: bool = False,
+    allow_superseded_sensitivity: bool = False,
+    output_root: Optional[Path] = None,
+    scope: Optional[str] = None,
 ) -> dict[str, Any]:
     """Top-level entry point: resolve experiments, then run (or dry-run)
-    per-experiment audits and the multi-experiment comparison in one pass."""
-    resolution = resolve_experiments(experiments=experiments, all_enabled=all_enabled)
+    per-experiment audits and the multi-experiment comparison in one pass.
+
+    `output_root` overrides the canonical root. `scope` names the namespace
+    under it; when left None it is DERIVED from the resolved selection, so two
+    different analysis scopes get two namespaces under the one canonical root
+    instead of two sibling roots beside it. Pass `scope=""` to opt back into
+    the legacy flat layout.
+
+    `allow_superseded_sensitivity` is forwarded to resolve_experiments() and
+    governs selection ONLY (see that docstring); `force` is unrelated and
+    cannot substitute for it -- resolution happens first and refuses a
+    superseded ID regardless of `force`."""
+    resolution = resolve_experiments(
+        experiments=experiments,
+        all_enabled=all_enabled,
+        allow_superseded_sensitivity=allow_superseded_sensitivity,
+    )
+    layout = resolve_layout(
+        output_root, scope_key(resolution) if scope is None else (scope or None),
+    )
 
     if dry_run:
         per_experiment_plans = {
-            experiment_id: analyze_experiment(experiment_id, dry_run=True, force=force)
+            experiment_id: analyze_experiment(
+                experiment_id, dry_run=True, force=force, layout=layout,
+            )
             for experiment_id in resolution.resolved_ids
         }
-        comparison_plan = run_comparison(resolution, dry_run=True, force=force)
+        comparison_plan = run_comparison(resolution, dry_run=True, force=force, layout=layout)
         return {
             "ran": False,
             "dry_run": True,
@@ -1240,11 +1674,12 @@ def run_analysis(
             "resolved_experiment_ids": sorted(resolution.resolved_ids),
             "selection_mode": resolution.selection_mode,
             "excluded": resolution.excluded,
+            **superseded_sensitivity_record(resolution),
             "per_experiment": per_experiment_plans,
             "comparison": comparison_plan,
         }
 
-    comparison_result = run_comparison(resolution, dry_run=False, force=force)
+    comparison_result = run_comparison(resolution, dry_run=False, force=force, layout=layout)
     return {
         "ran": True,
         "dry_run": False,
@@ -1252,5 +1687,6 @@ def run_analysis(
         "resolved_experiment_ids": sorted(resolution.resolved_ids),
         "selection_mode": resolution.selection_mode,
         "excluded": resolution.excluded,
+        **superseded_sensitivity_record(resolution),
         "comparison": comparison_result,
     }

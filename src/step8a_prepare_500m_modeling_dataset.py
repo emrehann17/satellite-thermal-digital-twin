@@ -1082,6 +1082,7 @@ def build_dataset(
     label_start: str = LABEL_START_DATE,
     label_end: str = LABEL_END_DATE,
     pre_label_excluded_cell_ids: frozenset[str] | None = None,
+    historical_excluded_cell_ids: frozenset[str] | None = None,
 ) -> dict:
     block_size = compute_block_size_pixels()
     log.info(
@@ -1162,17 +1163,28 @@ def build_dataset(
         record["lon"] = float(cx)
         record["lat"] = float(cy)
 
-        # --- Pre-label exclusion eligibility (Step6B gate manifest join) ---
-        # A cell the gate excluded (burned BEFORE label_start; see
-        # read_pre_label_exclusion_manifest()) is never eligible for the
-        # analysis universe, regardless of predictor validity. This does NOT
-        # touch record["burned"] below -- the raw label is preserved for
-        # audit; only eligibility/valid_for_modeling are affected.
+        # --- Analysis-universe eligibility (gate manifest joins) ---
+        # TWO INDEPENDENT exclusion axes, each read from its OWN canonical gate
+        # manifest and joined here without either short-circuiting the other:
+        #
+        #   pre_label_burn_excluded   burned BEFORE this experiment's
+        #                             label_start (read_pre_label_exclusion_manifest)
+        #   historical_burn_excluded  burned in an EARLIER event over the same
+        #                             AOI (src/historical_burn_exclusion.py
+        #                             read_historical_burn_exclusion_manifest)
+        #
+        # A cell may carry BOTH flags. Neither touches record["burned"] below
+        # -- the raw label is preserved for audit; only eligibility and
+        # valid_for_modeling are affected.
         pre_label_burn_excluded = bool(
             pre_label_excluded_cell_ids is not None and cell_id in pre_label_excluded_cell_ids
         )
-        analysis_eligible = not pre_label_burn_excluded
+        historical_burn_excluded = bool(
+            historical_excluded_cell_ids is not None and cell_id in historical_excluded_cell_ids
+        )
+        analysis_eligible = not pre_label_burn_excluded and not historical_burn_excluded
         record["pre_label_burn_excluded"] = pre_label_burn_excluded
+        record["historical_burn_excluded"] = historical_burn_excluded
         record["analysis_eligible"] = analysis_eligible
 
         invalid_reasons: list[str] = []
@@ -1414,15 +1426,20 @@ def build_dataset(
 
         predictor_valid = bool(predictors_ok and ndvi_ok and elev_ok and slope_ok and lc_ok)
 
-        # valid_for_modeling = analysis_eligible AND predictor_valid. A
-        # pre-label-excluded cell is NEVER valid_for_modeling, regardless of
+        # valid_for_modeling = analysis_eligible AND predictor_valid. A cell
+        # excluded on EITHER axis is NEVER valid_for_modeling, regardless of
         # predictor validity -- but its predictor QA reasons (above) are
-        # still preserved in invalid_reason; pre_label_burn_excluded is only
-        # PREPENDED as the primary reason, never replacing them.
+        # still preserved in invalid_reason; the exclusion reasons are only
+        # PREPENDED, never replacing them, and BOTH are preserved when both
+        # apply (order: pre-label, then historical, then predictor QA).
         valid_for_modeling = bool(analysis_eligible and predictor_valid)
         record["valid_for_modeling"] = valid_for_modeling
+        exclusion_reasons: list[str] = []
         if pre_label_burn_excluded:
-            invalid_reasons = ["pre_label_burn_excluded"] + invalid_reasons
+            exclusion_reasons.append("pre_label_burn_excluded")
+        if historical_burn_excluded:
+            exclusion_reasons.append("historical_burn_excluded")
+        invalid_reasons = exclusion_reasons + invalid_reasons
         record["invalid_reason"] = ";".join(invalid_reasons) if invalid_reasons else None
 
         if valid_for_modeling:
@@ -1442,21 +1459,80 @@ def build_dataset(
 
     df = pd.DataFrame(rows)
 
-    # --- Leakage-safety fail-fast: a pre-label-excluded cell must NEVER be
-    # valid_for_modeling. This already holds by construction (valid_for_modeling
-    # = analysis_eligible AND predictor_valid, and analysis_eligible = NOT
-    # pre_label_burn_excluded -- see the per-row computation above), but is
+    # --- Leakage-safety fail-fast: an excluded cell must NEVER be
+    # valid_for_modeling, on EITHER axis. This already holds by construction
+    # (valid_for_modeling = analysis_eligible AND predictor_valid, and
+    # analysis_eligible = NOT pre_label_burn_excluded AND NOT
+    # historical_burn_excluded -- see the per-row computation above), but is
     # asserted explicitly here so a future refactor of that formula can never
     # silently let an excluded cell back into the modeling population. ---
-    if len(df) and "pre_label_burn_excluded" in df.columns:
-        leaked = df[(df["pre_label_burn_excluded"] == True) & (df["valid_for_modeling"] == True)]  # noqa: E712
-        if len(leaked):
-            raise Step8AError(
-                "LEAKAGE-SAFETY ASSERTION FAILED: "
-                f"{len(leaked)} pre-label-excluded cell(s) are valid_for_modeling=True "
-                f"(cell_id(s): {leaked['cell_id'].tolist()[:20]}). A pre-label-excluded "
-                "cell must never be eligible for modeling."
+    if len(df):
+        for exclusion_column in ("pre_label_burn_excluded", "historical_burn_excluded"):
+            if exclusion_column not in df.columns:
+                continue
+            leaked = df[(df[exclusion_column] == True) & (df["valid_for_modeling"] == True)]  # noqa: E712
+            if len(leaked):
+                raise Step8AError(
+                    "LEAKAGE-SAFETY ASSERTION FAILED: "
+                    f"{len(leaked)} {exclusion_column} cell(s) are "
+                    f"valid_for_modeling=True (cell_id(s): "
+                    f"{leaked['cell_id'].tolist()[:20]}). An excluded cell must "
+                    "never be eligible for modeling."
+                )
+
+        # --- Union semantics assertion: analysis_eligible must be exactly the
+        # complement of the UNION of the two independent exclusion sets. ---
+        if {"pre_label_burn_excluded", "historical_burn_excluded",
+                "analysis_eligible"} <= set(df.columns):
+            pre_mask = df["pre_label_burn_excluded"] == True  # noqa: E712
+            hist_mask = df["historical_burn_excluded"] == True  # noqa: E712
+            union_excluded = int((pre_mask | hist_mask).sum())
+            overlap = int((pre_mask & hist_mask).sum())
+            expected_union = int(pre_mask.sum()) + int(hist_mask.sum()) - overlap
+            if union_excluded != expected_union:
+                raise Step8AError(
+                    "EXCLUSION UNION ASSERTION FAILED: "
+                    f"|pre u historical| = {union_excluded} != "
+                    f"{int(pre_mask.sum())} + {int(hist_mask.sum())} - {overlap} "
+                    f"= {expected_union}."
+                )
+            eligible = int((df["analysis_eligible"] == True).sum())  # noqa: E712
+            if eligible + union_excluded != len(df):
+                raise Step8AError(
+                    "ELIGIBILITY PARTITION ASSERTION FAILED: analysis_eligible "
+                    f"({eligible}) + union-excluded ({union_excluded}) != "
+                    f"total rows ({len(df)})."
+                )
+
+        # --- Manifest fidelity: the exclusion FLAGS in the dataframe must be
+        # exactly the manifest cell_id sets -- no extra, no missing. ---
+        for exclusion_column, manifest_ids in (
+            ("pre_label_burn_excluded", pre_label_excluded_cell_ids),
+            ("historical_burn_excluded", historical_excluded_cell_ids),
+        ):
+            if manifest_ids is None:
+                continue
+            flagged = set(
+                df.loc[df[exclusion_column] == True, "cell_id"].astype(str)  # noqa: E712
             )
+            grid_ids = set(df["cell_id"].astype(str))
+            # A manifest cell_id outside this grid means the manifest was
+            # produced against a DIFFERENT grid -- fail closed.
+            manifest_outside_grid = sorted(set(manifest_ids) - grid_ids)
+            if manifest_outside_grid:
+                raise Step8AError(
+                    f"{exclusion_column}: {len(manifest_outside_grid)} manifest "
+                    f"cell_id value(s) do not exist in this dataset's 500 m grid "
+                    f"(e.g. {manifest_outside_grid[:20]}). The manifest was "
+                    "built against a different grid/AOI."
+                )
+            if flagged != set(manifest_ids):
+                missing = sorted(set(manifest_ids) - flagged)
+                extra = sorted(flagged - set(manifest_ids))
+                raise Step8AError(
+                    f"{exclusion_column}: dataframe flags do not reproduce the "
+                    f"manifest exactly (missing={missing[:20]}, extra={extra[:20]})."
+                )
 
     # --- Pre-label eligibility breakdown (raw / eligible / final modeling) ---
     # pre_label_burn_excluded/analysis_eligible/valid_for_modeling are always
@@ -1472,12 +1548,23 @@ def build_dataset(
         final_burned_count = int((df.loc[final_mask, "burned"] == 1).sum())
         final_unburned_count = int((df.loc[final_mask, "burned"] == 0).sum())
         pre_label_burn_excluded_count = int((df["pre_label_burn_excluded"] == True).sum())  # noqa: E712
+        historical_burn_excluded_count = int((df["historical_burn_excluded"] == True).sum())  # noqa: E712
+        pre_label_historical_overlap_count = int(
+            ((df["pre_label_burn_excluded"] == True)  # noqa: E712
+             & (df["historical_burn_excluded"] == True)).sum()  # noqa: E712
+        )
+        total_unique_excluded_count = int(
+            ((df["pre_label_burn_excluded"] == True)  # noqa: E712
+             | (df["historical_burn_excluded"] == True)).sum()  # noqa: E712
+        )
         analysis_eligible_count = int(eligible_mask.sum())
         predictor_invalid_count_among_eligible = int(eligible_mask.sum() - final_mask.sum())
     else:
         eligible_burned_count = eligible_unburned_count = 0
         final_burned_count = final_unburned_count = 0
         pre_label_burn_excluded_count = analysis_eligible_count = 0
+        historical_burn_excluded_count = 0
+        pre_label_historical_overlap_count = total_unique_excluded_count = 0
         predictor_invalid_count_among_eligible = 0
 
     # 500 m diagnostic transform (reference transform scaled by block_size).
@@ -1520,6 +1607,10 @@ def build_dataset(
             # --- Pre-label exclusion eligibility (always present; all-zero /
             # eligible==total when exclude_pre_label_burns is not used) ---
             "pre_label_burn_excluded_count": pre_label_burn_excluded_count,
+            # --- Historical exclusion (second, independent axis) + union ---
+            "historical_burn_excluded_count": historical_burn_excluded_count,
+            "pre_label_historical_overlap_count": pre_label_historical_overlap_count,
+            "total_unique_excluded_count": total_unique_excluded_count,
             "analysis_eligible_count": analysis_eligible_count,
             "predictor_invalid_count_among_eligible": predictor_invalid_count_among_eligible,
             "raw_label_counts_before_eligibility": {
@@ -1843,6 +1934,9 @@ def write_stats(
     warnings_list: list[str],
     exclude_pre_label_burns: bool = False,
     pre_label_exclusion_manifest_path: str | None = None,
+    exclude_historical_burns: bool = False,
+    historical_exclusion_manifest_path: str | None = None,
+    historical_exclusion_config: dict | None = None,
     filename: str = STATS_FILENAME,
 ) -> Path:
     burnable_diag = result.get("burnable_landcover_diagnostics", {}) or {}
@@ -1946,6 +2040,27 @@ def write_stats(
                 "final_modeling_counts_after_predictor_validity"
             ),
             "manifest_path": pre_label_exclusion_manifest_path,
+        },
+        # --- Historical burn exclusion (SEPARATE, independent axis; opt-in
+        # per experiment). Uniform schema, all-zero when not used. ---
+        "exclude_historical_burns": bool(exclude_historical_burns),
+        "historical_burn_exclusion": {
+            "historical_burn_excluded_count": counters.get("historical_burn_excluded_count", 0),
+            "pre_label_historical_overlap_count": counters.get(
+                "pre_label_historical_overlap_count", 0
+            ),
+            "total_unique_excluded_count": counters.get(
+                "total_unique_excluded_count",
+                counters.get("pre_label_burn_excluded_count", 0),
+            ),
+            "union_rule": (
+                "analysis_eligible = NOT pre_label_burn_excluded AND NOT "
+                "historical_burn_excluded; total_unique_excluded_count = "
+                "pre_label_burn_excluded_count + historical_burn_excluded_count "
+                "- pre_label_historical_overlap_count"
+            ),
+            "manifest_path": historical_exclusion_manifest_path,
+            "config": historical_exclusion_config,
         },
     }
     path = output_dir / filename
@@ -2956,6 +3071,41 @@ def main(
             len(pre_label_excluded_cell_ids), manifest_path,
         )
 
+    # --- Historical burn exclusion (SEPARATE, independent axis; opt-in per
+    # experiment). Config-driven via ctx["exclude_historical_burns"] -- never
+    # hard-coded to a specific experiment_id. When enabled, the gate's
+    # canonical historical manifest is REQUIRED and provenance-checked through
+    # its OWN dedicated reader; the pre-label reader above keeps every one of
+    # its existing checks and is neither reused nor relaxed for this axis. ---
+    exclude_historical_burns = bool(ctx is not None and ctx.get("exclude_historical_burns", False))
+    historical_excluded_cell_ids = None
+    historical_exclusion_manifest_path: str | None = None
+    historical_exclusion_config = (
+        ctx.get("historical_burn_exclusion") if ctx is not None else None
+    )
+    if exclude_historical_burns:
+        from src.historical_burn_exclusion import (
+            HISTORICAL_BURN_EXCLUSION_MANIFEST_PARQUET,
+            HistoricalBurnExclusionError,
+            read_historical_burn_exclusion_manifest,
+        )
+
+        historical_manifest = (
+            ctx["gate_labels_dir"] / HISTORICAL_BURN_EXCLUSION_MANIFEST_PARQUET
+        )
+        historical_exclusion_manifest_path = str(historical_manifest)
+        try:
+            historical_excluded_cell_ids = read_historical_burn_exclusion_manifest(
+                historical_manifest, experiment_id=ctx["experiment_id"],
+            )
+        except HistoricalBurnExclusionError as exc:
+            raise Step8AError(str(exc)) from exc
+        log.info(
+            "Historical exclusion AKTIF [%s]: %d hucre (manifest: %s) analiz "
+            "evreninden dislanacak.", ctx["experiment_id"],
+            len(historical_excluded_cell_ids), historical_manifest,
+        )
+
     result = build_dataset(
         reference_path=reference_path,
         label_path=label_path,
@@ -2969,6 +3119,7 @@ def main(
         label_start=effective_label_start,
         label_end=effective_label_end,
         pre_label_excluded_cell_ids=pre_label_excluded_cell_ids,
+        historical_excluded_cell_ids=historical_excluded_cell_ids,
     )
     result["label_source_description"] = label_source_description
     result["label_raster_diagnostics"] = label_diag
@@ -3028,6 +3179,9 @@ def main(
         min_valid_fraction, burnable_threshold, result["warnings"],
         exclude_pre_label_burns=exclude_pre_label_burns,
         pre_label_exclusion_manifest_path=pre_label_exclusion_manifest_path,
+        exclude_historical_burns=exclude_historical_burns,
+        historical_exclusion_manifest_path=historical_exclusion_manifest_path,
+        historical_exclusion_config=historical_exclusion_config,
         filename=_staged_path(stats_path).name,
     )
     staged.append((stats_staged, stats_path))

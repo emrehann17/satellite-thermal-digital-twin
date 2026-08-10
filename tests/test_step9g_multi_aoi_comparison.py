@@ -113,7 +113,7 @@ def _redirect_project_root(tmp_path, monkeypatch):
 # 1. Arbitrary future experiment IDs accepted through the resolver
 # ---------------------------------------------------------------------------
 def test_resolve_experiments_accepts_arbitrary_future_ids():
-    with patch.object(build_mod, "get_experiment", return_value={"experiment_id": FAKE_FUTURE}):
+    with patch.object(build_mod, "get_experiment", return_value={"experiment_id": FAKE_FUTURE, "variant_status": "canonical"}):
         resolved = build_mod.resolve_experiments([FAKE_FUTURE, FAKE_A])
     assert resolved == (FAKE_FUTURE, FAKE_A)
 
@@ -139,7 +139,7 @@ def test_cli_dispatches_through_orchestrator():
 # ---------------------------------------------------------------------------
 def test_analysis_id_is_order_invariant(tmp_path):
     write_pair(tmp_path, FAKE_A, FAKE_B, default_rows(FAKE_A, FAKE_B))
-    with patch.object(build_mod, "get_experiment", return_value={}):
+    with patch.object(build_mod, "get_experiment", return_value={"variant_status": "canonical"}):
         result_1 = build_mod.build_comparison([FAKE_A, FAKE_B], dry_run=False)
         result_2 = build_mod.build_comparison([FAKE_B, FAKE_A], dry_run=False)
     assert result_1["manifest"]["analysis_id"] == result_2["manifest"]["analysis_id"]
@@ -151,7 +151,7 @@ def test_analysis_id_is_order_invariant(tmp_path):
 def test_duplicate_region_feature_results_deduplicated(tmp_path):
     write_pair(tmp_path, FAKE_A, FAKE_B, default_rows(FAKE_A, FAKE_B))
     write_pair(tmp_path, FAKE_A, FAKE_C, default_rows(FAKE_A, FAKE_C))
-    with patch.object(build_mod, "get_experiment", return_value={}):
+    with patch.object(build_mod, "get_experiment", return_value={"variant_status": "canonical"}):
         result = build_mod.build_comparison([FAKE_A, FAKE_B, FAKE_C], dry_run=False)
     long_rows = [r for r in result["long_rows"] if r["experiment_id"] == FAKE_A and r["feature"] == "ndvi_mean"]
     assert len(long_rows) == 1  # FAKE_A/ndvi_mean appears in 2 reports, deduped to 1 row
@@ -165,7 +165,7 @@ def test_conflicting_duplicate_auc_fails_clearly(tmp_path):
     write_pair(tmp_path, FAKE_A, FAKE_B, default_rows(FAKE_A, FAKE_B))
     conflicting = default_rows(FAKE_A, FAKE_C, overrides={"ndvi_mean": {"a_auc": 0.999}})
     write_pair(tmp_path, FAKE_A, FAKE_C, conflicting)
-    with patch.object(build_mod, "get_experiment", return_value={}):
+    with patch.object(build_mod, "get_experiment", return_value={"variant_status": "canonical"}):
         with pytest.raises(ConsistencyError, match="auc"):
             build_mod.build_comparison([FAKE_A, FAKE_B, FAKE_C], dry_run=False)
 
@@ -174,7 +174,7 @@ def test_conflicting_duplicate_ci_fails_clearly(tmp_path):
     write_pair(tmp_path, FAKE_A, FAKE_B, default_rows(FAKE_A, FAKE_B))
     conflicting = default_rows(FAKE_A, FAKE_C, overrides={"ndvi_mean": {"a_ci": (0.1, 0.2)}})
     write_pair(tmp_path, FAKE_A, FAKE_C, conflicting)
-    with patch.object(build_mod, "get_experiment", return_value={}):
+    with patch.object(build_mod, "get_experiment", return_value={"variant_status": "canonical"}):
         with pytest.raises(ConsistencyError, match="ci_low|ci_high"):
             build_mod.build_comparison([FAKE_A, FAKE_B, FAKE_C], dry_run=False)
 
@@ -213,7 +213,7 @@ def test_missing_pair_reports_recorded_not_fabricated(tmp_path):
     write_pair(tmp_path, FAKE_A, FAKE_B, default_rows(FAKE_A, FAKE_B))
     write_pair(tmp_path, FAKE_A, FAKE_C, default_rows(FAKE_A, FAKE_C))
     # No FAKE_B / FAKE_C report exists.
-    with patch.object(build_mod, "get_experiment", return_value={}):
+    with patch.object(build_mod, "get_experiment", return_value={"variant_status": "canonical"}):
         result = build_mod.build_comparison([FAKE_A, FAKE_B, FAKE_C], dry_run=False)
     assert result["missing_pairs"] == [f"{FAKE_B}__{FAKE_C}"]
     assert result["complete_pairwise_matrix"] is False
@@ -224,7 +224,7 @@ def test_missing_pair_reports_recorded_not_fabricated(tmp_path):
 def test_experiment_with_zero_reports_fails_clearly(tmp_path):
     write_pair(tmp_path, FAKE_A, FAKE_B, default_rows(FAKE_A, FAKE_B))
     # FAKE_C appears in no report at all.
-    with patch.object(build_mod, "get_experiment", return_value={}):
+    with patch.object(build_mod, "get_experiment", return_value={"variant_status": "canonical"}):
         with pytest.raises(build_mod.ComparisonError):
             build_mod.build_comparison([FAKE_A, FAKE_B, FAKE_C], dry_run=False)
 
@@ -236,7 +236,7 @@ def test_wide_output_contains_all_selected_regions(tmp_path):
     write_pair(tmp_path, FAKE_A, FAKE_B, default_rows(FAKE_A, FAKE_B))
     write_pair(tmp_path, FAKE_A, FAKE_C, default_rows(FAKE_A, FAKE_C))
     write_pair(tmp_path, FAKE_B, FAKE_C, default_rows(FAKE_B, FAKE_C))
-    with patch.object(build_mod, "get_experiment", return_value={}):
+    with patch.object(build_mod, "get_experiment", return_value={"variant_status": "canonical"}):
         result = build_mod.build_comparison([FAKE_A, FAKE_B, FAKE_C], dry_run=False)
     wide_row = result["wide_rows"][0]
     for eid in (FAKE_A, FAKE_B, FAKE_C):
@@ -253,7 +253,7 @@ def test_wide_output_contains_all_selected_regions(tmp_path):
 # ---------------------------------------------------------------------------
 def test_landcover_excluded_from_scalar_auc(tmp_path):
     write_pair(tmp_path, FAKE_A, FAKE_B, default_rows(FAKE_A, FAKE_B))
-    with patch.object(build_mod, "get_experiment", return_value={}):
+    with patch.object(build_mod, "get_experiment", return_value={"variant_status": "canonical"}):
         result = build_mod.build_comparison([FAKE_A, FAKE_B], dry_run=False)
     long_features = {r["feature"] for r in result["long_rows"]}
     assert "landcover_dominant" not in long_features
@@ -270,7 +270,7 @@ def test_step8a_step9_artifacts_not_touched(tmp_path):
         (tmp_path / d / "sentinel.txt").write_text("do not touch")
 
     write_pair(tmp_path, FAKE_A, FAKE_B, default_rows(FAKE_A, FAKE_B))
-    with patch.object(build_mod, "get_experiment", return_value={}):
+    with patch.object(build_mod, "get_experiment", return_value={"variant_status": "canonical"}):
         build_mod.run_comparison([FAKE_A, FAKE_B], dry_run=False)
 
     for d in sentinel_dirs:
@@ -282,7 +282,7 @@ def test_step8a_step9_artifacts_not_touched(tmp_path):
 # ---------------------------------------------------------------------------
 def test_dry_run_writes_no_files(tmp_path):
     write_pair(tmp_path, FAKE_A, FAKE_B, default_rows(FAKE_A, FAKE_B))
-    with patch.object(build_mod, "get_experiment", return_value={}):
+    with patch.object(build_mod, "get_experiment", return_value={"variant_status": "canonical"}):
         result = build_mod.run_comparison([FAKE_A, FAKE_B], dry_run=True)
     assert result["ran"] is False
     comparison_root = build_mod.comparison_output_root()
@@ -294,7 +294,7 @@ def test_dry_run_writes_no_files(tmp_path):
 # ---------------------------------------------------------------------------
 def test_full_run_writes_expected_outputs_and_force_guard(tmp_path):
     write_pair(tmp_path, FAKE_A, FAKE_B, default_rows(FAKE_A, FAKE_B))
-    with patch.object(build_mod, "get_experiment", return_value={}):
+    with patch.object(build_mod, "get_experiment", return_value={"variant_status": "canonical"}):
         first = build_mod.run_comparison([FAKE_A, FAKE_B], dry_run=False)
         output_dir = Path(first["output_dir"])
         for name in (
@@ -309,7 +309,7 @@ def test_full_run_writes_expected_outputs_and_force_guard(tmp_path):
 
     # Now change the underlying report -> different analysis_id -> must fail without --force.
     write_pair(tmp_path, FAKE_A, FAKE_B, default_rows(FAKE_A, FAKE_B, overrides={"ndvi_mean": {"a_auc": 0.71}}))
-    with patch.object(build_mod, "get_experiment", return_value={}):
+    with patch.object(build_mod, "get_experiment", return_value={"variant_status": "canonical"}):
         with pytest.raises(build_mod.ComparisonError):
             build_mod.run_comparison([FAKE_A, FAKE_B], dry_run=False, force=False)
         forced = build_mod.run_comparison([FAKE_A, FAKE_B], dry_run=False, force=True)
