@@ -306,7 +306,7 @@ been infeasible it would have been removed from the common set and named here.
 ### 6.3 Ceiling reproduction anchor
 
 The ceiling is not a newly invented quantity. Frozen artifacts already exist
-for two of the three targets at exactly this configuration (10-cell blocks,
+for all three targets at exactly this configuration (10-cell blocks,
 `strict` 5-fold, seed 42, population `burnable_tree_shrub_grass`,
 `random_forest`):
 
@@ -314,17 +314,18 @@ for two of the three targets at exactly this configuration (10-cell blocks,
 |---|---|---:|---:|
 | manavgat_2021 | `outputs/robustness/step8_large_block/manavgat_2021__bejis_2022/manavgat_2021/block_10_cells/step8b_large_block_metrics.json` | 0.747550 | 0.797430 |
 | bejis_2022 | `outputs/robustness/step8_large_block/manavgat_2021__bejis_2022/bejis_2022/block_10_cells/step8b_large_block_metrics.json` | 0.779370 | 0.824469 |
+| mugla_2021 | `outputs/experiments/mugla_2021/robustness/step8_big_blocks/block_10_cells/step8b_metrics.json` | 0.697986 | 0.777327 |
 
-The `validate` stage **must** reproduce these to within `1e-9` for
-`manavgat_2021` and `bejis_2022`. A mismatch means the fold construction or
-the model contract has drifted, and is a hard failure.
+The `validate` stage **must** reproduce all three to within `1e-9`. A mismatch
+means the fold construction or the model contract has drifted, and is a hard
+failure.
 
-`mugla_2021` has no frozen 10-cell counterpart — that robustness run covered
-only the `manavgat_2021__bejis_2022` pair. Its ceiling is computed fresh
-inside this namespace and carries no external reproduction anchor. This is
-recorded as a stated limitation, not repaired by running the robustness
-analysis for mugla (that would produce new production artifacts, which is out
-of scope).
+The anchors live in two frozen namespaces. The paired large-block robustness
+run covered only `manavgat_2021__bejis_2022`; `mugla_2021`'s 10-cell counterpart
+comes from its own per-experiment big-block robustness run, whose
+`block_manifest.json` binds `input_dataset_sha256` to the same canonical Step8A
+digest this analysis gates on. Both are read-only cross-checks: no robustness
+artifact is produced, refitted or re-bootstrapped here.
 
 ---
 
@@ -556,16 +557,18 @@ example). It is genuinely comparable for the ceiling.
 
 Resolution, frozen:
 
-- the ceiling **point estimates** for `manavgat_2021` and `bejis_2022` must
-  reproduce the frozen 10-cell values to `1e-9` (§6.3) — a hard validator
-  check;
+- the ceiling **point estimates** for all three targets must reproduce the
+  frozen 10-cell values to `1e-9` (§6.3) — a hard validator check;
 - the frozen ceiling bootstrap intervals are **copied into**
   `summary.json` under `external_ceiling_reference`, verbatim, labelled with
   their true source and their true name (`spatial_block_bootstrap_2_5` /
   `_97_5`) and explicitly marked as *not* a selection interval and *not*
   comparable to the raw endpoint;
-- `mugla_2021` has no such reference; its entry is `null` with reason
-  `no_frozen_block_10_artifact`;
+- `mugla_2021`'s reference is the equivalent bootstrap of its own big-block
+  robustness run
+  (`outputs/experiments/mugla_2021/robustness/step8_big_blocks/block_10_cells/bootstrap_summary.json`,
+  1000 replicates, seed 42, 10-cell blocks), copied in under the same labelling
+  rules;
 - **no new bootstrap is run anywhere in this analysis.**
 
 ### 9.4 No p-values

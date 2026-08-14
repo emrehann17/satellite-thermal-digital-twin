@@ -163,8 +163,14 @@ CANONICAL_STEP8A_SHA256: dict[str, str] = {
 }
 
 # Frozen 10-cell within-region ceiling references. The `validate` stage checks
-# the produced ceiling against these. mugla_2021 has no counterpart -- that
-# robustness run covered only the manavgat_2021__bejis_2022 pair.
+# the produced ceiling against these. They live in two frozen namespaces:
+# manavgat_2021 and bejis_2022 come from the paired large-block robustness run
+# (outputs/robustness/step8_large_block/manavgat_2021__bejis_2022/), which never
+# covered mugla_2021; mugla_2021 comes from its own big-block robustness run
+# (outputs/experiments/mugla_2021/robustness/step8_big_blocks/block_10_cells/).
+# Same 10-cell (~5 km) contract in both: burnable_tree_shrub_grass population,
+# strict StratifiedGroupKFold 5-fold seed 42, random_forest. No file below is
+# produced or rewritten by this analysis -- all are read-only cross-checks.
 FROZEN_CEILING_REFERENCE: dict[str, dict[str, Any]] = {
     "manavgat_2021": {
         "metrics_path": (
@@ -188,7 +194,20 @@ FROZEN_CEILING_REFERENCE: dict[str, dict[str, Any]] = {
         ),
         "roc_auc": {"baseline": 0.7793700238725079, "thermal": 0.8244685786179753},
     },
-    "mugla_2021": None,
+    # Different namespace and different file names than the pair above: this is
+    # the per-experiment big-block robustness run, whose block_manifest.json
+    # binds input_dataset_sha256 to CANONICAL_STEP8A_SHA256["mugla_2021"].
+    "mugla_2021": {
+        "metrics_path": (
+            "outputs/experiments/mugla_2021/robustness/step8_big_blocks/"
+            "block_10_cells/step8b_metrics.json"
+        ),
+        "bootstrap_path": (
+            "outputs/experiments/mugla_2021/robustness/step8_big_blocks/"
+            "block_10_cells/bootstrap_summary.json"
+        ),
+        "roc_auc": {"baseline": 0.6979859420145867, "thermal": 0.7773268638729566},
+    },
 }
 CEILING_REPRODUCTION_TOLERANCE = 1e-9
 
@@ -607,8 +626,10 @@ def external_ceiling_reference_inventory(
 ) -> dict[str, Any]:
     """Frozen 10-cell ceiling artifacts, where they exist.
 
-    These are READ-ONLY cross-checks living outside this namespace. mugla_2021
-    has none; that is a stated limitation, not an error.
+    These are READ-ONLY cross-checks living outside this namespace. All three
+    targets have one; they come from two frozen robustness namespaces (see
+    FROZEN_CEILING_REFERENCE). An experiment without a registered reference is
+    reported as unavailable, not as an error.
     """
     base = Path(output_root).parent if output_root is not None else PROJECT_ROOT
     inventory: dict[str, Any] = {}
@@ -2047,8 +2068,10 @@ LIMITATIONS: tuple[str, ...] = (
     "The reported interval is a selection interval over 10 repeats. It describes "
     "block-selection variability only, is not a confidence interval, and supports no "
     "claim about statistical support.",
-    "mugla_2021 has no frozen 10-cell ceiling artifact; its ceiling carries no external "
-    "reproduction anchor.",
+    "The frozen 10-cell ceiling anchors come from two separate robustness namespaces: "
+    "the paired large-block run for manavgat_2021 and bejis_2022, and the per-experiment "
+    "big-block run for mugla_2021. Both are read-only reproduction anchors under the same "
+    "10-cell contract; neither was produced or re-run by this analysis.",
     "At k=16 and k=32 some folds must include unburned-only adaptation blocks; the tier "
     "composition columns record where.",
     "evia_2021_extended is excluded by design; nothing here describes high-prevalence "

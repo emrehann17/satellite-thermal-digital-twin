@@ -53,7 +53,7 @@ DEGENERATE_DENOMINATOR_THRESHOLD = 1e-6                # == transfer_decompositi
 SELECTION_PCT_LOW, SELECTION_PCT_HIGH = 2.5, 97.5
 
 CANONICAL_STEP8A_SHA256 = {...}                        # the three frozen digests
-FROZEN_CEILING_REFERENCE = {...}                       # manavgat, bejis block_10 paths
+FROZEN_CEILING_REFERENCE = {...}                       # block_10 paths for all three targets
 CEILING_REPRODUCTION_TOLERANCE = 1e-9
 
 STAGES = ("plan", "fit", "summarize", "validate")

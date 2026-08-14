@@ -394,20 +394,24 @@ The frozen scientific configuration — the exact object hashed into
       "note": "Frozen 10-cell paired spatial-block bootstrap of the target-only ceiling. Reproduced here verbatim for context. It is NOT a selection interval and there is no comparable interval for the raw endpoint."
     },
     "bejis_2022": {"...": "..."},
-    "mugla_2021": {"available": false, "reason": "no_frozen_block_10_artifact"}
+    "mugla_2021": {
+      "source_path": "outputs/experiments/mugla_2021/robustness/step8_big_blocks/block_10_cells/bootstrap_summary.json",
+      "...": "same fields; 1000 replicates, seed 42, 10-cell blocks"
+    }
   },
   "ceiling_reproduction": {
     "manavgat_2021": {"family": {"baseline": {"expected": 0.7475502988238435, "observed": null, "abs_diff": null, "tolerance": 1e-9, "match": null},
                                  "thermal":  {"expected": 0.7974298472620660, "observed": null, "abs_diff": null, "tolerance": 1e-9, "match": null}}},
     "bejis_2022":    {"family": {"baseline": {"expected": 0.7793700238725079, "...": "..."},
                                  "thermal":  {"expected": 0.8244685786179753, "...": "..."}}},
-    "mugla_2021":    {"available": false, "reason": "no_frozen_block_10_artifact"}
+    "mugla_2021":    {"family": {"baseline": {"expected": 0.6979859420145867, "...": "..."},
+                                 "thermal":  {"expected": 0.7773268638729566, "...": "..."}}}
   },
   "limitations": [
     "Outer evaluation blocks are 10-cell (~5 km), not Step8B's canonical 2-cell blocks. Values are not directly comparable to 2-cell Step8B/Step9B/Step10 numbers.",
     "No bootstrap interval exists for the raw endpoint at this block scale; existing Step9C/Step10 replicates resample 2-cell blocks and are not comparable. No new bootstrap was designed.",
     "The reported interval is a selection interval over 10 repeats. It describes block-selection variability only, is not a confidence interval, and supports no significance claim.",
-    "mugla_2021 has no frozen 10-cell ceiling artifact; its ceiling carries no external reproduction anchor.",
+    "The frozen 10-cell ceiling anchors come from two separate robustness namespaces: the paired large-block run for manavgat_2021 and bejis_2022, and the per-experiment big-block run for mugla_2021. Both are read-only reproduction anchors under the same 10-cell contract; neither was produced or re-run by this analysis.",
     "At k=16 and k=32 some folds must include unburned-only adaptation blocks; the tier composition columns record where.",
     "evia_2021_extended is excluded by design; nothing here describes high-prevalence different-regime transfer."
   ],

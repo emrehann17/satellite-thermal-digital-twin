@@ -72,7 +72,7 @@ Two modes, following `scripts/validate_marginal_aoa_completion.py`:
 | FSR-32 | Ceiling is target-only | Every `ceiling` fit has `n_train_source_rows == 0`; its training blocks are exactly the target training pool of that fold |
 | FSR-33 | Few-shot uses the full source population | Every `few_shot` fit has `n_train_source_rows` equal to the full source population and `n_train_rows == n_train_source_rows + adaptation_row_count` |
 | FSR-34 | Canonical model contract unchanged | The recorded classifier class and hyperparameters equal `build_classifier("random_forest", 42).get_params(deep=False)` exactly; `tuning_performed == false`; `sample_weight_argument_used == false`; the pre-existing `class_weight="balanced"` is declared |
-| FSR-35 | Ceiling reproduces the frozen 10-cell values | `manavgat_2021` baseline 0.7475502988238435 / thermal 0.7974298472620660 and `bejis_2022` baseline 0.7793700238725079 / thermal 0.8244685786179753, each to `abs_diff <= 1e-9`. `mugla_2021` → `SKIPPED` with reason `no_frozen_block_10_artifact` |
+| FSR-35 | Ceiling reproduces the frozen 10-cell values | `manavgat_2021` baseline 0.7475502988238435 / thermal 0.7974298472620660, `bejis_2022` baseline 0.7793700238725079 / thermal 0.8244685786179753 and `mugla_2021` baseline 0.6979859420145867 / thermal 0.7773268638729566, each to `abs_diff <= 1e-9`. An experiment with no registered frozen anchor → `SKIPPED` with reason `no_frozen_block_10_artifact` |
 
 ## F. Metric and recovery contract
 
