@@ -90,8 +90,11 @@ def _as_bool_series(series: pd.Series) -> pd.Series:
 
 
 def _text_files(root: Path) -> list[Path]:
+    validation_report = (root / "validation_report.json").resolve()
     return [p for p in root.rglob("*")
-            if p.is_file() and p.suffix.lower() in {".md", ".json", ".csv"}]
+            if p.is_file()
+            and p.suffix.lower() in {".md", ".json", ".csv"}
+            and p.resolve() != validation_report]
 
 
 def _scan_forbidden_terms(root: Path) -> list[dict[str, Any]]:
